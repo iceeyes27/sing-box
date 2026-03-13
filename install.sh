@@ -20,7 +20,8 @@ PARAMS_FILE="${CONFIG_DIR}/.params"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 
-# Reality 伪装域名候选列表 (精简版，用于快速测速)
+# Reality 伪装域名候选列表 (多区域、多行业综合过滤版)
+# 包含科技巨头、跨国CDN、流媒体、游戏公司等，确保不同网络环境下都有连通率高的节点
 REALITY_SNI_LIST=(
     "www.microsoft.com"
     "www.apple.com"
@@ -32,6 +33,30 @@ REALITY_SNI_LIST=(
     "www.cisco.com"
     "www.ibm.com"
     "www.oracle.com"
+    "www.sony.com"
+    "www.nintendo.com"
+    "www.ea.com"
+    "www.playstation.com"
+    "www.xbox.com"
+    "www.blizzard.com"
+    "www.epicgames.com"
+    "www.steampowered.com"
+    "www.nvidia.com"
+    "www.amd.com"
+    "www.hp.com"
+    "www.dell.com"
+    "www.lenovo.com"
+    "www.asus.com"
+    "www.acer.com"
+    "www.disney.com"
+    "www.netflix.com"
+    "www.twitch.tv"
+    "www.coca-cola.com"
+    "www.pepsi.com"
+    "www.toyota.com"
+    "www.honda.com"
+    "www.mercedes-benz.com"
+    "www.bmw.com"
 )
 
 # ─── 颜色 ─────────────────────────────────────────────────────
@@ -296,27 +321,41 @@ select_reality_sni() {
         info "当前已设定伪装域名: $REALITY_SNI，跳过测速"
         return
     fi
-    info "正在从 ${#REALITY_SNI_LIST[@]} 个候选位中测试最优伪装域名 (预计 10 秒内完成)..."
-    local best_sni="" best_time=9999
-
+    info "正在并发测试 ${#REALITY_SNI_LIST[@]} 个候选伪装域名 (预计 1-2 秒完成)..."
+    
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    
+    # 采用后台并发执行，极大缩短等待时间
     for sni in "${REALITY_SNI_LIST[@]}"; do
-        local time_ms
-        time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 1 "https://${sni}" 2>/dev/null || echo "9999")
-        # 转换为毫秒整数
-        local ms
-        ms=$(echo "$time_ms" | awk '{printf "%d", $1 * 1000}')
-        if [[ $ms -lt $best_time && $ms -gt 0 ]]; then
-            best_time=$ms
-            best_sni=$sni
-        fi
+        (
+            local time_ms
+            time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 "https://${sni}" 2>/dev/null || echo "9999")
+            local ms
+            ms=$(awk -v t="$time_ms" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo "9999")
+            if [[ "$ms" -gt 0 && "$ms" -lt 9999 ]]; then
+                echo "$ms $sni" >> "${tmp_dir}/results.txt"
+            fi
+        ) &
     done
+    wait
+    
+    local best_sni="" best_time=9999
+    if [[ -f "${tmp_dir}/results.txt" ]]; then
+        local best
+        best=$(sort -n "${tmp_dir}/results.txt" | head -1)
+        best_time=$(echo "$best" | awk '{print $1}')
+        best_sni=$(echo "$best" | awk '{print $2}')
+    fi
+    
+    rm -rf "$tmp_dir"
 
     if [[ -n "$best_sni" ]]; then
         REALITY_SNI="$best_sni"
         success "优选伪装域名: ${REALITY_SNI} (延迟: ${best_time}ms)"
     else
         REALITY_SNI="${REALITY_SNI_LIST[0]}"
-        warn "测速失败，使用默认伪装域名: ${REALITY_SNI}"
+        warn "所有域名测速均失败，使用默认伪装域名: ${REALITY_SNI}"
     fi
 }
 
