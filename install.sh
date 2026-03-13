@@ -20,7 +20,7 @@ PARAMS_FILE="${CONFIG_DIR}/.params"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 
-# Reality 伪装域名候选列表 (Top 30+ 常见 SNI)
+# Reality 伪装域名候选列表 (精简版，用于快速测速)
 REALITY_SNI_LIST=(
     "www.microsoft.com"
     "www.apple.com"
@@ -29,40 +29,9 @@ REALITY_SNI_LIST=(
     "www.ubuntu.com"
     "www.samsung.com"
     "www.intel.com"
-    "www.nvidia.com"
-    "www.amd.com"
     "www.cisco.com"
-    "www.oracle.com"
     "www.ibm.com"
-    "www.hp.com"
-    "www.dell.com"
-    "www.lenovo.com"
-    "www.asus.com"
-    "www.acer.com"
-    "www.sony.com"
-    "www.nintendo.com"
-    "www.playstation.com"
-    "www.xbox.com"
-    "www.ea.com"
-    "www.ubisoft.com"
-    "www.blizzard.com"
-    "www.epicgames.com"
-    "www.steampowered.com"
-    "www.twitch.tv"
-    "www.netflix.com"
-    "www.disney.com"
-    "www.nike.com"
-    "www.adidas.com"
-    "www.coca-cola.com"
-    "www.pepsi.com"
-    "www.toyota.com"
-    "www.honda.com"
-    "www.ford.com"
-    "www.chevrolet.com"
-    "www.bmw.com"
-    "www.mercedes-benz.com"
-    "www.audi.com"
-    "www.porsche.com"
+    "www.oracle.com"
 )
 
 # ─── 颜色 ─────────────────────────────────────────────────────
@@ -327,12 +296,12 @@ select_reality_sni() {
         info "当前已设定伪装域名: $REALITY_SNI，跳过测速"
         return
     fi
-    info "正在从 30+ 候选位中测试最优伪装域名 (可能需要十几秒)..."
+    info "正在从 ${#REALITY_SNI_LIST[@]} 个候选位中测试最优伪装域名 (预计 10 秒内完成)..."
     local best_sni="" best_time=9999
 
     for sni in "${REALITY_SNI_LIST[@]}"; do
         local time_ms
-        time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 "https://${sni}" 2>/dev/null || echo "9999")
+        time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 1 "https://${sni}" 2>/dev/null || echo "9999")
         # 转换为毫秒整数
         local ms
         ms=$(echo "$time_ms" | awk '{printf "%d", $1 * 1000}')
