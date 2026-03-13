@@ -603,6 +603,28 @@ do_logs() {
     press_enter
 }
 
+# ─── 开机自启设置 ──────────────────────────────────────────────
+do_boot_manage() {
+    echo ""
+    echo -e "  1) 开启 sing-box & argo-tunnel 开机自启"
+    echo -e "  2) 关闭 sing-box & argo-tunnel 开机自启"
+    echo -e "  0) 返回"
+    read -rp "  请选择: " choice
+    case "$choice" in
+        1)
+            systemctl enable sing-box 2>/dev/null
+            systemctl enable argo-tunnel 2>/dev/null
+            success "已开启开机自启"
+            ;;
+        2)
+            systemctl disable sing-box 2>/dev/null
+            systemctl disable argo-tunnel 2>/dev/null
+            success "已关闭开机自启"
+            ;;
+    esac
+    press_enter
+}
+
 # ─── 更新 sing-box ───────────────────────────────────────────
 do_upgrade() {
     echo ""
@@ -631,7 +653,17 @@ do_upgrade() {
             local script_url="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
             if curl -fsSL "$script_url" -o /usr/local/bin/sbm; then
                 chmod +x /usr/local/bin/sbm
-                success "脚本已更新，请重新运行: sbm"
+                success "脚本已更新"
+                info "正在重启服务以获取最新 Argo 节点链接..."
+                systemctl restart sing-box 2>/dev/null
+                systemctl restart argo-tunnel 2>/dev/null
+                sleep 5
+                if load_params; then
+                    fetch_argo_domain 2>/dev/null || true
+                    save_params
+                    generate_and_show_links
+                fi
+                success "服务已重启，请使用新链接或继续管理"
             else
                 warn "更新失败，请检查网络或手动更新"
             fi
@@ -709,9 +741,10 @@ show_menu() {
     echo -e "  ${BOLD} 6)${NC} 重启服务"
     echo -e "  ${BOLD} 7)${NC} 查看运行状态"
     echo -e "  ${BOLD} 8)${NC} 查看日志"
+    echo -e "  ${BOLD} 9)${NC} 开机自启设置"
     separator
-    echo -e "  ${BOLD} 9)${NC} 更新 (sing-box/cloudflared/脚本)"
-    echo -e "  ${BOLD}10)${NC} 卸载"
+    echo -e "  ${BOLD}10)${NC} 更新 (sing-box/cloudflared/脚本)"
+    echo -e "  ${BOLD}11)${NC} 卸载"
     echo -e "  ${BOLD} 0)${NC} 退出"
     echo ""
 }
@@ -722,7 +755,7 @@ main_menu() {
     while true; do
         show_banner
         show_menu
-        read -rp "  请选择 [0-10]: " choice
+        read -rp "  请选择 [0-11]: " choice
         case "$choice" in
             1)  do_install ;;
             2)  do_modify_config ;;
@@ -732,8 +765,9 @@ main_menu() {
             6)  do_restart ;;
             7)  do_status ;;
             8)  do_logs ;;
-            9)  do_upgrade ;;
-            10) do_uninstall ;;
+            9)  do_boot_manage ;;
+            10) do_upgrade ;;
+            11) do_uninstall ;;
             0)  echo -e "\n  ${CYAN}Bye!${NC}\n"; exit 0 ;;
             *)  warn "无效选项" ; sleep 0.5 ;;
         esac

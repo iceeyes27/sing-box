@@ -40,8 +40,9 @@ sbm
  6) 重启服务
  7) 查看运行状态
  8) 查看日志
- 9) 更新 (sing-box/cloudflared/脚本)
-10) 卸载
+ 9) 开机自启设置
+10) 更新 (sing-box/cloudflared/脚本)
+11) 卸载
  0) 退出
 ```
 
