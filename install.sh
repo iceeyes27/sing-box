@@ -7,7 +7,7 @@
 # ════════════════════════════════════════════════════════════════
 #
 #  在线安装:
-#    bash <(curl -fsSL https://raw.githubusercontent.com/OWNER/sing-box/main/install.sh)
+#    bash <(curl -fsSL https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh)
 #
 
 set -euo pipefail

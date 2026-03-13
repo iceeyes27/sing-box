@@ -14,7 +14,7 @@
 ## 📦 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/OWNER/sing-box/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh)
 ```
 
 > 需要 root 权限，支持 Ubuntu / Debian / CentOS / RHEL / Fedora
