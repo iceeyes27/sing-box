@@ -7,7 +7,7 @@
 # ════════════════════════════════════════════════════════════════
 #
 #  在线安装:
-#    bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh?v=$RANDOM")
+#    bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh")
 #
 
 set -euo pipefail
@@ -749,7 +749,7 @@ detect_os
 
 # 安装脚本副本到系统路径（方便后续直接调用 sing-box-manager）
 if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sing-box-manager" ]]; then
-    curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh?v=$RANDOM" -o /usr/local/bin/sing-box-manager 2>/dev/null || true
+    curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sing-box-manager 2>/dev/null || true
     chmod +x /usr/local/bin/sing-box-manager 2>/dev/null || true
 fi
 
