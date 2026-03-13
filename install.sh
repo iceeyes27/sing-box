@@ -629,9 +629,9 @@ do_upgrade() {
         3)
             info "更新管理脚本..."
             local script_url="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
-            if curl -fsSL "$script_url" -o /usr/local/bin/sing-box-manager; then
-                chmod +x /usr/local/bin/sing-box-manager
-                success "脚本已更新，请重新运行: sing-box-manager"
+            if curl -fsSL "$script_url" -o /usr/local/bin/sbm; then
+                chmod +x /usr/local/bin/sbm
+                success "脚本已更新，请重新运行: sbm"
             else
                 warn "更新失败，请检查网络或手动更新"
             fi
@@ -661,7 +661,7 @@ do_uninstall() {
     fi
 
     rm -f /usr/local/bin/cloudflared
-    rm -f /usr/local/bin/sing-box-manager
+    rm -f /usr/local/bin/sbm
     rm -rf "$CONFIG_DIR"
 
     success "卸载完成"
@@ -747,10 +747,10 @@ main_menu() {
 check_root
 detect_os
 
-# 安装脚本副本到系统路径（方便后续直接调用 sing-box-manager）
-if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sing-box-manager" ]]; then
-    curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sing-box-manager 2>/dev/null || true
-    chmod +x /usr/local/bin/sing-box-manager 2>/dev/null || true
+# 安装脚本副本到系统路径（方便后续直接调用 sbm）
+if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sbm" ]]; then
+    curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sbm 2>/dev/null || true
+    chmod +x /usr/local/bin/sbm 2>/dev/null || true
 fi
 
 # 命令行快捷参数

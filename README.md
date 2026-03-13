@@ -24,10 +24,10 @@ bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/ins
 安装后可随时运行管理面板：
 
 ```bash
-sing-box-manager
+sbm
 ```
 
-```
+```text
 ╔══════════════════════════════════════════════╗
 ║     sing-box 管理面板  v2.0.0              ║
 ╚══════════════════════════════════════════════╝
@@ -48,17 +48,17 @@ sing-box-manager
 ## ⌨️ 命令行快捷操作
 
 ```bash
-sing-box-manager install    # 直接安装
-sing-box-manager links      # 查看链接
-sing-box-manager restart    # 重启服务
-sing-box-manager status     # 查看状态
-sing-box-manager uninstall  # 卸载
+sbm install    # 直接安装
+sbm links      # 查看链接
+sbm restart    # 重启服务
+sbm status     # 查看状态
+sbm uninstall  # 卸载
 ```
 
 ## 🔗 节点类型
 
 | 节点 | 协议 | 传输 | 安全 | 特点 |
-|------|------|------|------|------|
+| :--- | :--- | :--- | :--- | :--- |
 | 直连 | VLESS + Vision | TCP | Reality | 低延迟，抗探测，自动优选最低延迟 SNI |
 | CDN  | VLESS | WebSocket | TLS (CF) | 抗 IP 封锁，经 Cloudflare 隧道转发 |
 
