@@ -29,7 +29,7 @@ sbm
 
 ```text
 ╔══════════════════════════════════════════════╗
-║     sing-box 管理面板  v2.0.0              ║
+║     sing-box 管理面板  v2.1.0              ║
 ╚══════════════════════════════════════════════╝
 
  1) 安装 / 重新安装
@@ -60,8 +60,8 @@ sbm uninstall  # 卸载
 
 | 节点 | 协议 | 传输 | 安全 | 特点 |
 | :--- | :--- | :--- | :--- | :--- |
-| 直连 | VLESS + Vision | TCP | Reality | 低延迟，抗探测，自动优选最低延迟 SNI |
-| CDN  | VLESS | WebSocket | TLS (CF) | 抗 IP 封锁，经 Cloudflare 隧道转发 |
+| 直连 | VLESS + Vision | TCP       | Reality  | 低延迟，抗探测，自动优选最低延迟 SNI |
+| CDN  | VLESS          | WebSocket | TLS (CF) | 抗 IP 封锁，经 Cloudflare 隧道转发   |
 
 ## 📄 License
 
