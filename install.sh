@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -653,7 +653,11 @@ do_upgrade() {
             local script_url="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
             if curl -fsSL "$script_url" -o /usr/local/bin/sbm; then
                 chmod +x /usr/local/bin/sbm
-                success "脚本已更新"
+                # 兼容老用户的习惯，创建一个软链接
+                ln -sf /usr/local/bin/sbm /usr/local/bin/sing-box-manager
+                # 刷新当前 shell 的 hash 表，防止旧命令缓存失效
+                hash -r 2>/dev/null || true
+                success "脚本已更新至最新版本"
                 info "正在重启服务以获取最新 Argo 节点链接..."
                 systemctl restart sing-box 2>/dev/null
                 systemctl restart argo-tunnel 2>/dev/null
@@ -663,7 +667,7 @@ do_upgrade() {
                     save_params
                     generate_and_show_links
                 fi
-                success "服务已重启，请使用新链接或继续管理"
+                success "服务已重启，后续您可以直接输入 sbm 来呼出管理面板"
             else
                 warn "更新失败，请检查网络或手动更新"
             fi
@@ -785,9 +789,17 @@ detect_os
 if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sbm" ]]; then
     curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sbm 2>/dev/null || true
     chmod +x /usr/local/bin/sbm 2>/dev/null || true
+    # 为在线初次安装的用户顺便清一下 hash 缓存
+    hash -r 2>/dev/null || true
 fi
 
 # 命令行快捷参数
+# 若用户使用了旧命令名通过兼容链接启动，提示其换用新命令
+if [[ "$(basename "$0")" == "sing-box-manager" ]]; then
+    warn "sing-box-manager 命令已更名，推荐后续直接输入: sbm"
+    sleep 1
+fi
+
 case "${1:-}" in
     install)     do_install ;;
     links)       load_params && generate_and_show_links || warn "未安装" ;;
