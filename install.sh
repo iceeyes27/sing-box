@@ -7,7 +7,7 @@
 # ════════════════════════════════════════════════════════════════
 #
 #  在线安装:
-#    bash <(curl -fsSL https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh)
+#    bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh?v=$RANDOM")
 #
 
 set -euo pipefail
@@ -20,24 +20,49 @@ PARAMS_FILE="${CONFIG_DIR}/.params"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 
-# Cloudflare 优选 IP 候选列表 (Anycast)
-CF_IPS=(
-    "104.16.0.1"
-    "104.17.0.1"
-    "104.18.0.1"
-    "104.19.0.1"
-    "104.20.0.1"
-    "172.64.0.1"
-    "172.65.0.1"
-    "172.66.0.1"
-    "172.67.0.1"
-    "162.159.0.1"
-    "162.159.1.1"
-    "162.159.36.1"
-    "141.101.114.1"
-    "141.101.115.1"
-    "198.41.192.1"
-    "198.41.200.1"
+# Reality 伪装域名候选列表 (Top 30+ 常见 SNI)
+REALITY_SNI_LIST=(
+    "www.microsoft.com"
+    "www.apple.com"
+    "www.amazon.com"
+    "www.cloudflare.com"
+    "www.ubuntu.com"
+    "www.samsung.com"
+    "www.intel.com"
+    "www.nvidia.com"
+    "www.amd.com"
+    "www.cisco.com"
+    "www.oracle.com"
+    "www.ibm.com"
+    "www.hp.com"
+    "www.dell.com"
+    "www.lenovo.com"
+    "www.asus.com"
+    "www.acer.com"
+    "www.sony.com"
+    "www.nintendo.com"
+    "www.playstation.com"
+    "www.xbox.com"
+    "www.ea.com"
+    "www.ubisoft.com"
+    "www.blizzard.com"
+    "www.epicgames.com"
+    "www.steampowered.com"
+    "www.twitch.tv"
+    "www.netflix.com"
+    "www.disney.com"
+    "www.nike.com"
+    "www.adidas.com"
+    "www.coca-cola.com"
+    "www.pepsi.com"
+    "www.toyota.com"
+    "www.honda.com"
+    "www.ford.com"
+    "www.chevrolet.com"
+    "www.bmw.com"
+    "www.mercedes-benz.com"
+    "www.audi.com"
+    "www.porsche.com"
 )
 
 # ─── 颜色 ─────────────────────────────────────────────────────
@@ -111,7 +136,6 @@ WS_PORT="${WS_PORT}"
 WS_PATH="${WS_PATH}"
 NODE_NAME="${NODE_NAME}"
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"
-CF_OPTIMIZED_IP="${CF_OPTIMIZED_IP:-}"
 EOF
     chmod 600 "$PARAMS_FILE"
 }
@@ -173,12 +197,11 @@ generate_params() {
     PUBLIC_KEY=$(echo "$keypair" | grep -i "PublicKey"  | awk '{print $NF}')
 
     REALITY_PORT=${REALITY_PORT:-443}
-    REALITY_SNI=${REALITY_SNI:-www.microsoft.com}
+    REALITY_SNI="" # 在配置时通过测速自动选择
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
     ARGO_DOMAIN=""
-    CF_OPTIMIZED_IP=""
 
     success "参数生成完成"
 }
@@ -298,29 +321,33 @@ fetch_argo_domain() {
     return 1
 }
 
-# ─── Cloudflare 优选 IP ──────────────────────────────────────
-select_cf_optimized_ip() {
-    info "正在测试 Cloudflare 优选 IP (可能需要 15-30 秒)..."
-    local best_ip="" best_time=9999
+# ─── Reality 优选 SNI ────────────────────────────────────────
+select_reality_sni() {
+    if [[ -n "${REALITY_SNI:-}" ]]; then
+        info "当前已设定伪装域名: $REALITY_SNI，跳过测速"
+        return
+    fi
+    info "正在从 30+ 候选位中测试最优伪装域名 (可能需要十几秒)..."
+    local best_sni="" best_time=9999
 
-    for ip in "${CF_IPS[@]}"; do
+    for sni in "${REALITY_SNI_LIST[@]}"; do
         local time_ms
-        time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 "http://${ip}" 2>/dev/null || echo "9999")
+        time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 "https://${sni}" 2>/dev/null || echo "9999")
         # 转换为毫秒整数
         local ms
         ms=$(echo "$time_ms" | awk '{printf "%d", $1 * 1000}')
         if [[ $ms -lt $best_time && $ms -gt 0 ]]; then
             best_time=$ms
-            best_ip=$ip
+            best_sni=$sni
         fi
     done
 
-    if [[ -n "$best_ip" ]]; then
-        CF_OPTIMIZED_IP="$best_ip"
-        success "优选 IP: ${CF_OPTIMIZED_IP} (延迟: ${best_time}ms)"
+    if [[ -n "$best_sni" ]]; then
+        REALITY_SNI="$best_sni"
+        success "优选伪装域名: ${REALITY_SNI} (延迟: ${best_time}ms)"
     else
-        CF_OPTIMIZED_IP="${CF_IPS[0]}"
-        warn "测速失败，使用默认 IP: ${CF_OPTIMIZED_IP}"
+        REALITY_SNI="${REALITY_SNI_LIST[0]}"
+        warn "测速失败，使用默认伪装域名: ${REALITY_SNI}"
     fi
 }
 
@@ -347,7 +374,6 @@ generate_and_show_links() {
     echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
     echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
     [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
-    [[ -n "${CF_OPTIMIZED_IP:-}" ]] && echo -e "  优选 IP:       ${BOLD}${CF_OPTIMIZED_IP}${NC}"
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
     echo ""
 
@@ -363,13 +389,12 @@ generate_and_show_links() {
     # ── VLESS + WS + Argo ──
     local ARGO_LINK=""
     if [[ -n "${ARGO_DOMAIN:-}" ]]; then
-        local argo_remark ws_path_enc connect_addr
+        local argo_remark ws_path_enc
         argo_remark=$(urlencode "${NODE_NAME}-Argo")
         ws_path_enc=$(urlencode "${WS_PATH}")
-        connect_addr="${CF_OPTIMIZED_IP:-${ARGO_DOMAIN}}"
-        ARGO_LINK="vless://${UUID}@${connect_addr}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${ws_path_enc}#${argo_remark}"
+        ARGO_LINK="vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${ws_path_enc}#${argo_remark}"
 
-        echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN 优选) ──${NC}"
+        echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
         echo -e "${YELLOW}${ARGO_LINK}${NC}"
         echo ""
     fi
@@ -382,7 +407,7 @@ generate_and_show_links() {
         echo "$REALITY_LINK"
         if [[ -n "$ARGO_LINK" ]]; then
             echo ""
-            echo "# VLESS + WS + Argo (CDN 优选)"
+            echo "# VLESS + WS + Argo (CDN)"
             echo "$ARGO_LINK"
         fi
     } > "$LINK_FILE"
@@ -412,12 +437,15 @@ do_install() {
     read -rp "  Reality 端口 [${REALITY_PORT}]: " input
     [[ -n "$input" ]] && REALITY_PORT="$input"
 
-    read -rp "  伪装域名 [${REALITY_SNI}]: " input
+    read -rp "  伪装域名 (留空自动测速优选): " input
     [[ -n "$input" ]] && REALITY_SNI="$input"
 
     read -rp "  节点名称 [${NODE_NAME}]: " input
     [[ -n "$input" ]] && NODE_NAME="$input"
     echo ""
+
+    # 自动优选伪装域名
+    select_reality_sni
 
     write_singbox_config
     write_argo_service
@@ -444,9 +472,6 @@ do_install() {
         warn "未获取到 Argo 域名，可稍后重试"
     fi
 
-    # 优选 IP
-    select_cf_optimized_ip
-
     # 保存参数
     save_params
 
@@ -472,7 +497,7 @@ do_modify_config() {
         echo -e "  3) 重新生成 UUID           ${DIM}(当前: ${UUID:0:8}...)${NC}"
         echo -e "  4) 重新生成 Reality 密钥对"
         echo -e "  5) 修改节点名称            ${DIM}(当前: ${NODE_NAME})${NC}"
-        echo -e "  6) 刷新 Cloudflare 优选 IP ${DIM}(当前: ${CF_OPTIMIZED_IP:-未设置})${NC}"
+        echo -e "  6) 重新优选伪装域名"
         echo -e "  0) 返回主菜单"
         echo ""
         read -rp "  请选择 [0-6]: " choice
@@ -516,10 +541,9 @@ do_modify_config() {
                 fi
                 ;;
             6)
-                select_cf_optimized_ip
-                save_params
-                sleep 1
-                continue
+                REALITY_SNI=""
+                select_reality_sni
+                changed=true
                 ;;
             0) return ;;
             *) continue ;;
@@ -759,7 +783,7 @@ detect_os
 
 # 安装脚本副本到系统路径（方便后续直接调用 sing-box-manager）
 if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sing-box-manager" ]]; then
-    curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sing-box-manager 2>/dev/null || true
+    curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh?v=$RANDOM" -o /usr/local/bin/sing-box-manager 2>/dev/null || true
     chmod +x /usr/local/bin/sing-box-manager 2>/dev/null || true
 fi
 

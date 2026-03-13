@@ -7,14 +7,14 @@
 - 🚀 **一键安装** — 自动安装 sing-box + cloudflared，生成全部配置
 - 🔒 **VLESS + Reality** — 抗主动探测，高性能直连
 - ☁️ **VLESS + WS + Argo** — 经 Cloudflare CDN，抗 IP 封锁
-- ⚡ **Cloudflare 优选 IP** — 自动测速选出最快的 CF 节点
+- ⚡ **优选伪装域名** — 自动对 30+ 常见大厂域名测速，选出最低延迟 SNI
 - 📋 **v2ray 链接** — 直接输出可导入 v2rayN / v2rayNG 的分享链接
 - 🎛️ **交互式管理** — 修改配置、重启、升级、查看状态等
 
 ## 📦 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh)
+bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh?v=$RANDOM")
 ```
 
 > 需要 root 权限，支持 Ubuntu / Debian / CentOS / RHEL / Fedora
@@ -59,8 +59,8 @@ sing-box-manager uninstall  # 卸载
 
 | 节点 | 协议 | 传输 | 安全 | 特点 |
 |------|------|------|------|------|
-| 直连 | VLESS + Vision | TCP | Reality | 低延迟，抗探测 |
-| CDN  | VLESS | WebSocket | TLS (CF) | 抗 IP 封锁，优选 IP 加速 |
+| 直连 | VLESS + Vision | TCP | Reality | 低延迟，抗探测，自动优选最低延迟 SNI |
+| CDN  | VLESS | WebSocket | TLS (CF) | 抗 IP 封锁，经 Cloudflare 隧道转发 |
 
 ## 📄 License
 
