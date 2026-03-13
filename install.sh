@@ -628,15 +628,12 @@ do_upgrade() {
             ;;
         3)
             info "更新管理脚本..."
-            local script_url
-            # 尝试从 GitHub 获取最新脚本
-            script_url=$(grep -oP 'https://raw\.githubusercontent\.com/[^"]+/install\.sh' "$0" 2>/dev/null || echo "")
-            if [[ -n "$script_url" ]]; then
-                curl -fsSL "$script_url" -o /usr/local/bin/sing-box-manager
+            local script_url="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
+            if curl -fsSL "$script_url" -o /usr/local/bin/sing-box-manager; then
                 chmod +x /usr/local/bin/sing-box-manager
                 success "脚本已更新，请重新运行: sing-box-manager"
             else
-                warn "未找到更新地址，请手动更新"
+                warn "更新失败，请检查网络或手动更新"
             fi
             ;;
     esac
