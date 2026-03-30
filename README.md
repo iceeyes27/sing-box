@@ -1,6 +1,8 @@
 # sing-box 一键部署
 
-在 Linux VPS 上一键部署 **VLESS + Reality** / **VLESS + WS + Cloudflare Argo** / **Hysteria2** 代理节点，自带交互式管理面板。
+- **协议支持**：VLESS + Reality (TCP), VLESS + WS + Argo (CDN), Hysteria2 (UDP/QUIC)
+- **端口独占/聚合**：支持 Hysteria2 与 Reality 共用 443 端口 (TCP+UDP)，提高伪装度
+- **智能交互**：一键安装、多协议分享链接生成、内置管理面板。
 
 ## ✨ 特性
 

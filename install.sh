@@ -536,14 +536,25 @@ do_install() {
     install_cloudflared
     generate_params
 
-    # 询问自定义参数
+    # 询问端口模式
     echo ""
-    echo -e "${CYAN}${BOLD}── 自定义配置 (直接回车使用默认值) ──${NC}"
-    read -rp "  Reality 端口 [${REALITY_PORT}]: " input
-    [[ -n "$input" ]] && REALITY_PORT="$input"
+    echo -e "${CYAN}${BOLD}── 端口配置 ──${NC}"
+    echo -e "  1) 极简单端口模式 (Reality & Hysteria2 共用 443/TCP+UDP) ${GREEN}推荐${NC}"
+    echo -e "  2) 自定义分端口模式 (手动设置各个协议端口)"
+    read -rp "  请选择 [1]: " port_mode
+    port_mode=${port_mode:-1}
 
-    read -rp "  Hysteria2 端口 [${HY2_PORT}]: " input
-    [[ -n "$input" ]] && HY2_PORT="$input"
+    if [[ "$port_mode" == "1" ]]; then
+        REALITY_PORT=443
+        HY2_PORT=443
+        info "已选择单端口模式: 443"
+    else
+        read -rp "  Reality 端口 [${REALITY_PORT}]: " input
+        [[ -n "$input" ]] && REALITY_PORT="$input"
+
+        read -rp "  Hysteria2 端口 [${HY2_PORT}]: " input
+        [[ -n "$input" ]] && HY2_PORT="$input"
+    fi
 
     read -rp "  伪装域名 (留空自动测速优选): " input
     [[ -n "$input" ]] && REALITY_SNI="$input"
@@ -614,9 +625,10 @@ do_modify_config() {
         echo -e "  6) 重新优选伪装域名"
         echo -e "  7) 修改 Hysteria2 端口     ${DIM}(当前: ${HY2_PORT})${NC}"
         echo -e "  8) 重新生成 Hysteria2 密码"
+        echo -e "  9) 切换为单端口模式 (443)  ${GREEN}推荐${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        read -rp "  请选择 [0-8]: " choice
+        read -rp "  请选择 [0-9]: " choice
 
         local changed=false
         case "$choice" in
@@ -672,6 +684,13 @@ do_modify_config() {
             8)
                 HY2_PASSWORD=$(openssl rand -base64 16)
                 info "新 Hysteria2 密码: $HY2_PASSWORD"
+                changed=true
+                ;;
+            9)
+                REALITY_PORT=443
+                HY2_PORT=443
+                open_firewall 443
+                info "已切换为单端口模式: 443"
                 changed=true
                 ;;
             0) return ;;
