@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.4.0"
+SCRIPT_VERSION="2.5.0"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -132,6 +132,7 @@ WS_PORT="${WS_PORT}"
 WS_PATH="${WS_PATH}"
 NODE_NAME="${NODE_NAME}"
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"
+ARGO_TOKEN="${ARGO_TOKEN:-}"
 HY2_PORT="${HY2_PORT}"
 HY2_PASSWORD="${HY2_PASSWORD}"
 HY2_SNI="${HY2_SNI}"
@@ -142,7 +143,7 @@ EOF
 load_params() {
     if [[ -f "$PARAMS_FILE" ]]; then
         source "$PARAMS_FILE"
-        # 兼容旧版本: 逐字段补齐 Hysteria2 参数，绝不覆盖已有值
+        # 兼容旧版本: 逐字段补齐 Hysteria2 / Argo Token 参数，绝不覆盖已有值
         local need_save=false
         if [[ -z "${HY2_PORT:-}" ]]; then
             HY2_PORT=${HY2_DEFAULT_PORT}
@@ -155,6 +156,10 @@ load_params() {
         if [[ -z "${HY2_SNI:-}" ]]; then
             HY2_SNI="${HY2_DEFAULT_SNI}"
             need_save=true
+        fi
+        if [[ -z "${ARGO_TOKEN:-}" ]]; then
+            ARGO_TOKEN=""
+            # need_save 不标记，除非有实质性变化
         fi
         [[ "$need_save" == "true" ]] && save_params
         return 0
@@ -216,6 +221,7 @@ generate_params() {
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
     ARGO_DOMAIN=""
+    ARGO_TOKEN=""
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
@@ -380,6 +386,15 @@ SINGBOX_EOF
 
 # ─── Argo 服务 ───────────────────────────────────────────────
 write_argo_service() {
+    local exec_cmd
+    if [[ -n "${ARGO_TOKEN:-}" ]]; then
+        info "使用 Token 模式启动 Argo 隧道 (固定域名)"
+        exec_cmd="/usr/local/bin/cloudflared tunnel --no-autoupdate run --token ${ARGO_TOKEN}"
+    else
+        info "使用临时隧道模式 (trycloudflare.com)"
+        exec_cmd="/usr/local/bin/cloudflared tunnel --url http://127.0.0.1:${WS_PORT} --no-autoupdate --protocol http2"
+    fi
+
     cat > "$ARGO_SERVICE" << EOF
 [Unit]
 Description=Cloudflare Argo Tunnel
@@ -390,7 +405,7 @@ Wants=sing-box.service
 Type=simple
 User=nobody
 Group=nogroup
-ExecStart=/usr/local/bin/cloudflared tunnel --url http://127.0.0.1:${WS_PORT} --no-autoupdate --protocol http2
+ExecStart=${exec_cmd}
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -404,6 +419,16 @@ EOF
 
 # ─── 获取 Argo 域名 ──────────────────────────────────────────
 fetch_argo_domain() {
+    if [[ -n "${ARGO_TOKEN:-}" ]]; then
+        # Token 模式下，如果用户没填域名，提醒一下
+        if [[ -z "${ARGO_DOMAIN:-}" ]]; then
+            warn "检测到 Token 模式但未配置自定义域名，分享链接将不包含 Argo 节点。"
+            return 1
+        fi
+        return 0
+    fi
+
+    # 临时域名模式获取逻辑
     local max=10 i=0
     ARGO_DOMAIN=""
     while [[ $i -lt $max ]]; do
@@ -483,7 +508,13 @@ generate_and_show_links() {
     echo -e "  Reality SNI:   ${BOLD}${REALITY_SNI}${NC}"
     echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
     echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
-    [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
+    if [[ -n "${ARGO_TOKEN:-}" ]]; then
+        echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC}"
+        echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN:-未配置}${NC}"
+    else
+        echo -e "  Argo 模式:     ${YELLOW}临时域名 (Quick)${NC}"
+        [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
+    fi
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
     echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
     echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
@@ -598,6 +629,24 @@ do_install() {
     # 生成 TLS 自签证书 (Hysteria2 需要)
     generate_tls_cert
 
+    # 询问 Argo 模式
+    echo ""
+    echo -e "${CYAN}${BOLD}── Argo 隧道配置 ──${NC}"
+    echo -e "  1) 临时域名模式 (无需自定义域名，域名随机且会变)"
+    echo -e "  2) 固定域名模式 (需提供 Cloudflare Tunnel Token) ${GREEN}推荐${NC}"
+    read -rp "  请选择 [1]: " argo_choice
+    argo_choice=${argo_choice:-1}
+    if [[ "$argo_choice" == "2" ]]; then
+        echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
+        echo -e "  并获取其对应的 Token (一长串字符)。"
+        read -rp "  请输入 Tunnel Token: " ARGO_TOKEN
+        read -rp "  请输入该隧道绑定的域名 (如 v2.example.com): " ARGO_DOMAIN
+        [[ -z "$ARGO_TOKEN" || -z "$ARGO_DOMAIN" ]] && warn "Token 或域名为空，将降级为临时域名模式" && ARGO_TOKEN="" && ARGO_DOMAIN=""
+    else
+        ARGO_TOKEN=""
+        ARGO_DOMAIN=""
+    fi
+
     write_singbox_config
     write_argo_service
 
@@ -655,9 +704,10 @@ do_modify_config() {
         echo -e "  7) 修改 Hysteria2 端口     ${DIM}(当前: ${HY2_PORT})${NC}"
         echo -e "  8) 重新生成 Hysteria2 密码"
         echo -e "  9) 切换为单端口模式 (443)  ${GREEN}推荐${NC}"
+        echo -e "  10) 修改 Argo 隧道 (Token/域名)"
         echo -e "  0) 返回主菜单"
         echo ""
-        read -rp "  请选择 [0-9]: " choice
+        read -rp "  请选择 [0-10]: " choice
 
         local changed=false
         case "$choice" in
@@ -720,6 +770,25 @@ do_modify_config() {
                 HY2_PORT=443
                 open_firewall 443
                 info "已切换为单端口模式: 443"
+                changed=true
+                ;;
+            10)
+                echo -e "\n  当前模式: $( [[ -n "$ARGO_TOKEN" ]] && echo "固定域名" || echo "临时域名" )"
+                echo -e "  1) 切换为/修改临时域名模式"
+                echo -e "  2) 切换为/修改固定域名 Token 模式"
+                read -rp "  请选择 [2]: " sub_choice
+                sub_choice=${sub_choice:-2}
+                if [[ "$sub_choice" == "2" ]]; then
+                    read -rp "  新 Tunnel Token [${ARGO_TOKEN:0:10}...]: " input
+                    [[ -n "$input" ]] && ARGO_TOKEN="$input"
+                    read -rp "  新自定义域名 [${ARGO_DOMAIN}]: " input
+                    [[ -n "$input" ]] && ARGO_DOMAIN="$input"
+                else
+                    ARGO_TOKEN=""
+                    ARGO_DOMAIN=""
+                fi
+                write_argo_service
+                systemctl restart argo-tunnel 2>/dev/null
                 changed=true
                 ;;
             0) return ;;
