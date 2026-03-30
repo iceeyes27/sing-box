@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.3.0"
+SCRIPT_VERSION="2.4.0"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -142,13 +142,21 @@ EOF
 load_params() {
     if [[ -f "$PARAMS_FILE" ]]; then
         source "$PARAMS_FILE"
-        # 兼容旧版本: 补齐 Hysteria2 参数
+        # 兼容旧版本: 逐字段补齐 Hysteria2 参数，绝不覆盖已有值
+        local need_save=false
         if [[ -z "${HY2_PORT:-}" ]]; then
             HY2_PORT=${HY2_DEFAULT_PORT}
-            HY2_PASSWORD=$(openssl rand -base64 16)
-            HY2_SNI="${HY2_DEFAULT_SNI}"
-            save_params
+            need_save=true
         fi
+        if [[ -z "${HY2_PASSWORD:-}" ]]; then
+            HY2_PASSWORD=$(openssl rand -base64 16)
+            need_save=true
+        fi
+        if [[ -z "${HY2_SNI:-}" ]]; then
+            HY2_SNI="${HY2_DEFAULT_SNI}"
+            need_save=true
+        fi
+        [[ "$need_save" == "true" ]] && save_params
         return 0
     fi
     return 1
@@ -258,6 +266,22 @@ open_firewall() {
 
 # ─── sing-box 配置生成 ───────────────────────────────────────
 write_singbox_config() {
+    # 关键变量校验: 防止空值写入配置导致 sing-box 崩溃
+    local missing=""
+    [[ -z "${UUID:-}" ]]        && missing+="UUID "
+    [[ -z "${REALITY_PORT:-}" ]] && missing+="REALITY_PORT "
+    [[ -z "${REALITY_SNI:-}" ]] && missing+="REALITY_SNI "
+    [[ -z "${PRIVATE_KEY:-}" ]] && missing+="PRIVATE_KEY "
+    [[ -z "${SHORT_ID:-}" ]]    && missing+="SHORT_ID "
+    [[ -z "${WS_PORT:-}" ]]     && missing+="WS_PORT "
+    [[ -z "${WS_PATH:-}" ]]     && missing+="WS_PATH "
+    [[ -z "${HY2_PORT:-}" ]]    && missing+="HY2_PORT "
+    [[ -z "${HY2_PASSWORD:-}" ]] && missing+="HY2_PASSWORD "
+    [[ -z "${HY2_SNI:-}" ]]     && missing+="HY2_SNI "
+    if [[ -n "$missing" ]]; then
+        error "配置生成失败: 以下关键变量为空: ${missing}"
+    fi
+
     cat > "$CONFIG_FILE" << SINGBOX_EOF
 {
     "log": {
@@ -344,10 +368,13 @@ SINGBOX_EOF
     chmod 600 "$CONFIG_FILE"
     chown root:root "$CONFIG_FILE"
 
-    if sing-box check -c "$CONFIG_FILE" 2>/dev/null; then
+    local check_output
+    if check_output=$(sing-box check -c "$CONFIG_FILE" 2>&1); then
         success "配置校验通过"
     else
-        error "配置校验失败"
+        warn "配置校验失败，详细信息:"
+        echo -e "${RED}${check_output}${NC}"
+        error "请检查上方错误并修复后重试"
     fi
 }
 
@@ -477,6 +504,7 @@ generate_and_show_links() {
         local argo_remark ws_path_enc
         argo_remark=$(urlencode "${NODE_NAME}-Argo")
         ws_path_enc=$(urlencode "${WS_PATH}")
+        # Argo 端口写死 443，不允许修改 (因为它是 Cloudflare CDN 的标准端口)
         ARGO_LINK="vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${ws_path_enc}#${argo_remark}"
 
         echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
@@ -702,14 +730,11 @@ do_modify_config() {
             # 确保 TLS 证书存在 (Hysteria2 需要)
             generate_tls_cert
             write_singbox_config
-            write_argo_service
+            # 注意: 不重写 argo service，不重启 argo，不刷新 argo 域名
             save_params
-            info "重启服务..."
+            info "重启 sing-box..."
             systemctl restart sing-box 2>/dev/null
-            systemctl restart argo-tunnel 2>/dev/null
-            sleep 5
-            fetch_argo_domain 2>/dev/null || true
-            save_params
+            sleep 2
             success "配置已更新并重启"
             generate_and_show_links
             press_enter
@@ -721,10 +746,10 @@ do_modify_config() {
 do_show_links() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
-    # 尝试刷新 Argo 域名
-    if systemctl is-active --quiet argo-tunnel 2>/dev/null; then
+    # 直接使用已保存的 Argo 域名，不重新获取
+    if [[ -z "${ARGO_DOMAIN:-}" ]] && systemctl is-active --quiet argo-tunnel 2>/dev/null; then
         fetch_argo_domain 2>/dev/null || true
-        save_params
+        [[ -n "${ARGO_DOMAIN:-}" ]] && save_params
     fi
 
     generate_and_show_links
@@ -835,29 +860,19 @@ do_upgrade() {
             local script_url="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
             if curl -fsSL "$script_url" -o /usr/local/bin/sbm; then
                 chmod +x /usr/local/bin/sbm
-                # 兼容老用户的习惯，创建一个软链接
                 ln -sf /usr/local/bin/sbm /usr/local/bin/sing-box-manager
-                # 刷新当前 shell 的 hash 表，防止旧命令缓存失效
                 hash -r 2>/dev/null || true
-                success "脚本已更新至最新版本 v${SCRIPT_VERSION}"
+                # 从新下载的脚本中提取版本号
+                local new_ver
+                new_ver=$(grep -m1 '^SCRIPT_VERSION=' /usr/local/bin/sbm | cut -d'"' -f2 2>/dev/null || echo "未知")
+                success "脚本已更新: v${SCRIPT_VERSION} → v${new_ver}"
+                echo ""
+                info "当前配置和服务未受影响，不会重写配置或重启服务。"
+                info "如需启用 Hysteria2 等新功能，请使用 [1) 重新安装] 或 [2) 修改配置]。"
+                # 仅刷新链接显示 (不重写配置、不重启)
                 if load_params; then
-                    # 检查是否需要升级配置 (旧版本无 Hysteria2)
-                    if [[ ! -f "${CONFIG_DIR}/server.crt" ]]; then
-                        info "检测到新版本特性 Hysteria2，正在自动配置..."
-                        generate_tls_cert
-                        open_firewall "$HY2_PORT"
-                        write_singbox_config
-                        write_argo_service
-                    fi
-                    info "正在重启服务..."
-                    systemctl restart sing-box 2>/dev/null
-                    systemctl restart argo-tunnel 2>/dev/null
-                    sleep 5
-                    fetch_argo_domain 2>/dev/null || true
-                    save_params
                     generate_and_show_links
                 fi
-                success "服务已重启，后续您可以直接输入 sbm 来呼出管理面板"
             else
                 warn "更新失败，请检查网络或手动更新"
             fi
