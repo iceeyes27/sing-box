@@ -1,13 +1,14 @@
 # sing-box 一键部署
 
-在 Linux VPS 上一键部署 **VLESS + Reality** 和 **VLESS + WS + Cloudflare Argo** 代理节点，自带交互式管理面板。
+在 Linux VPS 上一键部署 **VLESS + Reality** / **VLESS + WS + Cloudflare Argo** / **Hysteria2** 代理节点，自带交互式管理面板。
 
 ## ✨ 特性
 
 - 🚀 **一键安装** — 自动安装 sing-box + cloudflared，生成全部配置
 - 🔒 **VLESS + Reality** — 抗主动探测，高性能直连
 - ☁️ **VLESS + WS + Argo** — 经 Cloudflare CDN，抗 IP 封锁
-- ⚡ **优选伪装域名** — 自动对 30+ 常见大厂域名测速，选出最低延迟 SNI
+- ⚡ **Hysteria2** — 基于 QUIC/UDP 暴力加速，极致抗封锁
+- 🎯 **优选伪装域名** — 自动对 30+ 常见大厂域名测速，选出最低延迟 SNI
 - 📋 **v2ray 链接** — 直接输出可导入 v2rayN / v2rayNG 的分享链接
 - 🎛️ **交互式管理** — 修改配置、重启、升级、查看状态等
 
@@ -29,7 +30,7 @@ sbm
 
 ```text
 ╔══════════════════════════════════════════════╗
-║     sing-box 管理面板  v2.2.0              ║
+║     sing-box 管理面板  v2.3.0              ║
 ╚══════════════════════════════════════════════╝
 
  1) 安装 / 重新安装
@@ -62,6 +63,7 @@ sbm uninstall  # 卸载
 | :--- | :--- | :--- | :--- | :--- |
 | 直连 | VLESS + Vision | TCP       | Reality  | 低延迟，抗探测，自动优选最低延迟 SNI |
 | CDN  | VLESS          | WebSocket | TLS (CF) | 抗 IP 封锁，经 Cloudflare 隧道转发   |
+| 高速 | Hysteria2      | QUIC (UDP) | TLS (自签) | UDP 暴力加速，极致抗封锁，自动生成证书 |
 
 ## 📄 License
 

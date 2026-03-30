@@ -13,12 +13,14 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.2.0"
+SCRIPT_VERSION="2.3.0"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
+HY2_DEFAULT_PORT=8443
+HY2_DEFAULT_SNI="bing.com"
 
 # Reality 伪装域名候选列表 (多区域、多行业综合过滤版)
 # 包含科技巨头、跨国CDN、流媒体、游戏公司等，确保不同网络环境下都有连通率高的节点
@@ -130,6 +132,9 @@ WS_PORT="${WS_PORT}"
 WS_PATH="${WS_PATH}"
 NODE_NAME="${NODE_NAME}"
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"
+HY2_PORT="${HY2_PORT}"
+HY2_PASSWORD="${HY2_PASSWORD}"
+HY2_SNI="${HY2_SNI}"
 EOF
     chmod 600 "$PARAMS_FILE"
 }
@@ -137,6 +142,13 @@ EOF
 load_params() {
     if [[ -f "$PARAMS_FILE" ]]; then
         source "$PARAMS_FILE"
+        # 兼容旧版本: 补齐 Hysteria2 参数
+        if [[ -z "${HY2_PORT:-}" ]]; then
+            HY2_PORT=${HY2_DEFAULT_PORT}
+            HY2_PASSWORD=$(openssl rand -base64 16)
+            HY2_SNI="${HY2_DEFAULT_SNI}"
+            save_params
+        fi
         return 0
     fi
     return 1
@@ -197,7 +209,51 @@ generate_params() {
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
     ARGO_DOMAIN=""
 
+    # Hysteria2 参数
+    HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
+    HY2_PASSWORD=$(openssl rand -base64 16)
+    HY2_SNI="${HY2_DEFAULT_SNI}"
+
     success "参数生成完成"
+}
+
+# ─── TLS 证书生成 (Hysteria2) ────────────────────────────────
+generate_tls_cert() {
+    local key_file="${CONFIG_DIR}/server.key"
+    local cert_file="${CONFIG_DIR}/server.crt"
+
+    if [[ -f "$key_file" && -f "$cert_file" ]]; then
+        info "TLS 证书已存在，跳过生成"
+        return
+    fi
+
+    info "生成自签 TLS 证书 (Hysteria2)..."
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$key_file" -out "$cert_file" \
+        -days 3650 -nodes -subj "/CN=${HY2_SNI}" 2>/dev/null
+    chmod 600 "$key_file" "$cert_file"
+    success "TLS 自签证书已生成 (有效期 10 年)"
+}
+
+# ─── 防火墙放行 ──────────────────────────────────────────────
+open_firewall() {
+    local port=$1
+    info "放行端口 ${port} (TCP+UDP)..."
+    if command -v ufw &>/dev/null; then
+        ufw allow "${port}/udp" 2>/dev/null || true
+        ufw allow "${port}/tcp" 2>/dev/null || true
+    fi
+    if command -v firewall-cmd &>/dev/null; then
+        firewall-cmd --permanent --add-port="${port}/tcp" 2>/dev/null || true
+        firewall-cmd --permanent --add-port="${port}/udp" 2>/dev/null || true
+        firewall-cmd --reload 2>/dev/null || true
+    fi
+    if command -v iptables &>/dev/null; then
+        iptables -C INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || \
+            iptables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+            iptables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+    fi
 }
 
 # ─── sing-box 配置生成 ───────────────────────────────────────
@@ -250,6 +306,25 @@ write_singbox_config() {
             "transport": {
                 "type": "ws",
                 "path": "${WS_PATH}"
+            }
+        },
+        {
+            "type": "hysteria2",
+            "tag": "hysteria2-in",
+            "listen": "::",
+            "listen_port": ${HY2_PORT},
+            "up_mbps": 100,
+            "down_mbps": 100,
+            "users": [
+                {
+                    "password": "${HY2_PASSWORD}"
+                }
+            ],
+            "tls": {
+                "enabled": true,
+                "server_name": "${HY2_SNI}",
+                "key_path": "${CONFIG_DIR}/server.key",
+                "certificate_path": "${CONFIG_DIR}/server.crt"
             }
         }
     ],
@@ -383,6 +458,8 @@ generate_and_show_links() {
     echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
     [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
+    echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
+    echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
     echo ""
 
     # ── VLESS + Reality ──
@@ -407,6 +484,21 @@ generate_and_show_links() {
         echo ""
     fi
 
+    # ── Hysteria2 ──
+    local HY2_LINK=""
+    if [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]]; then
+        local hy2_remark
+        hy2_remark=$(urlencode "${NODE_NAME}-Hysteria2")
+        HY2_LINK="hysteria2://${HY2_PASSWORD}@${PUBLIC_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
+
+        echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
+        echo -e "${YELLOW}${HY2_LINK}${NC}"
+        echo ""
+    else
+        echo -e "${DIM}  Hysteria2: 未启用 (重新安装即可自动启用)${NC}"
+        echo ""
+    fi
+
     # ── 保存 ──
     {
         echo "# sing-box 分享链接 - $(date '+%Y-%m-%d %H:%M:%S')"
@@ -417,6 +509,11 @@ generate_and_show_links() {
             echo ""
             echo "# VLESS + WS + Argo (CDN)"
             echo "$ARGO_LINK"
+        fi
+        if [[ -n "$HY2_LINK" ]]; then
+            echo ""
+            echo "# Hysteria2 (QUIC/UDP 高速)"
+            echo "$HY2_LINK"
         fi
     } > "$LINK_FILE"
     chmod 600 "$LINK_FILE"
@@ -445,6 +542,9 @@ do_install() {
     read -rp "  Reality 端口 [${REALITY_PORT}]: " input
     [[ -n "$input" ]] && REALITY_PORT="$input"
 
+    read -rp "  Hysteria2 端口 [${HY2_PORT}]: " input
+    [[ -n "$input" ]] && HY2_PORT="$input"
+
     read -rp "  伪装域名 (留空自动测速优选): " input
     [[ -n "$input" ]] && REALITY_SNI="$input"
 
@@ -455,8 +555,14 @@ do_install() {
     # 自动优选伪装域名
     select_reality_sni
 
+    # 生成 TLS 自签证书 (Hysteria2 需要)
+    generate_tls_cert
+
     write_singbox_config
     write_argo_service
+
+    # 放行 Hysteria2 UDP 端口
+    open_firewall "$HY2_PORT"
 
     # 启动 sing-box
     info "启动 sing-box..."
@@ -506,9 +612,11 @@ do_modify_config() {
         echo -e "  4) 重新生成 Reality 密钥对"
         echo -e "  5) 修改节点名称            ${DIM}(当前: ${NODE_NAME})${NC}"
         echo -e "  6) 重新优选伪装域名"
+        echo -e "  7) 修改 Hysteria2 端口     ${DIM}(当前: ${HY2_PORT})${NC}"
+        echo -e "  8) 重新生成 Hysteria2 密码"
         echo -e "  0) 返回主菜单"
         echo ""
-        read -rp "  请选择 [0-6]: " choice
+        read -rp "  请选择 [0-8]: " choice
 
         local changed=false
         case "$choice" in
@@ -553,11 +661,26 @@ do_modify_config() {
                 select_reality_sni
                 changed=true
                 ;;
+            7)
+                read -rp "  新 Hysteria2 端口: " input
+                if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
+                    HY2_PORT="$input"
+                    open_firewall "$HY2_PORT"
+                    changed=true
+                fi
+                ;;
+            8)
+                HY2_PASSWORD=$(openssl rand -base64 16)
+                info "新 Hysteria2 密码: $HY2_PASSWORD"
+                changed=true
+                ;;
             0) return ;;
             *) continue ;;
         esac
 
         if [[ "$changed" == "true" ]]; then
+            # 确保 TLS 证书存在 (Hysteria2 需要)
+            generate_tls_cert
             write_singbox_config
             write_argo_service
             save_params
@@ -696,12 +819,20 @@ do_upgrade() {
                 ln -sf /usr/local/bin/sbm /usr/local/bin/sing-box-manager
                 # 刷新当前 shell 的 hash 表，防止旧命令缓存失效
                 hash -r 2>/dev/null || true
-                success "脚本已更新至最新版本"
-                info "正在重启服务以获取最新 Argo 节点链接..."
-                systemctl restart sing-box 2>/dev/null
-                systemctl restart argo-tunnel 2>/dev/null
-                sleep 5
+                success "脚本已更新至最新版本 v${SCRIPT_VERSION}"
                 if load_params; then
+                    # 检查是否需要升级配置 (旧版本无 Hysteria2)
+                    if [[ ! -f "${CONFIG_DIR}/server.crt" ]]; then
+                        info "检测到新版本特性 Hysteria2，正在自动配置..."
+                        generate_tls_cert
+                        open_firewall "$HY2_PORT"
+                        write_singbox_config
+                        write_argo_service
+                    fi
+                    info "正在重启服务..."
+                    systemctl restart sing-box 2>/dev/null
+                    systemctl restart argo-tunnel 2>/dev/null
+                    sleep 5
                     fetch_argo_domain 2>/dev/null || true
                     save_params
                     generate_and_show_links
