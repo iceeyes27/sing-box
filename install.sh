@@ -487,9 +487,10 @@ generate_and_show_links() {
     # ── Hysteria2 ──
     local HY2_LINK=""
     if [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]]; then
-        local hy2_remark
+        local hy2_remark hy2_pass_enc
         hy2_remark=$(urlencode "${NODE_NAME}-Hysteria2")
-        HY2_LINK="hysteria2://${HY2_PASSWORD}@${PUBLIC_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
+        hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
+        HY2_LINK="hysteria2://${hy2_pass_enc}@${PUBLIC_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
 
         echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
         echo -e "${YELLOW}${HY2_LINK}${NC}"
