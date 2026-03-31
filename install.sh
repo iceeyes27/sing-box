@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.5.2"
+SCRIPT_VERSION="2.5.3"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -59,6 +59,16 @@ REALITY_SNI_LIST=(
     "www.honda.com"
     "www.mercedes-benz.com"
     "www.bmw.com"
+)
+
+# ================== CF 优选域名列表 ==================
+CF_DOMAINS=(
+    "cf.090227.xyz"
+    "cf.877774.xyz"
+    "cf.130519.xyz"
+    "cf.008500.xyz"
+    "store.ubi.com"
+    "saas.sin.fan"
 )
 
 # ─── 颜色 ─────────────────────────────────────────────────────
@@ -486,6 +496,17 @@ select_reality_sni() {
     fi
 }
 
+# ================== CF 优选：随机选择可用域名 ==================
+select_random_cf_domain() {
+    local available=()
+    for domain in "${CF_DOMAINS[@]}"; do
+        if curl -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null; then
+            available+=("$domain")
+        fi
+    done
+    [ ${#available[@]} -gt 0 ] && echo "${available[$((RANDOM % ${#available[@]}))]}" || echo "${CF_DOMAINS[0]}"
+}
+
 # ─── URL 编码 ────────────────────────────────────────────────
 urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
@@ -534,11 +555,20 @@ generate_and_show_links() {
     if [[ -n "${ARGO_DOMAIN:-}" ]]; then
         local argo_remark
         argo_remark=$(urlencode "${NODE_NAME}-Argo")
+        
+        # 每次生成链接时测试 CF_DOMAINS 连通性并随机优选一个可用域名作为真实连接地址
+        echo -e "  ${DIM}测试 CF 优选域名可用性中...${NC}"
+        local BEST_CF_DOMAIN
+        BEST_CF_DOMAIN=$(select_random_cf_domain)
+        
         # Argo 端口写死 443，不允许修改 (因为它是 Cloudflare CDN 的标准端口)
         # 移除 path 的 urlencode (避免将 / 转义为 %2F 导致部分客户端 404)，增加 fp=chrome 提高指纹兼容性
-        ARGO_LINK="vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
+        # 使用优选域名(BEST_CF_DOMAIN)作为服务端地址，伪装域名(ARGO_DOMAIN)作为sni和host
+        ARGO_LINK="vless://${UUID}@${BEST_CF_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
 
         echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
+        echo -e "  伪装域名(SNI): ${BOLD}${ARGO_DOMAIN}${NC}"
+        echo -e "  优选域名(ADDR): ${BOLD}${BEST_CF_DOMAIN}${NC}"
         echo -e "${YELLOW}${ARGO_LINK}${NC}"
         echo ""
     fi
@@ -955,6 +985,9 @@ do_upgrade() {
                 if load_params; then
                     generate_and_show_links
                 fi
+                echo ""
+                read -rp "按 Enter 重启面板并进入新版本..." _
+                exec bash /usr/local/bin/sbm
             else
                 warn "更新失败，请检查网络或手动更新"
             fi
