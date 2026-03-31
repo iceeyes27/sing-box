@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.5.0"
+SCRIPT_VERSION="2.5.1"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -389,7 +389,7 @@ write_argo_service() {
     local exec_cmd
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         info "使用 Token 模式启动 Argo 隧道 (固定域名)"
-        exec_cmd="/usr/local/bin/cloudflared tunnel --no-autoupdate run --token ${ARGO_TOKEN}"
+        exec_cmd="/usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate run --token ${ARGO_TOKEN}"
     else
         info "使用临时隧道模式 (trycloudflare.com)"
         exec_cmd="/usr/local/bin/cloudflared tunnel --url http://127.0.0.1:${WS_PORT} --no-autoupdate --protocol http2"
@@ -532,11 +532,11 @@ generate_and_show_links() {
     # ── VLESS + WS + Argo ──
     local ARGO_LINK=""
     if [[ -n "${ARGO_DOMAIN:-}" ]]; then
-        local argo_remark ws_path_enc
+        local argo_remark
         argo_remark=$(urlencode "${NODE_NAME}-Argo")
-        ws_path_enc=$(urlencode "${WS_PATH}")
         # Argo 端口写死 443，不允许修改 (因为它是 Cloudflare CDN 的标准端口)
-        ARGO_LINK="vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${ws_path_enc}#${argo_remark}"
+        # 移除 path 的 urlencode (避免将 / 转义为 %2F 导致部分客户端 404)，增加 fp=chrome 提高指纹兼容性
+        ARGO_LINK="vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
 
         echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
         echo -e "${YELLOW}${ARGO_LINK}${NC}"
@@ -638,9 +638,14 @@ do_install() {
     argo_choice=${argo_choice:-1}
     if [[ "$argo_choice" == "2" ]]; then
         echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
+        echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${WS_PORT}${NC}"
         echo -e "  并获取其对应的 Token (一长串字符)。"
         read -rp "  请输入 Tunnel Token: " ARGO_TOKEN
         read -rp "  请输入该隧道绑定的域名 (如 v2.example.com): " ARGO_DOMAIN
+        # 清除用户可能误输入的 http://, https:// 以及结尾的 /
+        ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
+        ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
+        ARGO_DOMAIN="${ARGO_DOMAIN%/}"
         [[ -z "$ARGO_TOKEN" || -z "$ARGO_DOMAIN" ]] && warn "Token 或域名为空，将降级为临时域名模式" && ARGO_TOKEN="" && ARGO_DOMAIN=""
     else
         ARGO_TOKEN=""
@@ -779,10 +784,16 @@ do_modify_config() {
                 read -rp "  请选择 [2]: " sub_choice
                 sub_choice=${sub_choice:-2}
                 if [[ "$sub_choice" == "2" ]]; then
+                    echo -e "  ${YELLOW}提示: 请确保在 Cloudflare 仪表盘中将该域名转发至 http://127.0.0.1:${WS_PORT}${NC}"
                     read -rp "  新 Tunnel Token [${ARGO_TOKEN:0:10}...]: " input
                     [[ -n "$input" ]] && ARGO_TOKEN="$input"
                     read -rp "  新自定义域名 [${ARGO_DOMAIN}]: " input
-                    [[ -n "$input" ]] && ARGO_DOMAIN="$input"
+                    if [[ -n "$input" ]]; then
+                        ARGO_DOMAIN="$input"
+                        ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
+                        ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
+                        ARGO_DOMAIN="${ARGO_DOMAIN%/}"
+                    fi
                 else
                     ARGO_TOKEN=""
                     ARGO_DOMAIN=""
