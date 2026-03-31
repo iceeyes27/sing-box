@@ -10,7 +10,7 @@
 - 🔒 **VLESS + Reality** — 抗主动探测，高性能直连
 - ☁️ **VLESS + WS + Argo** — 经 Cloudflare CDN，抗 IP 封锁。**支持安全 Token 模式绑定自定义固定域名。**
 - ⚡ **Hysteria2** — 基于 QUIC/UDP 暴力加速，极致抗封锁
-- 🎯 **优选伪装域名** — 自动对 30+ 常见大厂域名测速，选出最低延迟 SNI
+- 🎯 **双重智能优选** — 自动测速 34 个大厂域名选出最低延迟 Reality SNI；自动测试并分配高连通性 CF 优选连接域名
 - 📋 **v2ray 链接** — 直接输出可导入 v2rayN / v2rayNG 的分享链接
 - 🎛️ **交互式管理** — 修改配置、重启、升级、切换等
 
@@ -64,7 +64,7 @@ sbm uninstall  # 卸载
 | 节点 | 协议 | 传输 | 安全 | 特点 |
 | :--- | :--- | :--- | :--- | :--- |
 | 直连 | VLESS + Vision | TCP       | Reality  | 低延迟，抗探测，自动优选最低延迟 SNI |
-| CDN  | VLESS          | WebSocket | TLS (CF) | 抗 IP 封锁，支持 Cloudflare Zero Trust Token 绑定固定域名 |
+| CDN  | VLESS          | WebSocket | TLS (CF) | 抗 IP 封锁，支持固定域名，自动测试并分配 CF 优选可用连接地址 |
 | 高速 | Hysteria2      | QUIC (UDP) | TLS (自签) | UDP 暴力加速，极致抗封锁，自动生成证书 |
 
 ## 📄 License
