@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.5.1"
+SCRIPT_VERSION="2.5.2"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -639,7 +639,8 @@ do_install() {
     if [[ "$argo_choice" == "2" ]]; then
         echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
         echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${WS_PORT}${NC}"
-        echo -e "  并获取其对应的 Token (一长串字符)。"
+        echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
+        echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
         read -rp "  请输入 Tunnel Token: " ARGO_TOKEN
         read -rp "  请输入该隧道绑定的域名 (如 v2.example.com): " ARGO_DOMAIN
         # 清除用户可能误输入的 http://, https:// 以及结尾的 /
@@ -785,6 +786,7 @@ do_modify_config() {
                 sub_choice=${sub_choice:-2}
                 if [[ "$sub_choice" == "2" ]]; then
                     echo -e "  ${YELLOW}提示: 请确保在 Cloudflare 仪表盘中将该域名转发至 http://127.0.0.1:${WS_PORT}${NC}"
+                    echo -e "  ${RED}注意: 请填写完整的 Token (以 eyJ 开头)，千万不要误填为 Tunnel ID。${NC}"
                     read -rp "  新 Tunnel Token [${ARGO_TOKEN:0:10}...]: " input
                     [[ -n "$input" ]] && ARGO_TOKEN="$input"
                     read -rp "  新自定义域名 [${ARGO_DOMAIN}]: " input
