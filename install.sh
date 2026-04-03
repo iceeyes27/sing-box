@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.5.3"
+SCRIPT_VERSION="2.5.5"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -22,43 +22,22 @@ ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
 
-# Reality 伪装域名候选列表 (多区域、多行业综合过滤版)
-# 包含科技巨头、跨国CDN、流媒体、游戏公司等，确保不同网络环境下都有连通率高的节点
+# Reality 伪装域名候选列表
+# Reality 更看重目标站点兼容性，不是单纯 HTTPS 连通或延迟最低即可。
+# 这里保留相对稳定、证书和 TLS 表现更保守的候选，避免自动选到兼容性差的站点。
 REALITY_SNI_LIST=(
     "www.microsoft.com"
     "www.apple.com"
     "www.amazon.com"
-    "www.cloudflare.com"
-    "www.ubuntu.com"
-    "www.samsung.com"
     "www.intel.com"
-    "www.cisco.com"
     "www.ibm.com"
     "www.oracle.com"
-    "www.sony.com"
-    "www.nintendo.com"
-    "www.ea.com"
-    "www.playstation.com"
-    "www.xbox.com"
-    "www.blizzard.com"
-    "www.epicgames.com"
-    "www.steampowered.com"
     "www.nvidia.com"
     "www.amd.com"
     "www.hp.com"
     "www.dell.com"
     "www.lenovo.com"
     "www.asus.com"
-    "www.acer.com"
-    "www.disney.com"
-    "www.netflix.com"
-    "www.twitch.tv"
-    "www.coca-cola.com"
-    "www.pepsi.com"
-    "www.toyota.com"
-    "www.honda.com"
-    "www.mercedes-benz.com"
-    "www.bmw.com"
 )
 
 # ================== CF 优选域名列表 ==================
@@ -143,6 +122,7 @@ WS_PATH="${WS_PATH}"
 NODE_NAME="${NODE_NAME}"
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"
 ARGO_TOKEN="${ARGO_TOKEN:-}"
+ARGO_BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN:-}"
 HY2_PORT="${HY2_PORT}"
 HY2_PASSWORD="${HY2_PASSWORD}"
 HY2_SNI="${HY2_SNI}"
@@ -170,6 +150,9 @@ load_params() {
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
             ARGO_TOKEN=""
             # need_save 不标记，除非有实质性变化
+        fi
+        if [[ -z "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
+            ARGO_BEST_CF_DOMAIN=""
         fi
         [[ "$need_save" == "true" ]] && save_params
         return 0
@@ -232,6 +215,7 @@ generate_params() {
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
+    ARGO_BEST_CF_DOMAIN=""
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
@@ -440,12 +424,19 @@ fetch_argo_domain() {
 
     # 临时域名模式获取逻辑
     local max=10 i=0
+    local previous_domain="${ARGO_DOMAIN:-}"
     ARGO_DOMAIN=""
     while [[ $i -lt $max ]]; do
         ARGO_DOMAIN=$(journalctl -u argo-tunnel --output cat --no-pager 2>/dev/null | \
                       grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' | \
                       tail -1 | sed 's|https://||')
-        [[ -n "$ARGO_DOMAIN" ]] && return 0
+        if [[ -n "$ARGO_DOMAIN" ]]; then
+            if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
+                ARGO_BEST_CF_DOMAIN=""
+                info "检测到新的 Argo 临时域名，已清空缓存的优选接入域名"
+            fi
+            return 0
+        fi
         i=$((i + 1))
         sleep 3
     done
@@ -458,38 +449,39 @@ select_reality_sni() {
         info "当前已设定伪装域名: $REALITY_SNI，跳过测速"
         return
     fi
-    info "正在并发测试 ${#REALITY_SNI_LIST[@]} 个候选伪装域名 (预计 1-2 秒完成)..."
-    
+    info "正在按兼容性优先顺序探测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名..."
+
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    
-    # 采用后台并发执行，极大缩短等待时间
-    for sni in "${REALITY_SNI_LIST[@]}"; do
+
+    # Reality 目标站优先保证兼容性和稳定性，其次才是连接时间。
+    for idx in "${!REALITY_SNI_LIST[@]}"; do
+        local sni="${REALITY_SNI_LIST[$idx]}"
         (
             local time_ms
-            time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 "https://${sni}" 2>/dev/null || echo "9999")
+            time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 --tlsv1.3 "https://${sni}" 2>/dev/null || echo "9999")
             local ms
             ms=$(awk -v t="$time_ms" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo "9999")
             if [[ "$ms" -gt 0 && "$ms" -lt 9999 ]]; then
-                echo "$ms $sni" >> "${tmp_dir}/results.txt"
+                echo "$idx $ms $sni" >> "${tmp_dir}/results.txt"
             fi
         ) &
     done
     wait
-    
+
     local best_sni="" best_time=9999
     if [[ -f "${tmp_dir}/results.txt" ]]; then
         local best
-        best=$(sort -n "${tmp_dir}/results.txt" | head -1)
-        best_time=$(echo "$best" | awk '{print $1}')
-        best_sni=$(echo "$best" | awk '{print $2}')
+        best=$(sort -k1,1n -k2,2n "${tmp_dir}/results.txt" | head -1)
+        best_time=$(echo "$best" | awk '{print $2}')
+        best_sni=$(echo "$best" | awk '{print $3}')
     fi
-    
+
     rm -rf "$tmp_dir"
 
     if [[ -n "$best_sni" ]]; then
         REALITY_SNI="$best_sni"
-        success "优选伪装域名: ${REALITY_SNI} (延迟: ${best_time}ms)"
+        success "已选择稳定优先的 Reality 域名: ${REALITY_SNI} (握手延迟: ${best_time}ms)"
     else
         REALITY_SNI="${REALITY_SNI_LIST[0]}"
         warn "所有域名测速均失败，使用默认伪装域名: ${REALITY_SNI}"
@@ -504,7 +496,51 @@ select_random_cf_domain() {
             available+=("$domain")
         fi
     done
-    [ ${#available[@]} -gt 0 ] && echo "${available[$((RANDOM % ${#available[@]}))]}" || echo "${CF_DOMAINS[0]}"
+    [ ${#available[@]} -gt 0 ] && echo "${available[$((RANDOM % ${#available[@]}))]}"
+}
+
+check_cf_domain_available() {
+    local domain="$1"
+    [[ -n "$domain" ]] || return 1
+    curl -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+}
+
+resolve_argo_best_cf_domain() {
+    [[ -n "${ARGO_DOMAIN:-}" ]] || return 1
+
+    if check_cf_domain_available "${ARGO_BEST_CF_DOMAIN:-}"; then
+        return 0
+    fi
+
+    local previous_domain="${ARGO_BEST_CF_DOMAIN:-}"
+    local next_domain=""
+    next_domain="$(select_random_cf_domain)"
+
+    if [[ -z "$next_domain" ]]; then
+        if [[ -n "$previous_domain" ]]; then
+            warn "原 Argo 优选域名当前不可用，且未找到新的可用域名，暂时保留原链接地址"
+            ARGO_BEST_CF_DOMAIN="$previous_domain"
+            return 0
+        fi
+
+        ARGO_BEST_CF_DOMAIN="${CF_DOMAINS[0]}"
+        warn "未探测到可用的 CF 优选域名，首次生成链接时使用默认地址: ${ARGO_BEST_CF_DOMAIN}"
+        save_params
+        return 0
+    fi
+
+    ARGO_BEST_CF_DOMAIN="$next_domain"
+
+    if [[ "${ARGO_BEST_CF_DOMAIN}" != "$previous_domain" ]]; then
+        if [[ -n "$previous_domain" ]]; then
+            warn "原 Argo 优选域名不可用，已切换为: ${ARGO_BEST_CF_DOMAIN}"
+        else
+            info "已为 Argo 选择并缓存优选域名: ${ARGO_BEST_CF_DOMAIN}"
+        fi
+        save_params
+    fi
+
+    return 0
 }
 
 # ─── URL 编码 ────────────────────────────────────────────────
@@ -548,6 +584,7 @@ generate_and_show_links() {
 
     echo -e "${GREEN}${BOLD}── VLESS + Reality (直连) ──${NC}"
     echo -e "${YELLOW}${REALITY_LINK}${NC}"
+    echo -e "  ${DIM}提示: Reality 请使用 Xray-core / sing-box 内核；若 v2rayN 当前使用 v2fly core，请先切换到 Xray core。${NC}"
     echo ""
 
     # ── VLESS + WS + Argo ──
@@ -555,12 +592,16 @@ generate_and_show_links() {
     if [[ -n "${ARGO_DOMAIN:-}" ]]; then
         local argo_remark
         argo_remark=$(urlencode "${NODE_NAME}-Argo")
-        
-        # 每次生成链接时测试 CF_DOMAINS 连通性并随机优选一个可用域名作为真实连接地址
-        echo -e "  ${DIM}测试 CF 优选域名可用性中...${NC}"
-        local BEST_CF_DOMAIN
-        BEST_CF_DOMAIN=$(select_random_cf_domain)
-        
+
+        local BEST_CF_DOMAIN=""
+        if [[ -n "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
+            echo -e "  ${DIM}检查已缓存的 CF 优选域名可用性中...${NC}"
+        else
+            echo -e "  ${DIM}首次为 Argo 选择并缓存 CF 优选域名...${NC}"
+        fi
+        resolve_argo_best_cf_domain
+        BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN:-}"
+
         # Argo 端口写死 443，不允许修改 (因为它是 Cloudflare CDN 的标准端口)
         # 移除 path 的 urlencode (避免将 / 转义为 %2F 导致部分客户端 404)，增加 fp=chrome 提高指纹兼容性
         # 使用优选域名(BEST_CF_DOMAIN)作为服务端地址，伪装域名(ARGO_DOMAIN)作为sni和host
@@ -815,6 +856,8 @@ do_modify_config() {
                 read -rp "  请选择 [2]: " sub_choice
                 sub_choice=${sub_choice:-2}
                 if [[ "$sub_choice" == "2" ]]; then
+                    local old_argo_domain="${ARGO_DOMAIN:-}"
+                    local old_argo_token="${ARGO_TOKEN:-}"
                     echo -e "  ${YELLOW}提示: 请确保在 Cloudflare 仪表盘中将该域名转发至 http://127.0.0.1:${WS_PORT}${NC}"
                     echo -e "  ${RED}注意: 请填写完整的 Token (以 eyJ 开头)，千万不要误填为 Tunnel ID。${NC}"
                     read -rp "  新 Tunnel Token [${ARGO_TOKEN:0:10}...]: " input
@@ -826,9 +869,13 @@ do_modify_config() {
                         ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
                         ARGO_DOMAIN="${ARGO_DOMAIN%/}"
                     fi
+                    if [[ "${ARGO_DOMAIN:-}" != "$old_argo_domain" || "${ARGO_TOKEN:-}" != "$old_argo_token" ]]; then
+                        ARGO_BEST_CF_DOMAIN=""
+                    fi
                 else
                     ARGO_TOKEN=""
                     ARGO_DOMAIN=""
+                    ARGO_BEST_CF_DOMAIN=""
                 fi
                 write_argo_service
                 systemctl restart argo-tunnel 2>/dev/null
