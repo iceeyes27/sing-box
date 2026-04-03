@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.5.6"
+SCRIPT_VERSION="2.5.8"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -21,6 +21,7 @@ LINK_FILE="${CONFIG_DIR}/share-links.txt"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
+TIME_SKEW_THRESHOLD=30
 
 # Reality 伪装域名候选列表
 # Reality 更看重目标站点兼容性，不是单纯 HTTPS 连通或延迟最低即可。
@@ -172,6 +173,116 @@ install_deps() {
     success "依赖就绪"
 }
 
+get_rtc_utc_epoch() {
+    command -v hwclock &>/dev/null || return 1
+    local rtc_raw
+    rtc_raw=$(hwclock --utc --show 2>/dev/null | sed 's/  \..*$//')
+    [[ -n "$rtc_raw" ]] || return 1
+    date -u -d "$rtc_raw" +%s 2>/dev/null
+}
+
+get_time_skew_seconds() {
+    local system_epoch rtc_epoch diff
+    system_epoch=$(date -u +%s 2>/dev/null || return 1)
+    rtc_epoch=$(get_rtc_utc_epoch 2>/dev/null || return 1)
+    diff=$((system_epoch - rtc_epoch))
+    (( diff < 0 )) && diff=$(( -diff ))
+    echo "$diff"
+}
+
+is_time_synchronized() {
+    if command -v timedatectl &>/dev/null; then
+        [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]]
+    else
+        return 1
+    fi
+}
+
+start_time_sync_service() {
+    for svc in systemd-timesyncd chrony chronyd; do
+        if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+            systemctl enable --now "${svc}" 2>/dev/null || systemctl restart "${svc}" 2>/dev/null || true
+        fi
+    done
+}
+
+install_time_sync_service() {
+    if command -v chronyc &>/dev/null; then
+        return 0
+    fi
+    info "安装时间同步服务 chrony..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq 2>/dev/null
+        apt-get install -y -qq chrony > /dev/null 2>&1 || return 1
+    elif command -v yum &>/dev/null; then
+        yum install -y -q chrony > /dev/null 2>&1 || return 1
+    else
+        return 1
+    fi
+    return 0
+}
+
+attempt_time_sync() {
+    if command -v timedatectl &>/dev/null; then
+        timedatectl set-ntp true 2>/dev/null || true
+    fi
+    start_time_sync_service
+    sleep 2
+    if command -v chronyc &>/dev/null; then
+        chronyc -a makestep >/dev/null 2>&1 || true
+        sleep 2
+    fi
+}
+
+ensure_time_sync() {
+    local skew=""
+    local need_sync=false
+
+    if skew=$(get_time_skew_seconds 2>/dev/null); then
+        if (( skew > TIME_SKEW_THRESHOLD )); then
+            need_sync=true
+        fi
+    fi
+
+    if ! is_time_synchronized; then
+        need_sync=true
+    fi
+
+    if [[ "$need_sync" != "true" ]]; then
+        success "系统时间同步正常"
+        return 0
+    fi
+
+    if [[ -n "$skew" ]]; then
+        warn "检测到系统时间与 RTC 相差 ${skew}s，开始同步修复..."
+    else
+        warn "检测到系统时间未同步，开始同步修复..."
+    fi
+
+    attempt_time_sync
+
+    if ! is_time_synchronized; then
+        install_time_sync_service && attempt_time_sync
+    fi
+
+    if skew=$(get_time_skew_seconds 2>/dev/null); then
+        if is_time_synchronized && (( skew <= TIME_SKEW_THRESHOLD )); then
+            success "系统时间已同步，当前与 RTC 误差 ${skew}s"
+            return 0
+        fi
+        warn "时间同步后系统时间与 RTC 仍相差 ${skew}s，请检查宿主机/虚拟化平台时间源"
+        return 1
+    fi
+
+    if is_time_synchronized; then
+        success "系统时间已同步"
+        return 0
+    fi
+
+    warn "自动时间同步失败，请手动检查 NTP 服务"
+    return 1
+}
+
 install_singbox() {
     if command -v sing-box &>/dev/null; then
         local ver
@@ -319,8 +430,7 @@ write_singbox_config() {
                     "private_key": "${PRIVATE_KEY}",
                     "short_id": [
                         "${SHORT_ID}"
-                    ],
-                    "max_time_difference": "1m"
+                    ]
                 }
             }
         },
@@ -670,6 +780,7 @@ do_install() {
     separator
 
     install_deps
+    ensure_time_sync || true
     install_singbox
     install_cloudflared
     generate_params
@@ -899,6 +1010,7 @@ do_modify_config() {
             write_singbox_config
             # 注意: 不重写 argo service，不重启 argo，不刷新 argo 域名
             save_params
+            ensure_time_sync || true
             info "重启 sing-box..."
             systemctl restart sing-box 2>/dev/null
             sleep 2
@@ -912,6 +1024,7 @@ do_modify_config() {
 # ─── 查看链接 ────────────────────────────────────────────────
 do_show_links() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
+    ensure_time_sync || true
 
     # 直接使用已保存的 Argo 域名，不重新获取
     if [[ -z "${ARGO_DOMAIN:-}" ]] && systemctl is-active --quiet argo-tunnel 2>/dev/null; then
@@ -926,6 +1039,7 @@ do_show_links() {
 # ─── 启动 / 停止 / 重启 ──────────────────────────────────────
 do_start() {
     info "启动服务..."
+    ensure_time_sync || true
     systemctl start sing-box 2>/dev/null && success "sing-box 已启动" || warn "sing-box 启动失败"
     systemctl start argo-tunnel 2>/dev/null && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
     press_enter
@@ -940,6 +1054,7 @@ do_stop() {
 
 do_restart() {
     info "重启服务..."
+    ensure_time_sync || true
     systemctl restart sing-box 2>/dev/null && success "sing-box 已重启" || warn "sing-box 重启失败"
     systemctl restart argo-tunnel 2>/dev/null && success "argo-tunnel 已重启" || warn "argo-tunnel 重启失败"
 
@@ -1177,7 +1292,7 @@ fi
 
 case "${1:-}" in
     install)     do_install ;;
-    links)       load_params && generate_and_show_links || warn "未安装" ;;
+    links)       load_params && { ensure_time_sync || true; generate_and_show_links; } || warn "未安装" ;;
     start)       do_start ;;
     stop)        do_stop ;;
     restart)     do_restart ;;
