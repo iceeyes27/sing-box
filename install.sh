@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.5.5"
+SCRIPT_VERSION="2.5.6"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -261,6 +261,13 @@ open_firewall() {
             iptables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
         iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
             iptables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+    fi
+}
+
+open_service_ports() {
+    [[ -n "${REALITY_PORT:-}" ]] && open_firewall "$REALITY_PORT"
+    if [[ -n "${HY2_PORT:-}" && "${HY2_PORT}" != "${REALITY_PORT:-}" ]]; then
+        open_firewall "$HY2_PORT"
     fi
 }
 
@@ -727,8 +734,8 @@ do_install() {
     write_singbox_config
     write_argo_service
 
-    # 放行 Hysteria2 UDP 端口
-    open_firewall "$HY2_PORT"
+    # 放行服务端口
+    open_service_ports
 
     # 启动 sing-box
     info "启动 sing-box..."
@@ -792,6 +799,7 @@ do_modify_config() {
                 read -rp "  新端口: " input
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     REALITY_PORT="$input"
+                    open_firewall "$REALITY_PORT"
                     changed=true
                 fi
                 ;;
@@ -845,7 +853,7 @@ do_modify_config() {
             9)
                 REALITY_PORT=443
                 HY2_PORT=443
-                open_firewall 443
+                open_service_ports
                 info "已切换为单端口模式: 443"
                 changed=true
                 ;;
