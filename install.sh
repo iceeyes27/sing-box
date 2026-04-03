@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.5.8"
+SCRIPT_VERSION="2.5.9"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -207,14 +207,20 @@ start_time_sync_service() {
 }
 
 install_time_sync_service() {
-    if command -v chronyc &>/dev/null; then
+    if systemctl list-unit-files systemd-timesyncd.service >/dev/null 2>&1 || command -v chronyc &>/dev/null; then
         return 0
     fi
-    info "安装时间同步服务 chrony..."
+
     if command -v apt-get &>/dev/null; then
+        info "安装时间同步服务 systemd-timesyncd..."
         apt-get update -qq 2>/dev/null
+        if apt-get install -y -qq systemd-timesyncd > /dev/null 2>&1; then
+            return 0
+        fi
+        info "systemd-timesyncd 安装失败，回退安装 chrony..."
         apt-get install -y -qq chrony > /dev/null 2>&1 || return 1
     elif command -v yum &>/dev/null; then
+        info "安装时间同步服务 chrony..."
         yum install -y -q chrony > /dev/null 2>&1 || return 1
     else
         return 1
