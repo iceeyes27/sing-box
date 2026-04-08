@@ -18,6 +18,10 @@ CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
+SUBSCRIPTION_FILE="${CONFIG_DIR}/subscription.txt"
+SUBSCRIPTION_SERVER="/usr/local/bin/sbm-subscription-server.py"
+SUBSCRIPTION_SERVICE="/etc/systemd/system/sbm-subscription.service"
+SUBSCRIPTION_PORT=24630
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
@@ -109,6 +113,39 @@ get_public_ip() {
     [[ -n "$PUBLIC_IP" ]] || error "无法获取公网 IP"
 }
 
+is_private_ipv4() {
+    local ip=$1
+    [[ "$ip" =~ ^10\. ]] && return 0
+    [[ "$ip" =~ ^192\.168\. ]] && return 0
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
+    [[ "$ip" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\. ]] && return 0
+    [[ "$ip" =~ ^169\.254\. ]] && return 0
+    return 1
+}
+
+has_public_ip_on_interface() {
+    command -v ip &>/dev/null || return 1
+    ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "$PUBLIC_IP"
+}
+
+detect_external_access_mode() {
+    if [[ -z "${PUBLIC_IP:-}" ]]; then
+        get_public_ip
+    fi
+
+    if has_public_ip_on_interface; then
+        echo "direct"
+        return 0
+    fi
+
+    if is_private_ipv4 "$PUBLIC_IP"; then
+        echo "nat"
+        return 0
+    fi
+
+    echo "panel"
+}
+
 # ─── 参数持久化 ──────────────────────────────────────────────
 save_params() {
     cat > "$PARAMS_FILE" << EOF
@@ -121,6 +158,7 @@ REALITY_SNI="${REALITY_SNI}"
 WS_PORT="${WS_PORT}"
 WS_PATH="${WS_PATH}"
 NODE_NAME="${NODE_NAME}"
+SUB_TOKEN="${SUB_TOKEN:-}"
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"
 ARGO_TOKEN="${ARGO_TOKEN:-}"
 ARGO_BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN:-}"
@@ -155,6 +193,10 @@ load_params() {
         if [[ -z "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
             ARGO_BEST_CF_DOMAIN=""
         fi
+        if [[ -z "${SUB_TOKEN:-}" ]]; then
+            SUB_TOKEN=$(openssl rand -hex 16)
+            need_save=true
+        fi
         [[ "$need_save" == "true" ]] && save_params
         return 0
     fi
@@ -166,9 +208,9 @@ install_deps() {
     info "安装基础依赖..."
     if command -v apt-get &>/dev/null; then
         apt-get update -qq 2>/dev/null
-        apt-get install -y -qq curl wget jq openssl > /dev/null 2>&1
+        apt-get install -y -qq curl wget jq openssl python3 > /dev/null 2>&1
     elif command -v yum &>/dev/null; then
-        yum install -y -q curl wget jq openssl > /dev/null 2>&1
+        yum install -y -q curl wget jq openssl python3 > /dev/null 2>&1
     fi
     success "依赖就绪"
 }
@@ -330,6 +372,7 @@ generate_params() {
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
+    SUB_TOKEN=$(openssl rand -hex 16)
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
     ARGO_BEST_CF_DOMAIN=""
@@ -360,32 +403,264 @@ generate_tls_cert() {
     success "TLS 自签证书已生成 (有效期 10 年)"
 }
 
+# ─── 端口 / 防火墙检查 ───────────────────────────────────────
+validate_port() {
+    local port=$1
+    local label=$2
+
+    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+        warn "${label} 端口必须是数字: ${port}"
+        return 1
+    fi
+    if (( port < 1 || port > 65535 )); then
+        warn "${label} 端口超出范围 (1-65535): ${port}"
+        return 1
+    fi
+    return 0
+}
+
+get_port_listeners() {
+    local port=$1
+    local proto=$2
+
+    if command -v ss &>/dev/null; then
+        if [[ "$proto" == "tcp" ]]; then
+            ss -H -ltnp "( sport = :${port} )" 2>/dev/null || true
+        else
+            ss -H -lunp "( sport = :${port} )" 2>/dev/null || true
+        fi
+        return 0
+    fi
+
+    if command -v netstat &>/dev/null; then
+        if [[ "$proto" == "tcp" ]]; then
+            netstat -lntp 2>/dev/null | awk -v p=":${port}$" '$4 ~ p'
+        else
+            netstat -lnup 2>/dev/null | awk -v p=":${port}$" '$4 ~ p'
+        fi
+        return 0
+    fi
+
+    if command -v lsof &>/dev/null; then
+        if [[ "$proto" == "tcp" ]]; then
+            lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+        else
+            lsof -nP -iUDP:"$port" 2>/dev/null || true
+        fi
+        return 0
+    fi
+
+    warn "未找到 ss/netstat/lsof，跳过 ${proto^^} 端口占用检查"
+    return 0
+}
+
+assert_port_available() {
+    local port=$1
+    local proto=$2
+    local label=$3
+    local listeners
+
+    listeners=$(get_port_listeners "$port" "$proto")
+    if [[ -n "$listeners" ]]; then
+        warn "${label} 需要的 ${proto^^} 端口 ${port} 已被占用:"
+        echo "$listeners" | head -n 3
+        return 1
+    fi
+    success "${label} 使用的 ${proto^^} 端口 ${port} 当前可绑定"
+    return 0
+}
+
+detect_firewall_backend() {
+    local ufw_status
+    local iptables_input
+
+    if command -v ufw &>/dev/null; then
+        ufw_status=$(ufw status 2>/dev/null | head -n 1 || true)
+        if [[ "$ufw_status" =~ [Ss]tatus:\ active ]]; then
+            echo "ufw"
+            return 0
+        fi
+    fi
+
+    if command -v firewall-cmd &>/dev/null; then
+        if [[ "$(firewall-cmd --state 2>/dev/null || true)" == "running" ]]; then
+            echo "firewalld"
+            return 0
+        fi
+    fi
+
+    if command -v iptables &>/dev/null; then
+        iptables_input=$(iptables -S INPUT 2>/dev/null || true)
+        if [[ -n "$iptables_input" ]] && echo "$iptables_input" | grep -Eq '^-P INPUT (DROP|REJECT)$|^-A INPUT '; then
+            echo "iptables"
+            return 0
+        fi
+    fi
+
+    echo "none"
+}
+
+firewall_backend_label() {
+    case "$1" in
+        ufw) echo "UFW" ;;
+        firewalld) echo "firewalld" ;;
+        iptables) echo "iptables" ;;
+        *) echo "none" ;;
+    esac
+}
+
+firewall_port_open() {
+    local backend=$1
+    local port=$2
+    local proto=$3
+
+    case "$backend" in
+        ufw)
+            ufw status 2>/dev/null | grep -Eq "(^|[[:space:]])${port}/${proto}([[:space:]]|$).*ALLOW"
+            ;;
+        firewalld)
+            firewall-cmd --query-port="${port}/${proto}" 2>/dev/null | grep -qx 'yes' || \
+                firewall-cmd --permanent --query-port="${port}/${proto}" 2>/dev/null | grep -qx 'yes'
+            ;;
+        iptables)
+            iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null
+            ;;
+        none)
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # ─── 防火墙放行 ──────────────────────────────────────────────
 open_firewall() {
     local port=$1
-    info "放行端口 ${port} (TCP+UDP)..."
-    if command -v ufw &>/dev/null; then
-        ufw allow "${port}/udp" 2>/dev/null || true
-        ufw allow "${port}/tcp" 2>/dev/null || true
+    local backend=$2
+    shift 2 || true
+    local protocol
+    local protocols=("$@")
+
+    if [[ -z "${backend:-}" ]]; then
+        backend=$(detect_firewall_backend)
     fi
-    if command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --add-port="${port}/tcp" 2>/dev/null || true
-        firewall-cmd --permanent --add-port="${port}/udp" 2>/dev/null || true
-        firewall-cmd --reload 2>/dev/null || true
+    if [[ ${#protocols[@]} -eq 0 ]]; then
+        protocols=(tcp udp)
     fi
-    if command -v iptables &>/dev/null; then
-        iptables -C INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || \
-            iptables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-        iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
-            iptables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+
+    if [[ "$backend" == "none" ]]; then
+        warn "未检测到启用中的 UFW / firewalld / iptables 规则，跳过本机自动放行端口 ${port}"
+        warn "如果你使用 NAT 小鸡、云安全组或厂商面板防火墙，请到外部面板手动放行对应端口"
+        return 0
     fi
+
+    info "检测到防火墙方案: $(firewall_backend_label "$backend")，检查端口 ${port} 放行状态"
+
+    for protocol in "${protocols[@]}"; do
+        if firewall_port_open "$backend" "$port" "$protocol"; then
+            info "端口 ${port}/${protocol} 已放行"
+            continue
+        fi
+
+        info "放行端口 ${port}/${protocol}..."
+        case "$backend" in
+            ufw)
+                ufw allow "${port}/${protocol}" >/dev/null 2>&1
+                ;;
+            firewalld)
+                firewall-cmd --permanent --add-port="${port}/${protocol}" >/dev/null 2>&1
+                firewall-cmd --reload >/dev/null 2>&1
+                ;;
+            iptables)
+                iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null || \
+                    iptables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1
+                ;;
+        esac
+
+        if firewall_port_open "$backend" "$port" "$protocol"; then
+            success "端口 ${port}/${protocol} 已通过 $(firewall_backend_label "$backend") 放行"
+        else
+            warn "端口 ${port}/${protocol} 放行失败，请手动检查 $(firewall_backend_label "$backend") 规则"
+            return 1
+        fi
+    done
+
+    return 0
 }
 
 open_service_ports() {
-    [[ -n "${REALITY_PORT:-}" ]] && open_firewall "$REALITY_PORT"
+    local backend
+    backend=$(detect_firewall_backend)
+
+    [[ -n "${REALITY_PORT:-}" ]] && open_firewall "$REALITY_PORT" "$backend" || return 1
     if [[ -n "${HY2_PORT:-}" && "${HY2_PORT}" != "${REALITY_PORT:-}" ]]; then
-        open_firewall "$HY2_PORT"
+        open_firewall "$HY2_PORT" "$backend" || return 1
     fi
+    return 0
+}
+
+validate_service_ports() {
+    local old_reality_port=${1:-}
+    local old_hy2_port=${2:-}
+
+    validate_port "${REALITY_PORT:-}" "Reality" || return 1
+    validate_port "${WS_PORT:-}" "VLESS-WS" || return 1
+    validate_port "${HY2_PORT:-}" "Hysteria2" || return 1
+
+    if [[ "${REALITY_PORT}" == "${WS_PORT}" ]]; then
+        warn "Reality 端口 ${REALITY_PORT}/TCP 与 VLESS-WS 内部端口 ${WS_PORT}/TCP 冲突"
+        return 1
+    fi
+
+    if [[ -z "$old_reality_port" || "$REALITY_PORT" != "$old_reality_port" ]]; then
+        assert_port_available "$REALITY_PORT" "tcp" "Reality" || return 1
+    else
+        info "Reality 端口未变化，跳过占用检查"
+    fi
+
+    if [[ -z "$old_hy2_port" || "$HY2_PORT" != "$old_hy2_port" ]]; then
+        assert_port_available "$HY2_PORT" "udp" "Hysteria2" || return 1
+    else
+        info "Hysteria2 端口未变化，跳过占用检查"
+    fi
+
+    if [[ -z "$old_reality_port" ]]; then
+        assert_port_available "$WS_PORT" "tcp" "VLESS-WS" || return 1
+    fi
+
+    open_service_ports || return 1
+    return 0
+}
+
+show_external_access_requirements() {
+    local access_mode
+    access_mode=$(detect_external_access_mode)
+
+    echo -e "${CYAN}${BOLD}── 外部放行提示 ──${NC}"
+    case "$access_mode" in
+        direct)
+            echo -e "  本机检测到公网 IP 直接挂载在网卡上。若仍有安全组/云防火墙，请同步放行以下端口。"
+            ;;
+        nat)
+            echo -e "  检测到当前环境疑似 NAT / 转发型 VPS。仅修改本机防火墙通常不够，必须在面板额外放行或映射端口。"
+            ;;
+        panel)
+            echo -e "  当前环境未检测到公网 IP 直接挂载在本机网卡，可能经过宿主机、防火墙面板或云安全组。请在外部面板同步放行。"
+            ;;
+    esac
+    echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
+    if [[ "${HY2_PORT}" == "${REALITY_PORT}" ]]; then
+        echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC} ${DIM}(与 Reality 共用端口号，但协议不同)${NC}"
+    else
+        echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
+    fi
+    echo -e "  Subscription: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
+    echo -e "  ${DIM}Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。${NC}"
+    if [[ "$access_mode" != "direct" ]]; then
+        echo -e "  ${DIM}注意: 当前脚本默认外部端口与本机监听端口相同；如果面板做了不同端口号的 NAT 映射，生成的节点链接和订阅地址需要按外部端口另行适配。${NC}"
+    fi
+    echo ""
 }
 
 # ─── sing-box 配置生成 ───────────────────────────────────────
@@ -534,6 +809,119 @@ EOF
     systemctl daemon-reload
 }
 
+# ─── 订阅服务 ────────────────────────────────────────────────
+write_subscription_server() {
+    cat > "$SUBSCRIPTION_SERVER" << 'PYEOF'
+#!/usr/bin/env python3
+import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+
+def build_handler(token: str, data_file: str):
+    subscription_path = f"/sub/{token}"
+    data_path = Path(data_file)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            query_token = parse_qs(parsed.query).get("token", [""])[0]
+            token_ok = parsed.path == subscription_path or (
+                parsed.path == "/sub" and query_token == token
+            )
+
+            if parsed.path.startswith("/sub"):
+                if not token_ok:
+                    self.send_response(403)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"Forbidden\n")
+                    return
+            else:
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Not Found\n")
+                return
+
+            if not data_path.exists():
+                self.send_response(503)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Subscription is not ready\n")
+                return
+
+            payload = data_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format, *args):
+            return
+
+    return Handler
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--listen", default="0.0.0.0")
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--token", required=True)
+    parser.add_argument("--file", required=True)
+    args = parser.parse_args()
+
+    server = ThreadingHTTPServer((args.listen, args.port), build_handler(args.token, args.file))
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+    chmod 755 "$SUBSCRIPTION_SERVER"
+}
+
+write_subscription_service() {
+    cat > "$SUBSCRIPTION_SERVICE" << EOF
+[Unit]
+Description=SBM Subscription Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen 0.0.0.0 --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+}
+
+ensure_subscription_service() {
+    local backend
+
+    validate_port "${SUBSCRIPTION_PORT}" "订阅服务" || return 1
+    if ! command -v python3 &>/dev/null; then
+        warn "未检测到 python3，无法启动订阅服务"
+        return 1
+    fi
+
+    write_subscription_server
+    write_subscription_service
+
+    backend=$(detect_firewall_backend)
+    open_firewall "${SUBSCRIPTION_PORT}" "$backend" tcp || return 1
+
+    systemctl enable sbm-subscription --now 2>/dev/null || systemctl restart sbm-subscription
+}
+
 # ─── 获取 Argo 域名 ──────────────────────────────────────────
 fetch_argo_domain() {
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
@@ -671,9 +1059,59 @@ urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
 }
 
-# ─── 生成并显示链接 ──────────────────────────────────────────
-generate_and_show_links() {
+# ─── 链接与订阅生成 ──────────────────────────────────────────
+build_share_links() {
     get_public_ip
+
+    local remark
+    remark=$(urlencode "${NODE_NAME}-Reality")
+    GENERATED_REALITY_LINK="vless://${UUID}@${PUBLIC_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
+
+    GENERATED_ARGO_LINK=""
+    if [[ -n "${ARGO_DOMAIN:-}" ]]; then
+        local argo_remark
+        argo_remark=$(urlencode "${NODE_NAME}-Argo")
+
+        resolve_argo_best_cf_domain
+        local best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
+
+        GENERATED_ARGO_LINK="vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
+    fi
+
+    GENERATED_HY2_LINK=""
+    if [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]]; then
+        local hy2_remark hy2_pass_enc
+        hy2_remark=$(urlencode "${NODE_NAME}-Hysteria2")
+        hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
+        GENERATED_HY2_LINK="hysteria2://${hy2_pass_enc}@${PUBLIC_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
+    fi
+
+    GENERATED_SUBSCRIPTION_RAW="${GENERATED_REALITY_LINK}"
+    if [[ -n "${GENERATED_ARGO_LINK}" ]]; then
+        GENERATED_SUBSCRIPTION_RAW+=$'\n'"${GENERATED_ARGO_LINK}"
+    fi
+    if [[ -n "${GENERATED_HY2_LINK}" ]]; then
+        GENERATED_SUBSCRIPTION_RAW+=$'\n'"${GENERATED_HY2_LINK}"
+    fi
+}
+
+write_subscription_assets() {
+    local subscription_base64
+
+    subscription_base64=$(printf '%s' "${GENERATED_SUBSCRIPTION_RAW}" | base64 | tr -d '\r\n')
+    printf '%s' "${subscription_base64}" > "$SUBSCRIPTION_FILE"
+    chmod 600 "$SUBSCRIPTION_FILE"
+}
+
+show_subscription_url() {
+    echo -e "${CYAN}${BOLD}── 订阅地址 ──${NC}"
+    echo -e "  ${BOLD}http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
+    echo -e "  ${DIM}兼容写法: http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
+    echo ""
+}
+
+generate_and_show_links() {
+    build_share_links
 
     echo ""
     echo -e "${PURPLE}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
@@ -700,75 +1138,50 @@ generate_and_show_links() {
     echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
     echo ""
 
-    # ── VLESS + Reality ──
-    local remark
-    remark=$(urlencode "${NODE_NAME}-Reality")
-    local REALITY_LINK="vless://${UUID}@${PUBLIC_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
-
     echo -e "${GREEN}${BOLD}── VLESS + Reality (直连) ──${NC}"
-    echo -e "${YELLOW}${REALITY_LINK}${NC}"
+    echo -e "${YELLOW}${GENERATED_REALITY_LINK}${NC}"
     echo -e "  ${DIM}提示: Reality 请使用 Xray-core / sing-box 内核；若 v2rayN 当前使用 v2fly core，请先切换到 Xray core。${NC}"
     echo ""
 
-    # ── VLESS + WS + Argo ──
-    local ARGO_LINK=""
-    if [[ -n "${ARGO_DOMAIN:-}" ]]; then
-        local argo_remark
-        argo_remark=$(urlencode "${NODE_NAME}-Argo")
-
-        local BEST_CF_DOMAIN=""
-        if [[ -n "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
-            echo -e "  ${DIM}检查已缓存的 CF 优选域名可用性中...${NC}"
-        else
-            echo -e "  ${DIM}首次为 Argo 选择并缓存 CF 优选域名...${NC}"
-        fi
-        resolve_argo_best_cf_domain
-        BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN:-}"
-
-        # Argo 端口写死 443，不允许修改 (因为它是 Cloudflare CDN 的标准端口)
-        # 移除 path 的 urlencode (避免将 / 转义为 %2F 导致部分客户端 404)，增加 fp=chrome 提高指纹兼容性
-        # 使用优选域名(BEST_CF_DOMAIN)作为服务端地址，伪装域名(ARGO_DOMAIN)作为sni和host
-        ARGO_LINK="vless://${UUID}@${BEST_CF_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
-
+    if [[ -n "${GENERATED_ARGO_LINK}" ]]; then
         echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
         echo -e "  伪装域名(SNI): ${BOLD}${ARGO_DOMAIN}${NC}"
-        echo -e "  优选域名(ADDR): ${BOLD}${BEST_CF_DOMAIN}${NC}"
-        echo -e "${YELLOW}${ARGO_LINK}${NC}"
+        echo -e "  优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN}${NC}"
+        echo -e "${YELLOW}${GENERATED_ARGO_LINK}${NC}"
         echo ""
     fi
 
-    # ── Hysteria2 ──
-    local HY2_LINK=""
-    if [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]]; then
-        local hy2_remark hy2_pass_enc
-        hy2_remark=$(urlencode "${NODE_NAME}-Hysteria2")
-        hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
-        HY2_LINK="hysteria2://${hy2_pass_enc}@${PUBLIC_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
-
+    if [[ -n "${GENERATED_HY2_LINK}" ]]; then
         echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
-        echo -e "${YELLOW}${HY2_LINK}${NC}"
+        echo -e "${YELLOW}${GENERATED_HY2_LINK}${NC}"
         echo ""
     else
         echo -e "${DIM}  Hysteria2: 未启用 (重新安装即可自动启用)${NC}"
         echo ""
     fi
 
-    # ── 保存 ──
+    show_subscription_url
+    show_external_access_requirements
+    write_subscription_assets
+
     {
         echo "# sing-box 分享链接 - $(date '+%Y-%m-%d %H:%M:%S')"
         echo ""
         echo "# VLESS + Reality (直连)"
-        echo "$REALITY_LINK"
-        if [[ -n "$ARGO_LINK" ]]; then
+        echo "$GENERATED_REALITY_LINK"
+        if [[ -n "$GENERATED_ARGO_LINK" ]]; then
             echo ""
             echo "# VLESS + WS + Argo (CDN)"
-            echo "$ARGO_LINK"
+            echo "$GENERATED_ARGO_LINK"
         fi
-        if [[ -n "$HY2_LINK" ]]; then
+        if [[ -n "$GENERATED_HY2_LINK" ]]; then
             echo ""
             echo "# Hysteria2 (QUIC/UDP 高速)"
-            echo "$HY2_LINK"
+            echo "$GENERATED_HY2_LINK"
         fi
+        echo ""
+        echo "# Subscription"
+        echo "http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
     } > "$LINK_FILE"
     chmod 600 "$LINK_FILE"
 
@@ -818,6 +1231,10 @@ do_install() {
     [[ -n "$input" ]] && NODE_NAME="$input"
     echo ""
 
+    if ! validate_service_ports "" ""; then
+        error "端口检查失败，请调整端口后重试"
+    fi
+
     # 自动优选伪装域名
     select_reality_sni
 
@@ -851,9 +1268,6 @@ do_install() {
     write_singbox_config
     write_argo_service
 
-    # 放行服务端口
-    open_service_ports
-
     # 启动 sing-box
     info "启动 sing-box..."
     systemctl enable sing-box --now 2>/dev/null || systemctl restart sing-box
@@ -881,6 +1295,7 @@ do_install() {
 
     # 显示链接
     generate_and_show_links
+    ensure_subscription_service || warn "订阅服务启动失败，可稍后执行 sbm restart 重试"
 
     echo ""
     echo -e "${GREEN}${BOLD}✅ 部署完成！复制上方链接导入 v2rayN / v2rayNG 即可使用。${NC}"
@@ -892,6 +1307,8 @@ do_modify_config() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
     while true; do
+        local old_reality_port="${REALITY_PORT}"
+        local old_hy2_port="${HY2_PORT}"
         clear
         echo -e "${CYAN}${BOLD}"
         echo "  ── 修改配置 ──"
@@ -916,7 +1333,6 @@ do_modify_config() {
                 read -rp "  新端口: " input
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     REALITY_PORT="$input"
-                    open_firewall "$REALITY_PORT"
                     changed=true
                 fi
                 ;;
@@ -958,7 +1374,6 @@ do_modify_config() {
                 read -rp "  新 Hysteria2 端口: " input
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     HY2_PORT="$input"
-                    open_firewall "$HY2_PORT"
                     changed=true
                 fi
                 ;;
@@ -970,7 +1385,6 @@ do_modify_config() {
             9)
                 REALITY_PORT=443
                 HY2_PORT=443
-                open_service_ports
                 info "已切换为单端口模式: 443"
                 changed=true
                 ;;
@@ -1011,6 +1425,14 @@ do_modify_config() {
         esac
 
         if [[ "$changed" == "true" ]]; then
+            if ! validate_service_ports "$old_reality_port" "$old_hy2_port"; then
+                REALITY_PORT="$old_reality_port"
+                HY2_PORT="$old_hy2_port"
+                warn "端口检查未通过，已保留原配置"
+                press_enter
+                continue
+            fi
+
             # 确保 TLS 证书存在 (Hysteria2 需要)
             generate_tls_cert
             write_singbox_config
@@ -1018,10 +1440,31 @@ do_modify_config() {
             save_params
             ensure_time_sync || true
             info "重启 sing-box..."
-            systemctl restart sing-box 2>/dev/null
+            if ! systemctl restart sing-box 2>/dev/null; then
+                REALITY_PORT="$old_reality_port"
+                HY2_PORT="$old_hy2_port"
+                write_singbox_config
+                save_params
+                warn "sing-box 重启失败，正在回滚到旧端口配置..."
+                systemctl restart sing-box 2>/dev/null || true
+                press_enter
+                continue
+            fi
             sleep 2
-            success "配置已更新并重启"
+            if systemctl is-active --quiet sing-box 2>/dev/null; then
+                success "配置已更新并重启"
+            else
+                REALITY_PORT="$old_reality_port"
+                HY2_PORT="$old_hy2_port"
+                write_singbox_config
+                save_params
+                warn "sing-box 未成功启动，正在回滚到旧端口配置..."
+                systemctl restart sing-box 2>/dev/null || true
+                press_enter
+                continue
+            fi
             generate_and_show_links
+            ensure_subscription_service || warn "订阅服务启动失败，请检查 python3 或 systemd 日志"
             press_enter
         fi
     done
@@ -1039,6 +1482,7 @@ do_show_links() {
     fi
 
     generate_and_show_links
+    ensure_subscription_service || warn "订阅服务未成功启动"
     press_enter
 }
 
@@ -1048,6 +1492,14 @@ do_start() {
     ensure_time_sync || true
     systemctl start sing-box 2>/dev/null && success "sing-box 已启动" || warn "sing-box 启动失败"
     systemctl start argo-tunnel 2>/dev/null && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
+    if load_params; then
+        sleep 3
+        fetch_argo_domain 2>/dev/null || true
+        save_params
+        build_share_links
+        write_subscription_assets
+        ensure_subscription_service || warn "订阅服务启动失败"
+    fi
     press_enter
 }
 
@@ -1055,6 +1507,7 @@ do_stop() {
     info "停止服务..."
     systemctl stop sing-box 2>/dev/null && success "sing-box 已停止" || warn "sing-box 停止失败"
     systemctl stop argo-tunnel 2>/dev/null && success "argo-tunnel 已停止" || warn "argo-tunnel 停止失败"
+    systemctl stop sbm-subscription 2>/dev/null && success "订阅服务已停止" || warn "订阅服务停止失败"
     press_enter
 }
 
@@ -1068,6 +1521,9 @@ do_restart() {
     if load_params; then
         fetch_argo_domain 2>/dev/null || true
         save_params
+        build_share_links
+        write_subscription_assets
+        ensure_subscription_service || warn "订阅服务重启失败"
         info "Argo 域名: ${ARGO_DOMAIN:-获取中...}"
     fi
     press_enter
@@ -1081,6 +1537,9 @@ do_status() {
     separator
     echo -e "${CYAN}${BOLD}── argo-tunnel 状态 ──${NC}"
     systemctl status argo-tunnel --no-pager -l 2>/dev/null | head -15 || warn "argo-tunnel 未安装"
+    separator
+    echo -e "${CYAN}${BOLD}── 订阅服务状态 ──${NC}"
+    systemctl status sbm-subscription --no-pager -l 2>/dev/null | head -15 || warn "订阅服务未安装"
     press_enter
 }
 
@@ -1089,11 +1548,13 @@ do_logs() {
     echo ""
     echo -e "  1) sing-box 日志"
     echo -e "  2) argo-tunnel 日志"
+    echo -e "  3) 订阅服务日志"
     echo -e "  0) 返回"
     read -rp "  请选择: " choice
     case "$choice" in
         1) journalctl -u sing-box --output cat --no-pager -n 50 ;;
         2) journalctl -u argo-tunnel --output cat --no-pager -n 50 ;;
+        3) journalctl -u sbm-subscription --output cat --no-pager -n 50 ;;
     esac
     press_enter
 }
@@ -1101,19 +1562,21 @@ do_logs() {
 # ─── 开机自启设置 ──────────────────────────────────────────────
 do_boot_manage() {
     echo ""
-    echo -e "  1) 开启 sing-box & argo-tunnel 开机自启"
-    echo -e "  2) 关闭 sing-box & argo-tunnel 开机自启"
+    echo -e "  1) 开启 sing-box / argo-tunnel / 订阅服务 开机自启"
+    echo -e "  2) 关闭 sing-box / argo-tunnel / 订阅服务 开机自启"
     echo -e "  0) 返回"
     read -rp "  请选择: " choice
     case "$choice" in
         1)
             systemctl enable sing-box 2>/dev/null
             systemctl enable argo-tunnel 2>/dev/null
+            systemctl enable sbm-subscription 2>/dev/null
             success "已开启开机自启"
             ;;
         2)
             systemctl disable sing-box 2>/dev/null
             systemctl disable argo-tunnel 2>/dev/null
+            systemctl disable sbm-subscription 2>/dev/null
             success "已关闭开机自启"
             ;;
     esac
@@ -1160,6 +1623,7 @@ do_upgrade() {
                 # 仅刷新链接显示 (不重写配置、不重启)
                 if load_params; then
                     generate_and_show_links
+                    ensure_subscription_service || warn "订阅服务未成功启动"
                 fi
                 echo ""
                 read -rp "按 Enter 重启面板并进入新版本..." _
@@ -1183,7 +1647,10 @@ do_uninstall() {
     systemctl disable sing-box 2>/dev/null || true
     systemctl stop argo-tunnel 2>/dev/null || true
     systemctl disable argo-tunnel 2>/dev/null || true
+    systemctl stop sbm-subscription 2>/dev/null || true
+    systemctl disable sbm-subscription 2>/dev/null || true
     rm -f "$ARGO_SERVICE"
+    rm -f "$SUBSCRIPTION_SERVICE"
     systemctl daemon-reload
 
     if command -v apt-get &>/dev/null; then
@@ -1194,6 +1661,7 @@ do_uninstall() {
 
     rm -f /usr/local/bin/cloudflared
     rm -f /usr/local/bin/sbm
+    rm -f "$SUBSCRIPTION_SERVER"
     rm -rf "$CONFIG_DIR"
 
     success "卸载完成"
@@ -1298,7 +1766,7 @@ fi
 
 case "${1:-}" in
     install)     do_install ;;
-    links)       load_params && { ensure_time_sync || true; generate_and_show_links; } || warn "未安装" ;;
+    links|sub)   load_params && { ensure_time_sync || true; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; } || warn "未安装" ;;
     start)       do_start ;;
     stop)        do_stop ;;
     restart)     do_restart ;;
@@ -1310,7 +1778,8 @@ case "${1:-}" in
         echo "命令:"
         echo "  (无参数)   交互式管理菜单"
         echo "  install    直接安装"
-        echo "  links      显示分享链接"
+        echo "  links      显示分享链接与订阅地址"
+        echo "  sub        同 links"
         echo "  start      启动服务"
         echo "  stop       停止服务"
         echo "  restart    重启服务"
