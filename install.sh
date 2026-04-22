@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.5.9"
+SCRIPT_VERSION="2.6.0"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -105,12 +105,74 @@ detect_os() {
     esac
 }
 
+fetch_public_ipv4() {
+    local endpoint ip
+    for endpoint in \
+        "https://ifconfig.me" \
+        "https://api.ipify.org" \
+        "https://icanhazip.com"; do
+        ip=$(curl -4 -s --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)
+        if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    done
+    return 1
+}
+
+fetch_public_ipv6() {
+    local endpoint ip
+    for endpoint in \
+        "https://api6.ipify.org" \
+        "https://ifconfig.me" \
+        "https://icanhazip.com"; do
+        ip=$(curl -6 -s --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)
+        if [[ "$ip" == *:* && "$ip" != *"<"* ]]; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    done
+    return 1
+}
+
+refresh_public_ip_stack() {
+    if [[ -n "${IP_STACK_MODE:-}" && -n "${PUBLIC_IP:-}" ]]; then
+        return 0
+    fi
+
+    PUBLIC_IPV4=$(fetch_public_ipv4 || true)
+    PUBLIC_IPV6=$(fetch_public_ipv6 || true)
+
+    if [[ -n "$PUBLIC_IPV4" ]]; then
+        PUBLIC_IP="$PUBLIC_IPV4"
+        if [[ -n "$PUBLIC_IPV6" ]]; then
+            IP_STACK_MODE="dual-stack"
+        else
+            IP_STACK_MODE="ipv4-only"
+        fi
+        return 0
+    fi
+
+    if [[ -n "$PUBLIC_IPV6" ]]; then
+        PUBLIC_IP="$PUBLIC_IPV6"
+        IP_STACK_MODE="ipv6-only"
+        return 0
+    fi
+
+    return 1
+}
+
 get_public_ip() {
-    PUBLIC_IP=$(curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null || \
-                curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || \
-                curl -4 -s --max-time 5 https://icanhazip.com 2>/dev/null || \
-                echo "")
-    [[ -n "$PUBLIC_IP" ]] || error "无法获取公网 IP"
+    refresh_public_ip_stack || error "无法获取公网 IP"
+}
+
+format_url_host() {
+    local host="$1"
+    if [[ "$host" == *:* ]]; then
+        printf '[%s]' "$host"
+    else
+        printf '%s' "$host"
+    fi
 }
 
 is_private_ipv4() {
@@ -129,8 +191,11 @@ has_public_ip_on_interface() {
 }
 
 detect_external_access_mode() {
-    if [[ -z "${PUBLIC_IP:-}" ]]; then
-        get_public_ip
+    refresh_public_ip_stack || { echo "unknown"; return 0; }
+
+    if [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
+        echo "ipv6-only"
+        return 0
     fi
 
     if has_public_ip_on_interface; then
@@ -639,6 +704,13 @@ show_external_access_requirements() {
 
     echo -e "${CYAN}${BOLD}── 外部放行提示 ──${NC}"
     case "$access_mode" in
+        ipv6-only)
+            echo -e "  检测到 IPv6-only VPS，当前仅生成 Argo 节点链接。"
+            echo -e "  Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。"
+            echo -e "  Subscription: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(订阅内容仅包含 Argo 节点)${NC}"
+            echo ""
+            return
+            ;;
         direct)
             echo -e "  本机检测到公网 IP 直接挂载在网卡上。若仍有安全组/云防火墙，请同步放行以下端口。"
             ;;
@@ -647,6 +719,9 @@ show_external_access_requirements() {
             ;;
         panel)
             echo -e "  当前环境未检测到公网 IP 直接挂载在本机网卡，可能经过宿主机、防火墙面板或云安全组。请在外部面板同步放行。"
+            ;;
+        unknown)
+            echo -e "  未能检测公网地址，请按实际网络环境放行端口。"
             ;;
     esac
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
@@ -814,6 +889,7 @@ write_subscription_server() {
     cat > "$SUBSCRIPTION_SERVER" << 'PYEOF'
 #!/usr/bin/env python3
 import argparse
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -874,7 +950,10 @@ def main():
     parser.add_argument("--file", required=True)
     args = parser.parse_args()
 
-    server = ThreadingHTTPServer((args.listen, args.port), build_handler(args.token, args.file))
+    class Server(ThreadingHTTPServer):
+        address_family = socket.AF_INET6 if ":" in args.listen else socket.AF_INET
+
+    server = Server((args.listen, args.port), build_handler(args.token, args.file))
     server.serve_forever()
 
 
@@ -884,7 +963,18 @@ PYEOF
     chmod 755 "$SUBSCRIPTION_SERVER"
 }
 
+subscription_listen_host() {
+    if refresh_public_ip_stack 2>/dev/null && [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
+        echo "::"
+    else
+        echo "0.0.0.0"
+    fi
+}
+
 write_subscription_service() {
+    local listen_host
+    listen_host=$(subscription_listen_host)
+
     cat > "$SUBSCRIPTION_SERVICE" << EOF
 [Unit]
 Description=SBM Subscription Server
@@ -892,7 +982,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen 0.0.0.0 --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE}
+ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -954,6 +1044,13 @@ fetch_argo_domain() {
     return 1
 }
 
+refresh_argo_domain_if_needed() {
+    if [[ -z "${ARGO_DOMAIN:-}" ]] && systemctl is-active --quiet argo-tunnel 2>/dev/null; then
+        fetch_argo_domain 2>/dev/null || true
+        [[ -n "${ARGO_DOMAIN:-}" ]] && save_params
+    fi
+}
+
 # ─── Reality 优选 SNI ────────────────────────────────────────
 select_reality_sni() {
     if [[ -n "${REALITY_SNI:-}" ]]; then
@@ -1002,18 +1099,26 @@ select_reality_sni() {
 # ================== CF 优选：随机选择可用域名 ==================
 select_random_cf_domain() {
     local available=()
+    local curl_ip_arg=()
+    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && curl_ip_arg=(-6)
+
     for domain in "${CF_DOMAINS[@]}"; do
-        if curl -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null; then
+        if curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null; then
             available+=("$domain")
         fi
     done
-    [ ${#available[@]} -gt 0 ] && echo "${available[$((RANDOM % ${#available[@]}))]}"
+    if [[ ${#available[@]} -gt 0 ]]; then
+        echo "${available[$((RANDOM % ${#available[@]}))]}"
+    fi
+    return 0
 }
 
 check_cf_domain_available() {
     local domain="$1"
+    local curl_ip_arg=()
     [[ -n "$domain" ]] || return 1
-    curl -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && curl_ip_arg=(-6)
+    curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
 }
 
 resolve_argo_best_cf_domain() {
@@ -1028,6 +1133,13 @@ resolve_argo_best_cf_domain() {
     next_domain="$(select_random_cf_domain)"
 
     if [[ -z "$next_domain" ]]; then
+        if [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
+            ARGO_BEST_CF_DOMAIN="${ARGO_DOMAIN}"
+            warn "未探测到可用的 IPv6 CF 优选域名，使用 Argo 域名作为接入地址"
+            save_params
+            return 0
+        fi
+
         if [[ -n "$previous_domain" ]]; then
             warn "原 Argo 优选域名当前不可用，且未找到新的可用域名，暂时保留原链接地址"
             ARGO_BEST_CF_DOMAIN="$previous_domain"
@@ -1063,11 +1175,26 @@ urlencode() {
 build_share_links() {
     get_public_ip
 
-    local remark
-    remark=$(urlencode "${NODE_NAME}-Reality")
-    GENERATED_REALITY_LINK="vless://${UUID}@${PUBLIC_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
-
+    GENERATED_REALITY_LINK=""
     GENERATED_ARGO_LINK=""
+    GENERATED_HY2_LINK=""
+    GENERATED_SUBSCRIPTION_RAW=""
+
+    if [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
+        warn "检测到 IPv6-only VPS，仅生成 Argo 节点链接。"
+    else
+        local remark
+        remark=$(urlencode "${NODE_NAME}-Reality")
+        GENERATED_REALITY_LINK="vless://${UUID}@${PUBLIC_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
+
+        if [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]]; then
+            local hy2_remark hy2_pass_enc
+            hy2_remark=$(urlencode "${NODE_NAME}-Hysteria2")
+            hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
+            GENERATED_HY2_LINK="hysteria2://${hy2_pass_enc}@${PUBLIC_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
+        fi
+    fi
+
     if [[ -n "${ARGO_DOMAIN:-}" ]]; then
         local argo_remark
         argo_remark=$(urlencode "${NODE_NAME}-Argo")
@@ -1076,23 +1203,19 @@ build_share_links() {
         local best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
 
         GENERATED_ARGO_LINK="vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
+    elif [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
+        warn "Argo 域名未就绪，暂无法生成 IPv6-only 可导入链接。"
     fi
 
-    GENERATED_HY2_LINK=""
-    if [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]]; then
-        local hy2_remark hy2_pass_enc
-        hy2_remark=$(urlencode "${NODE_NAME}-Hysteria2")
-        hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
-        GENERATED_HY2_LINK="hysteria2://${hy2_pass_enc}@${PUBLIC_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
-    fi
-
-    GENERATED_SUBSCRIPTION_RAW="${GENERATED_REALITY_LINK}"
-    if [[ -n "${GENERATED_ARGO_LINK}" ]]; then
-        GENERATED_SUBSCRIPTION_RAW+=$'\n'"${GENERATED_ARGO_LINK}"
-    fi
-    if [[ -n "${GENERATED_HY2_LINK}" ]]; then
-        GENERATED_SUBSCRIPTION_RAW+=$'\n'"${GENERATED_HY2_LINK}"
-    fi
+    local link
+    for link in "$GENERATED_REALITY_LINK" "$GENERATED_ARGO_LINK" "$GENERATED_HY2_LINK"; do
+        [[ -z "$link" ]] && continue
+        if [[ -z "$GENERATED_SUBSCRIPTION_RAW" ]]; then
+            GENERATED_SUBSCRIPTION_RAW="$link"
+        else
+            GENERATED_SUBSCRIPTION_RAW+=$'\n'"$link"
+        fi
+    done
 }
 
 write_subscription_assets() {
@@ -1104,14 +1227,21 @@ write_subscription_assets() {
 }
 
 show_subscription_url() {
+    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return
+
+    local public_host
+    public_host=$(format_url_host "$PUBLIC_IP")
+
     echo -e "${CYAN}${BOLD}── 订阅地址 ──${NC}"
-    echo -e "  ${BOLD}http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
-    echo -e "  ${DIM}兼容写法: http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
+    echo -e "  ${BOLD}http://${public_host}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
+    echo -e "  ${DIM}兼容写法: http://${public_host}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
     echo ""
 }
 
 generate_and_show_links() {
     build_share_links
+    local is_ipv6_only=false
+    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && is_ipv6_only=true
 
     echo ""
     echo -e "${PURPLE}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
@@ -1120,12 +1250,19 @@ generate_and_show_links() {
     echo ""
 
     echo -e "${CYAN}${BOLD}── 基本信息 ──${NC}"
-    echo -e "  服务器 IP:     ${BOLD}${PUBLIC_IP}${NC}"
+    if [[ "$is_ipv6_only" == "true" ]]; then
+        echo -e "  公网类型:      ${BOLD}IPv6-only${NC}"
+        echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IP}${NC}"
+    else
+        echo -e "  服务器 IP:     ${BOLD}${PUBLIC_IP}${NC}"
+    fi
     echo -e "  UUID:          ${BOLD}${UUID}${NC}"
-    echo -e "  Reality 端口:  ${BOLD}${REALITY_PORT}${NC}"
-    echo -e "  Reality SNI:   ${BOLD}${REALITY_SNI}${NC}"
-    echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
-    echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
+    if [[ "$is_ipv6_only" != "true" ]]; then
+        echo -e "  Reality 端口:  ${BOLD}${REALITY_PORT}${NC}"
+        echo -e "  Reality SNI:   ${BOLD}${REALITY_SNI}${NC}"
+        echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
+        echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
+    fi
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC}"
         echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN:-未配置}${NC}"
@@ -1134,14 +1271,18 @@ generate_and_show_links() {
         [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
     fi
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
-    echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
-    echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
+    if [[ "$is_ipv6_only" != "true" ]]; then
+        echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
+        echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
+    fi
     echo ""
 
-    echo -e "${GREEN}${BOLD}── VLESS + Reality (直连) ──${NC}"
-    echo -e "${YELLOW}${GENERATED_REALITY_LINK}${NC}"
-    echo -e "  ${DIM}提示: Reality 请使用 Xray-core / sing-box 内核；若 v2rayN 当前使用 v2fly core，请先切换到 Xray core。${NC}"
-    echo ""
+    if [[ -n "${GENERATED_REALITY_LINK}" ]]; then
+        echo -e "${GREEN}${BOLD}── VLESS + Reality (直连) ──${NC}"
+        echo -e "${YELLOW}${GENERATED_REALITY_LINK}${NC}"
+        echo -e "  ${DIM}提示: Reality 请使用 Xray-core / sing-box 内核；若 v2rayN 当前使用 v2fly core，请先切换到 Xray core。${NC}"
+        echo ""
+    fi
 
     if [[ -n "${GENERATED_ARGO_LINK}" ]]; then
         echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
@@ -1149,13 +1290,16 @@ generate_and_show_links() {
         echo -e "  优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN}${NC}"
         echo -e "${YELLOW}${GENERATED_ARGO_LINK}${NC}"
         echo ""
+    elif [[ "$is_ipv6_only" == "true" ]]; then
+        echo -e "${YELLOW}  Argo 域名未就绪，稍后执行 sbm links 重新生成。${NC}"
+        echo ""
     fi
 
     if [[ -n "${GENERATED_HY2_LINK}" ]]; then
         echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
         echo -e "${YELLOW}${GENERATED_HY2_LINK}${NC}"
         echo ""
-    else
+    elif [[ "$is_ipv6_only" != "true" ]]; then
         echo -e "${DIM}  Hysteria2: 未启用 (重新安装即可自动启用)${NC}"
         echo ""
     fi
@@ -1165,23 +1309,33 @@ generate_and_show_links() {
     write_subscription_assets
 
     {
-        echo "# sing-box 分享链接 - $(date '+%Y-%m-%d %H:%M:%S')"
-        echo ""
-        echo "# VLESS + Reality (直连)"
-        echo "$GENERATED_REALITY_LINK"
-        if [[ -n "$GENERATED_ARGO_LINK" ]]; then
+        if [[ "$is_ipv6_only" == "true" ]]; then
+            [[ -n "$GENERATED_ARGO_LINK" ]] && echo "$GENERATED_ARGO_LINK"
+        else
+            echo "# sing-box 分享链接 - $(date '+%Y-%m-%d %H:%M:%S')"
             echo ""
-            echo "# VLESS + WS + Argo (CDN)"
-            echo "$GENERATED_ARGO_LINK"
+            if [[ -n "$GENERATED_REALITY_LINK" ]]; then
+                echo "# VLESS + Reality (直连)"
+                echo "$GENERATED_REALITY_LINK"
+            fi
+            if [[ -n "$GENERATED_ARGO_LINK" ]]; then
+                echo ""
+                echo "# VLESS + WS + Argo (CDN)"
+                echo "$GENERATED_ARGO_LINK"
+            fi
+            if [[ -n "$GENERATED_HY2_LINK" ]]; then
+                echo ""
+                echo "# Hysteria2 (QUIC/UDP 高速)"
+                echo "$GENERATED_HY2_LINK"
+            fi
+            if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]]; then
+                local public_host
+                public_host=$(format_url_host "$PUBLIC_IP")
+                echo ""
+                echo "# Subscription"
+                echo "http://${public_host}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
+            fi
         fi
-        if [[ -n "$GENERATED_HY2_LINK" ]]; then
-            echo ""
-            echo "# Hysteria2 (QUIC/UDP 高速)"
-            echo "$GENERATED_HY2_LINK"
-        fi
-        echo ""
-        echo "# Subscription"
-        echo "http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
     } > "$LINK_FILE"
     chmod 600 "$LINK_FILE"
 
@@ -1475,11 +1629,7 @@ do_show_links() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
     ensure_time_sync || true
 
-    # 直接使用已保存的 Argo 域名，不重新获取
-    if [[ -z "${ARGO_DOMAIN:-}" ]] && systemctl is-active --quiet argo-tunnel 2>/dev/null; then
-        fetch_argo_domain 2>/dev/null || true
-        [[ -n "${ARGO_DOMAIN:-}" ]] && save_params
-    fi
+    refresh_argo_domain_if_needed
 
     generate_and_show_links
     ensure_subscription_service || warn "订阅服务未成功启动"
@@ -1622,6 +1772,7 @@ do_upgrade() {
                 info "如需启用 Hysteria2 等新功能，请使用 [1) 重新安装] 或 [2) 修改配置]。"
                 # 仅刷新链接显示 (不重写配置、不重启)
                 if load_params; then
+                    refresh_argo_domain_if_needed
                     generate_and_show_links
                     ensure_subscription_service || warn "订阅服务未成功启动"
                 fi
@@ -1766,7 +1917,7 @@ fi
 
 case "${1:-}" in
     install)     do_install ;;
-    links|sub)   load_params && { ensure_time_sync || true; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; } || warn "未安装" ;;
+    links|sub)   load_params && { ensure_time_sync || true; refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; } || warn "未安装" ;;
     start)       do_start ;;
     stop)        do_stop ;;
     restart)     do_restart ;;
