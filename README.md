@@ -11,7 +11,7 @@
 - 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box + cloudflared 为系统服务。
 - 🔧 **多协议链路框架** — 预置支持 VLESS 协议，并兼容 TCP、WebSocket 以及 UDP(QUIC) 等多条传输控制路径配置。
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
-- 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、重载配置、监控日志与开机自启。
+- 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、订阅端口、重载配置、监控日志与开机自启。
 
 ## 📦 一键安装配置
 
@@ -19,7 +19,14 @@
 bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh")
 ```
 
-> 需要 root 权限，支持主流的 Ubuntu / Debian / CentOS / RHEL / Fedora 操作系统。
+Alpine 初始系统请先安装 Bash 和 curl：
+
+```bash
+apk add --no-cache bash curl
+bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh")
+```
+
+> 需要 root 权限，支持 Ubuntu / Debian / CentOS / RHEL / Fedora / Alpine。
 
 ## 🎛️ 管理面板使用指南
 

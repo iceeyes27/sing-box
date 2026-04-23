@@ -21,8 +21,11 @@ LINK_FILE="${CONFIG_DIR}/share-links.txt"
 SUBSCRIPTION_FILE="${CONFIG_DIR}/subscription.txt"
 SUBSCRIPTION_SERVER="/usr/local/bin/sbm-subscription-server.py"
 SUBSCRIPTION_SERVICE="/etc/systemd/system/sbm-subscription.service"
+SUBSCRIPTION_OPENRC_SERVICE="/etc/init.d/sbm-subscription"
 SUBSCRIPTION_PORT=24630
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
+ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
+SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
 TIME_SKEW_THRESHOLD=30
@@ -102,6 +105,105 @@ detect_os() {
         aarch64) ARCH_CF="arm64" ;;
         armv7l)  ARCH_CF="arm"   ;;
         *) ARCH_CF="amd64" ;;
+    esac
+}
+
+service_manager() {
+    if command -v systemctl &>/dev/null && systemctl list-unit-files >/dev/null 2>&1; then
+        echo "systemd"
+    elif command -v rc-service &>/dev/null; then
+        echo "openrc"
+    else
+        echo "none"
+    fi
+}
+
+service_daemon_reload() {
+    [[ "$(service_manager)" == "systemd" ]] && systemctl daemon-reload 2>/dev/null || true
+}
+
+service_start() {
+    local svc=$1
+    case "$(service_manager)" in
+        systemd) systemctl start "$svc" 2>/dev/null ;;
+        openrc)  rc-service "$svc" start 2>/dev/null ;;
+        *)       return 1 ;;
+    esac
+}
+
+service_stop() {
+    local svc=$1
+    case "$(service_manager)" in
+        systemd) systemctl stop "$svc" 2>/dev/null ;;
+        openrc)  rc-service "$svc" stop 2>/dev/null ;;
+        *)       return 1 ;;
+    esac
+}
+
+service_restart() {
+    local svc=$1
+    case "$(service_manager)" in
+        systemd) systemctl restart "$svc" 2>/dev/null ;;
+        openrc)  rc-service "$svc" restart 2>/dev/null || rc-service "$svc" start 2>/dev/null ;;
+        *)       return 1 ;;
+    esac
+}
+
+service_enable() {
+    local svc=$1
+    case "$(service_manager)" in
+        systemd) systemctl enable "$svc" 2>/dev/null ;;
+        openrc)  rc-update add "$svc" default 2>/dev/null ;;
+        *)       return 1 ;;
+    esac
+}
+
+service_disable() {
+    local svc=$1
+    case "$(service_manager)" in
+        systemd) systemctl disable "$svc" 2>/dev/null ;;
+        openrc)  rc-update del "$svc" default 2>/dev/null ;;
+        *)       return 1 ;;
+    esac
+}
+
+service_enable_now() {
+    local svc=$1
+    service_enable "$svc" 2>/dev/null || true
+    service_restart "$svc" 2>/dev/null || service_start "$svc"
+}
+
+service_is_active() {
+    local svc=$1
+    case "$(service_manager)" in
+        systemd) systemctl is-active --quiet "$svc" 2>/dev/null ;;
+        openrc)  rc-service "$svc" status 2>/dev/null | grep -Eq 'started|running' ;;
+        *)       return 1 ;;
+    esac
+}
+
+service_status() {
+    local svc=$1
+    case "$(service_manager)" in
+        systemd) systemctl status "$svc" --no-pager -l 2>/dev/null | head -15 ;;
+        openrc)  rc-service "$svc" status 2>/dev/null || return 1 ;;
+        *)       return 1 ;;
+    esac
+}
+
+service_logs() {
+    local svc=$1
+    local lines=${2:-50}
+    case "$(service_manager)" in
+        systemd) journalctl -u "$svc" --output cat --no-pager -n "$lines" 2>/dev/null ;;
+        openrc)
+            if [[ -f "/var/log/${svc}.log" ]]; then
+                tail -n "$lines" "/var/log/${svc}.log"
+            else
+                return 1
+            fi
+            ;;
+        *) return 1 ;;
     esac
 }
 
@@ -224,6 +326,7 @@ WS_PORT="${WS_PORT}"
 WS_PATH="${WS_PATH}"
 NODE_NAME="${NODE_NAME}"
 SUB_TOKEN="${SUB_TOKEN:-}"
+SUBSCRIPTION_PORT="${SUBSCRIPTION_PORT}"
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"
 ARGO_TOKEN="${ARGO_TOKEN:-}"
 ARGO_BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN:-}"
@@ -262,6 +365,10 @@ load_params() {
             SUB_TOKEN=$(openssl rand -hex 16)
             need_save=true
         fi
+        if [[ -z "${SUBSCRIPTION_PORT:-}" ]]; then
+            SUBSCRIPTION_PORT=24630
+            need_save=true
+        fi
         [[ "$need_save" == "true" ]] && save_params
         return 0
     fi
@@ -276,16 +383,32 @@ install_deps() {
         apt-get install -y -qq curl wget jq openssl python3 > /dev/null 2>&1
     elif command -v yum &>/dev/null; then
         yum install -y -q curl wget jq openssl python3 > /dev/null 2>&1
+    elif command -v apk &>/dev/null; then
+        apk add --no-cache bash curl wget jq openssl python3 iproute2 lsof ca-certificates > /dev/null 2>&1
     fi
     success "依赖就绪"
 }
 
 get_rtc_utc_epoch() {
     command -v hwclock &>/dev/null || return 1
-    local rtc_raw
-    rtc_raw=$(hwclock --utc --show 2>/dev/null | sed 's/  \..*$//')
+    local rtc_raw rtc_input rtc_epoch rtc_tz
+    rtc_raw=$(LC_ALL=C hwclock --utc --show 2>/dev/null || true)
     [[ -n "$rtc_raw" ]] || return 1
-    date -u -d "$rtc_raw" +%s 2>/dev/null
+
+    if [[ "$rtc_raw" =~ ([0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?[[:space:]]*([+-][0-9]{2}:?[0-9]{2}|UTC|Z)? ]]; then
+        rtc_tz="${BASH_REMATCH[4]:-UTC}"
+        [[ "$rtc_tz" == "Z" ]] && rtc_tz="UTC"
+        rtc_input="${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${rtc_tz}"
+    elif [[ "$rtc_raw" =~ [A-Z][a-z]{2}[[:space:]]+([A-Z][a-z]{2})[[:space:]]+([0-9]{1,2})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2})[[:space:]]+([0-9]{4}) ]]; then
+        rtc_input="${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]} UTC"
+    else
+        return 1
+    fi
+
+    rtc_epoch=$(LC_ALL=C date -u -d "$rtc_input" +%s 2>/dev/null || return 1)
+    [[ "$rtc_epoch" =~ ^[0-9]+$ ]] || return 1
+    (( rtc_epoch >= 946684800 )) || return 1
+    echo "$rtc_epoch"
 }
 
 get_time_skew_seconds() {
@@ -300,6 +423,8 @@ get_time_skew_seconds() {
 is_time_synchronized() {
     if command -v timedatectl &>/dev/null; then
         [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]]
+    elif command -v chronyc &>/dev/null; then
+        chronyc tracking 2>/dev/null | grep -Eq 'Leap status[[:space:]]*:[[:space:]]*Normal'
     else
         return 1
     fi
@@ -307,14 +432,15 @@ is_time_synchronized() {
 
 start_time_sync_service() {
     for svc in systemd-timesyncd chrony chronyd; do
-        if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
-            systemctl enable --now "${svc}" 2>/dev/null || systemctl restart "${svc}" 2>/dev/null || true
-        fi
+        service_enable_now "$svc" 2>/dev/null || true
     done
 }
 
 install_time_sync_service() {
-    if systemctl list-unit-files systemd-timesyncd.service >/dev/null 2>&1 || command -v chronyc &>/dev/null; then
+    if [[ "$(service_manager)" == "systemd" ]] && systemctl list-unit-files systemd-timesyncd.service >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v chronyc &>/dev/null; then
         return 0
     fi
 
@@ -329,6 +455,9 @@ install_time_sync_service() {
     elif command -v yum &>/dev/null; then
         info "安装时间同步服务 chrony..."
         yum install -y -q chrony > /dev/null 2>&1 || return 1
+    elif command -v apk &>/dev/null; then
+        info "安装时间同步服务 chrony..."
+        apk add --no-cache chrony > /dev/null 2>&1 || return 1
     else
         return 1
     fi
@@ -403,7 +532,11 @@ install_singbox() {
         info "sing-box 已安装: $ver"
     else
         info "安装 sing-box..."
-        curl -fsSL https://sing-box.app/install.sh | sh
+        if command -v apk &>/dev/null; then
+            apk add --no-cache sing-box > /dev/null 2>&1 || curl -fsSL https://sing-box.app/install.sh | sh
+        else
+            curl -fsSL https://sing-box.app/install.sh | sh
+        fi
         success "sing-box 安装完成"
     fi
     mkdir -p "$CONFIG_DIR"
@@ -419,6 +552,30 @@ install_cloudflared() {
         -o /usr/local/bin/cloudflared
     chmod +x /usr/local/bin/cloudflared
     success "cloudflared 安装完成"
+}
+
+write_singbox_service() {
+    [[ "$(service_manager)" == "openrc" ]] || return 0
+
+    local singbox_bin
+    singbox_bin=$(command -v sing-box 2>/dev/null || echo "/usr/bin/sing-box")
+
+    cat > "$SINGBOX_OPENRC_SERVICE" << EOF
+#!/sbin/openrc-run
+name="sing-box"
+description="sing-box service"
+command="${singbox_bin}"
+command_args="run -c ${CONFIG_FILE}"
+command_background=true
+pidfile="/run/sing-box.pid"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.log"
+
+depend() {
+    need net
+}
+EOF
+    chmod 755 "$SINGBOX_OPENRC_SERVICE"
 }
 
 # ─── 生成参数 ────────────────────────────────────────────────
@@ -438,6 +595,7 @@ generate_params() {
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
     SUB_TOKEN=$(openssl rand -hex 16)
+    SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT:-24630}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
     ARGO_BEST_CF_DOMAIN=""
@@ -668,13 +826,19 @@ open_service_ports() {
 validate_service_ports() {
     local old_reality_port=${1:-}
     local old_hy2_port=${2:-}
+    local old_subscription_port=${3:-}
 
     validate_port "${REALITY_PORT:-}" "Reality" || return 1
     validate_port "${WS_PORT:-}" "VLESS-WS" || return 1
     validate_port "${HY2_PORT:-}" "Hysteria2" || return 1
+    validate_port "${SUBSCRIPTION_PORT:-}" "订阅服务" || return 1
 
     if [[ "${REALITY_PORT}" == "${WS_PORT}" ]]; then
         warn "Reality 端口 ${REALITY_PORT}/TCP 与 VLESS-WS 内部端口 ${WS_PORT}/TCP 冲突"
+        return 1
+    fi
+    if [[ "${SUBSCRIPTION_PORT}" == "${REALITY_PORT}" || "${SUBSCRIPTION_PORT}" == "${WS_PORT}" ]]; then
+        warn "订阅服务端口 ${SUBSCRIPTION_PORT}/TCP 与现有 TCP 服务端口冲突"
         return 1
     fi
 
@@ -692,6 +856,12 @@ validate_service_ports() {
 
     if [[ -z "$old_reality_port" ]]; then
         assert_port_available "$WS_PORT" "tcp" "VLESS-WS" || return 1
+    fi
+
+    if [[ -z "$old_subscription_port" || "$SUBSCRIPTION_PORT" != "$old_subscription_port" ]]; then
+        assert_port_available "$SUBSCRIPTION_PORT" "tcp" "订阅服务" || return 1
+    else
+        info "订阅服务端口未变化，跳过占用检查"
     fi
 
     open_service_ports || return 1
@@ -862,6 +1032,27 @@ write_argo_service() {
         exec_cmd="/usr/local/bin/cloudflared tunnel --url http://127.0.0.1:${WS_PORT} --no-autoupdate --protocol http2"
     fi
 
+    if [[ "$(service_manager)" == "openrc" ]]; then
+        cat > "$ARGO_OPENRC_SERVICE" << EOF
+#!/sbin/openrc-run
+name="argo-tunnel"
+description="Cloudflare Argo Tunnel"
+command="/usr/local/bin/cloudflared"
+command_args="${exec_cmd#/usr/local/bin/cloudflared }"
+command_background=true
+pidfile="/run/argo-tunnel.pid"
+output_log="/var/log/argo-tunnel.log"
+error_log="/var/log/argo-tunnel.log"
+
+depend() {
+    need net
+    after sing-box
+}
+EOF
+        chmod 755 "$ARGO_OPENRC_SERVICE"
+        return
+    fi
+
     cat > "$ARGO_SERVICE" << EOF
 [Unit]
 Description=Cloudflare Argo Tunnel
@@ -881,7 +1072,7 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
+    service_daemon_reload
 }
 
 # ─── 订阅服务 ────────────────────────────────────────────────
@@ -975,6 +1166,26 @@ write_subscription_service() {
     local listen_host
     listen_host=$(subscription_listen_host)
 
+    if [[ "$(service_manager)" == "openrc" ]]; then
+        cat > "$SUBSCRIPTION_OPENRC_SERVICE" << EOF
+#!/sbin/openrc-run
+name="sbm-subscription"
+description="SBM Subscription Server"
+command="/usr/bin/python3"
+command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE}"
+command_background=true
+pidfile="/run/sbm-subscription.pid"
+output_log="/var/log/sbm-subscription.log"
+error_log="/var/log/sbm-subscription.log"
+
+depend() {
+    need net
+}
+EOF
+        chmod 755 "$SUBSCRIPTION_OPENRC_SERVICE"
+        return
+    fi
+
     cat > "$SUBSCRIPTION_SERVICE" << EOF
 [Unit]
 Description=SBM Subscription Server
@@ -991,7 +1202,7 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
+    service_daemon_reload
 }
 
 ensure_subscription_service() {
@@ -1009,7 +1220,7 @@ ensure_subscription_service() {
     backend=$(detect_firewall_backend)
     open_firewall "${SUBSCRIPTION_PORT}" "$backend" tcp || return 1
 
-    systemctl enable sbm-subscription --now 2>/dev/null || systemctl restart sbm-subscription
+    service_enable_now sbm-subscription
 }
 
 # ─── 获取 Argo 域名 ──────────────────────────────────────────
@@ -1028,8 +1239,8 @@ fetch_argo_domain() {
     local previous_domain="${ARGO_DOMAIN:-}"
     ARGO_DOMAIN=""
     while [[ $i -lt $max ]]; do
-        ARGO_DOMAIN=$(journalctl -u argo-tunnel --output cat --no-pager 2>/dev/null | \
-                      grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' | \
+        ARGO_DOMAIN=$(service_logs argo-tunnel 300 2>/dev/null | \
+                      grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' | \
                       tail -1 | sed 's|https://||')
         if [[ -n "$ARGO_DOMAIN" ]]; then
             if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
@@ -1045,7 +1256,7 @@ fetch_argo_domain() {
 }
 
 refresh_argo_domain_if_needed() {
-    if [[ -z "${ARGO_DOMAIN:-}" ]] && systemctl is-active --quiet argo-tunnel 2>/dev/null; then
+    if [[ -z "${ARGO_DOMAIN:-}" ]] && service_is_active argo-tunnel; then
         fetch_argo_domain 2>/dev/null || true
         [[ -n "${ARGO_DOMAIN:-}" ]] && save_params
     fi
@@ -1263,6 +1474,7 @@ generate_and_show_links() {
         echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
         echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
     fi
+    echo -e "  订阅端口:      ${BOLD}${SUBSCRIPTION_PORT}${NC}"
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC}"
         echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN:-未配置}${NC}"
@@ -1378,6 +1590,9 @@ do_install() {
         [[ -n "$input" ]] && HY2_PORT="$input"
     fi
 
+    read -rp "  订阅服务端口 [${SUBSCRIPTION_PORT}]: " input
+    [[ -n "$input" ]] && SUBSCRIPTION_PORT="$input"
+
     read -rp "  伪装域名 (留空自动测速优选): " input
     [[ -n "$input" ]] && REALITY_SNI="$input"
 
@@ -1420,21 +1635,22 @@ do_install() {
     fi
 
     write_singbox_config
+    write_singbox_service
     write_argo_service
 
     # 启动 sing-box
     info "启动 sing-box..."
-    systemctl enable sing-box --now 2>/dev/null || systemctl restart sing-box
+    service_enable_now sing-box
     sleep 2
-    if systemctl is-active --quiet sing-box; then
+    if service_is_active sing-box; then
         success "sing-box 已启动"
     else
-        error "sing-box 启动失败: journalctl -u sing-box --output cat -e"
+        error "sing-box 启动失败，请查看服务日志"
     fi
 
     # 启动 Argo
     info "启动 Argo 隧道..."
-    systemctl enable argo-tunnel --now 2>/dev/null || systemctl restart argo-tunnel
+    service_enable_now argo-tunnel
     info "等待 Argo 隧道分配域名..."
     sleep 5
 
@@ -1463,6 +1679,7 @@ do_modify_config() {
     while true; do
         local old_reality_port="${REALITY_PORT}"
         local old_hy2_port="${HY2_PORT}"
+        local old_subscription_port="${SUBSCRIPTION_PORT}"
         clear
         echo -e "${CYAN}${BOLD}"
         echo "  ── 修改配置 ──"
@@ -1477,17 +1694,21 @@ do_modify_config() {
         echo -e "  8) 重新生成 Hysteria2 密码"
         echo -e "  9) 切换为单端口模式 (443)  ${GREEN}推荐${NC}"
         echo -e "  10) 修改 Argo 隧道 (Token/域名)"
+        echo -e "  11) 修改订阅服务端口       ${DIM}(当前: ${SUBSCRIPTION_PORT})${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        read -rp "  请选择 [0-10]: " choice
+        read -rp "  请选择 [0-11]: " choice
 
         local changed=false
+        local restart_singbox=false
+        local restart_argo=false
         case "$choice" in
             1)
                 read -rp "  新端口: " input
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     REALITY_PORT="$input"
                     changed=true
+                    restart_singbox=true
                 fi
                 ;;
             2)
@@ -1495,12 +1716,14 @@ do_modify_config() {
                 if [[ -n "$input" ]]; then
                     REALITY_SNI="$input"
                     changed=true
+                    restart_singbox=true
                 fi
                 ;;
             3)
                 UUID=$(sing-box generate uuid)
                 info "新 UUID: $UUID"
                 changed=true
+                restart_singbox=true
                 ;;
             4)
                 local keypair
@@ -1511,6 +1734,7 @@ do_modify_config() {
                 WS_PATH="/${SHORT_ID}"
                 info "新密钥对已生成"
                 changed=true
+                restart_singbox=true
                 ;;
             5)
                 read -rp "  新节点名称: " input
@@ -1523,24 +1747,28 @@ do_modify_config() {
                 REALITY_SNI=""
                 select_reality_sni
                 changed=true
+                restart_singbox=true
                 ;;
             7)
                 read -rp "  新 Hysteria2 端口: " input
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     HY2_PORT="$input"
                     changed=true
+                    restart_singbox=true
                 fi
                 ;;
             8)
                 HY2_PASSWORD=$(openssl rand -base64 16)
                 info "新 Hysteria2 密码: $HY2_PASSWORD"
                 changed=true
+                restart_singbox=true
                 ;;
             9)
                 REALITY_PORT=443
                 HY2_PORT=443
                 info "已切换为单端口模式: 443"
                 changed=true
+                restart_singbox=true
                 ;;
             10)
                 echo -e "\n  当前模式: $( [[ -n "$ARGO_TOKEN" ]] && echo "固定域名" || echo "临时域名" )"
@@ -1570,55 +1798,76 @@ do_modify_config() {
                     ARGO_DOMAIN=""
                     ARGO_BEST_CF_DOMAIN=""
                 fi
-                write_argo_service
-                systemctl restart argo-tunnel 2>/dev/null
                 changed=true
+                restart_argo=true
+                ;;
+            11)
+                read -rp "  新订阅服务端口: " input
+                if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
+                    SUBSCRIPTION_PORT="$input"
+                    changed=true
+                fi
                 ;;
             0) return ;;
             *) continue ;;
         esac
 
         if [[ "$changed" == "true" ]]; then
-            if ! validate_service_ports "$old_reality_port" "$old_hy2_port"; then
+            if ! validate_service_ports "$old_reality_port" "$old_hy2_port" "$old_subscription_port"; then
                 REALITY_PORT="$old_reality_port"
                 HY2_PORT="$old_hy2_port"
+                SUBSCRIPTION_PORT="$old_subscription_port"
                 warn "端口检查未通过，已保留原配置"
                 press_enter
                 continue
             fi
 
-            # 确保 TLS 证书存在 (Hysteria2 需要)
-            generate_tls_cert
-            write_singbox_config
-            # 注意: 不重写 argo service，不重启 argo，不刷新 argo 域名
-            save_params
-            ensure_time_sync || true
-            info "重启 sing-box..."
-            if ! systemctl restart sing-box 2>/dev/null; then
-                REALITY_PORT="$old_reality_port"
-                HY2_PORT="$old_hy2_port"
+            if [[ "$restart_singbox" == "true" ]]; then
+                # 确保 TLS 证书存在 (Hysteria2 需要)
+                generate_tls_cert
                 write_singbox_config
+                write_singbox_service
                 save_params
-                warn "sing-box 重启失败，正在回滚到旧端口配置..."
-                systemctl restart sing-box 2>/dev/null || true
-                press_enter
-                continue
-            fi
-            sleep 2
-            if systemctl is-active --quiet sing-box 2>/dev/null; then
-                success "配置已更新并重启"
+                ensure_time_sync || true
+                info "重启 sing-box..."
+                if ! service_restart sing-box; then
+                    REALITY_PORT="$old_reality_port"
+                    HY2_PORT="$old_hy2_port"
+                    SUBSCRIPTION_PORT="$old_subscription_port"
+                    write_singbox_config
+                    write_singbox_service
+                    save_params
+                    warn "sing-box 重启失败，正在恢复旧端口配置..."
+                    service_restart sing-box 2>/dev/null || true
+                    press_enter
+                    continue
+                fi
+                sleep 2
+                if service_is_active sing-box; then
+                    success "配置已更新并重启"
+                else
+                    REALITY_PORT="$old_reality_port"
+                    HY2_PORT="$old_hy2_port"
+                    SUBSCRIPTION_PORT="$old_subscription_port"
+                    write_singbox_config
+                    write_singbox_service
+                    save_params
+                    warn "sing-box 未成功启动，正在恢复旧端口配置..."
+                    service_restart sing-box 2>/dev/null || true
+                    press_enter
+                    continue
+                fi
             else
-                REALITY_PORT="$old_reality_port"
-                HY2_PORT="$old_hy2_port"
-                write_singbox_config
                 save_params
-                warn "sing-box 未成功启动，正在回滚到旧端口配置..."
-                systemctl restart sing-box 2>/dev/null || true
-                press_enter
-                continue
+                success "配置已更新"
+            fi
+
+            if [[ "$restart_argo" == "true" ]]; then
+                write_argo_service
+                service_restart argo-tunnel 2>/dev/null || true
             fi
             generate_and_show_links
-            ensure_subscription_service || warn "订阅服务启动失败，请检查 python3 或 systemd 日志"
+            ensure_subscription_service || warn "订阅服务启动失败，请检查 python3 或服务日志"
             press_enter
         fi
     done
@@ -1640,8 +1889,8 @@ do_show_links() {
 do_start() {
     info "启动服务..."
     ensure_time_sync || true
-    systemctl start sing-box 2>/dev/null && success "sing-box 已启动" || warn "sing-box 启动失败"
-    systemctl start argo-tunnel 2>/dev/null && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
+    service_start sing-box && success "sing-box 已启动" || warn "sing-box 启动失败"
+    service_start argo-tunnel && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
     if load_params; then
         sleep 3
         fetch_argo_domain 2>/dev/null || true
@@ -1655,17 +1904,17 @@ do_start() {
 
 do_stop() {
     info "停止服务..."
-    systemctl stop sing-box 2>/dev/null && success "sing-box 已停止" || warn "sing-box 停止失败"
-    systemctl stop argo-tunnel 2>/dev/null && success "argo-tunnel 已停止" || warn "argo-tunnel 停止失败"
-    systemctl stop sbm-subscription 2>/dev/null && success "订阅服务已停止" || warn "订阅服务停止失败"
+    service_stop sing-box && success "sing-box 已停止" || warn "sing-box 停止失败"
+    service_stop argo-tunnel && success "argo-tunnel 已停止" || warn "argo-tunnel 停止失败"
+    service_stop sbm-subscription && success "订阅服务已停止" || warn "订阅服务停止失败"
     press_enter
 }
 
 do_restart() {
     info "重启服务..."
     ensure_time_sync || true
-    systemctl restart sing-box 2>/dev/null && success "sing-box 已重启" || warn "sing-box 重启失败"
-    systemctl restart argo-tunnel 2>/dev/null && success "argo-tunnel 已重启" || warn "argo-tunnel 重启失败"
+    service_restart sing-box && success "sing-box 已重启" || warn "sing-box 重启失败"
+    service_restart argo-tunnel && success "argo-tunnel 已重启" || warn "argo-tunnel 重启失败"
 
     sleep 5
     if load_params; then
@@ -1683,13 +1932,13 @@ do_restart() {
 do_status() {
     echo ""
     echo -e "${CYAN}${BOLD}── sing-box 状态 ──${NC}"
-    systemctl status sing-box --no-pager -l 2>/dev/null | head -15 || warn "sing-box 未安装"
+    service_status sing-box || warn "sing-box 未安装"
     separator
     echo -e "${CYAN}${BOLD}── argo-tunnel 状态 ──${NC}"
-    systemctl status argo-tunnel --no-pager -l 2>/dev/null | head -15 || warn "argo-tunnel 未安装"
+    service_status argo-tunnel || warn "argo-tunnel 未安装"
     separator
     echo -e "${CYAN}${BOLD}── 订阅服务状态 ──${NC}"
-    systemctl status sbm-subscription --no-pager -l 2>/dev/null | head -15 || warn "订阅服务未安装"
+    service_status sbm-subscription || warn "订阅服务未安装"
     press_enter
 }
 
@@ -1702,9 +1951,9 @@ do_logs() {
     echo -e "  0) 返回"
     read -rp "  请选择: " choice
     case "$choice" in
-        1) journalctl -u sing-box --output cat --no-pager -n 50 ;;
-        2) journalctl -u argo-tunnel --output cat --no-pager -n 50 ;;
-        3) journalctl -u sbm-subscription --output cat --no-pager -n 50 ;;
+        1) service_logs sing-box 50 || warn "未找到 sing-box 日志" ;;
+        2) service_logs argo-tunnel 50 || warn "未找到 argo-tunnel 日志" ;;
+        3) service_logs sbm-subscription 50 || warn "未找到订阅服务日志" ;;
     esac
     press_enter
 }
@@ -1718,15 +1967,15 @@ do_boot_manage() {
     read -rp "  请选择: " choice
     case "$choice" in
         1)
-            systemctl enable sing-box 2>/dev/null
-            systemctl enable argo-tunnel 2>/dev/null
-            systemctl enable sbm-subscription 2>/dev/null
+            service_enable sing-box 2>/dev/null || true
+            service_enable argo-tunnel 2>/dev/null || true
+            service_enable sbm-subscription 2>/dev/null || true
             success "已开启开机自启"
             ;;
         2)
-            systemctl disable sing-box 2>/dev/null
-            systemctl disable argo-tunnel 2>/dev/null
-            systemctl disable sbm-subscription 2>/dev/null
+            service_disable sing-box 2>/dev/null || true
+            service_disable argo-tunnel 2>/dev/null || true
+            service_disable sbm-subscription 2>/dev/null || true
             success "已关闭开机自启"
             ;;
     esac
@@ -1744,8 +1993,13 @@ do_upgrade() {
     case "$choice" in
         1)
             info "更新 sing-box..."
-            curl -fsSL https://sing-box.app/install.sh | sh
-            systemctl restart sing-box 2>/dev/null
+            if command -v apk &>/dev/null; then
+                apk add --no-cache --upgrade sing-box > /dev/null 2>&1 || curl -fsSL https://sing-box.app/install.sh | sh
+            else
+                curl -fsSL https://sing-box.app/install.sh | sh
+            fi
+            write_singbox_service
+            service_restart sing-box 2>/dev/null || true
             success "sing-box 已更新并重启"
             ;;
         2)
@@ -1753,7 +2007,7 @@ do_upgrade() {
             curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH_CF}" \
                 -o /usr/local/bin/cloudflared
             chmod +x /usr/local/bin/cloudflared
-            systemctl restart argo-tunnel 2>/dev/null
+            service_restart argo-tunnel 2>/dev/null || true
             success "cloudflared 已更新并重启"
             ;;
         3)
@@ -1794,20 +2048,25 @@ do_uninstall() {
     read -rp "  确认卸载？(y/N): " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消"; press_enter; return; }
 
-    systemctl stop sing-box 2>/dev/null || true
-    systemctl disable sing-box 2>/dev/null || true
-    systemctl stop argo-tunnel 2>/dev/null || true
-    systemctl disable argo-tunnel 2>/dev/null || true
-    systemctl stop sbm-subscription 2>/dev/null || true
-    systemctl disable sbm-subscription 2>/dev/null || true
+    service_stop sing-box 2>/dev/null || true
+    service_disable sing-box 2>/dev/null || true
+    service_stop argo-tunnel 2>/dev/null || true
+    service_disable argo-tunnel 2>/dev/null || true
+    service_stop sbm-subscription 2>/dev/null || true
+    service_disable sbm-subscription 2>/dev/null || true
     rm -f "$ARGO_SERVICE"
+    rm -f "$ARGO_OPENRC_SERVICE"
     rm -f "$SUBSCRIPTION_SERVICE"
-    systemctl daemon-reload
+    rm -f "$SUBSCRIPTION_OPENRC_SERVICE"
+    rm -f "$SINGBOX_OPENRC_SERVICE"
+    service_daemon_reload
 
     if command -v apt-get &>/dev/null; then
         apt-get remove -y sing-box 2>/dev/null || true
     elif command -v yum &>/dev/null; then
         yum remove -y sing-box 2>/dev/null || true
+    elif command -v apk &>/dev/null; then
+        apk del sing-box 2>/dev/null || true
     fi
 
     rm -f /usr/local/bin/cloudflared
@@ -1830,12 +2089,12 @@ show_banner() {
 
     # 状态摘要
     local sb_status ar_status
-    if systemctl is-active --quiet sing-box 2>/dev/null; then
+    if service_is_active sing-box; then
         sb_status="${GREEN}● 运行中${NC}"
     else
         sb_status="${RED}○ 未运行${NC}"
     fi
-    if systemctl is-active --quiet argo-tunnel 2>/dev/null; then
+    if service_is_active argo-tunnel; then
         ar_status="${GREEN}● 运行中${NC}"
     else
         ar_status="${RED}○ 未运行${NC}"
