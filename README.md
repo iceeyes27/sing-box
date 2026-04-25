@@ -39,7 +39,7 @@ sbm
 **面板概览：**
 ```text
 ╔══════════════════════════════════════════════╗
-║     sing-box 管理面板  v2.6.0              ║
+║     sing-box 管理面板  v2.6.1              ║
 ╚══════════════════════════════════════════════╝
 
  1) 安装 / 重新安装
@@ -68,9 +68,9 @@ sbm status     # 查看当前各个核心组件的系统运行状态
 sbm uninstall  # 完全卸载本项目及其生成的所有缓存与配置
 ```
 
-## 🌐 IPv6-only VPS
+## 🌐 IPv4 / IPv6 VPS
 
-当 VPS 只有 IPv6 公网网络时，脚本会自动只导出 `VLESS + WS + Argo` 节点链接，分享文件和订阅内容均只包含可导入 v2rayN / v2rayNG 的 Argo 链接。
+脚本会按 VPS 实际公网网络自动生成节点链接：IPv4-only 生成 IPv4 直连链接和 Argo 链接，IPv6-only 仅保留 `VLESS + WS + Argo` 节点链接，IPv4 + IPv6 双栈会生成 IPv4 直连链接，并同时输出 IPv4 / IPv6 两条 Argo 链接。
 
 ## 📄 License
 

@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.0"
+SCRIPT_VERSION="2.6.1"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -300,6 +300,11 @@ detect_external_access_mode() {
         return 0
     fi
 
+    if [[ "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
+        echo "dual-stack"
+        return 0
+    fi
+
     if has_public_ip_on_interface; then
         echo "direct"
         return 0
@@ -330,6 +335,8 @@ SUBSCRIPTION_PORT="${SUBSCRIPTION_PORT}"
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"
 ARGO_TOKEN="${ARGO_TOKEN:-}"
 ARGO_BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN:-}"
+ARGO_BEST_CF_DOMAIN_IPV4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
+ARGO_BEST_CF_DOMAIN_IPV6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
 HY2_PORT="${HY2_PORT}"
 HY2_PASSWORD="${HY2_PASSWORD}"
 HY2_SNI="${HY2_SNI}"
@@ -361,6 +368,14 @@ load_params() {
         if [[ -z "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
             ARGO_BEST_CF_DOMAIN=""
         fi
+        if [[ ! ${ARGO_BEST_CF_DOMAIN_IPV4+x} ]]; then
+            ARGO_BEST_CF_DOMAIN_IPV4="${ARGO_BEST_CF_DOMAIN:-}"
+            need_save=true
+        fi
+        if [[ ! ${ARGO_BEST_CF_DOMAIN_IPV6+x} ]]; then
+            ARGO_BEST_CF_DOMAIN_IPV6=""
+            need_save=true
+        fi
         if [[ -z "${SUB_TOKEN:-}" ]]; then
             SUB_TOKEN=$(openssl rand -hex 16)
             need_save=true
@@ -373,6 +388,12 @@ load_params() {
         return 0
     fi
     return 1
+}
+
+clear_argo_best_cf_cache() {
+    ARGO_BEST_CF_DOMAIN=""
+    ARGO_BEST_CF_DOMAIN_IPV4=""
+    ARGO_BEST_CF_DOMAIN_IPV6=""
 }
 
 # ─── 安装组件 ────────────────────────────────────────────────
@@ -599,6 +620,8 @@ generate_params() {
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
     ARGO_BEST_CF_DOMAIN=""
+    ARGO_BEST_CF_DOMAIN_IPV4=""
+    ARGO_BEST_CF_DOMAIN_IPV6=""
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
@@ -881,6 +904,10 @@ show_external_access_requirements() {
             echo ""
             return
             ;;
+        dual-stack)
+            echo -e "  检测到 IPv4 + IPv6 双栈 VPS，直连节点仅使用 IPv4，Argo 会分别输出 IPv4 / IPv6 接入链接。"
+            echo -e "  如需使用 IPv6 订阅地址，请同步放行订阅服务端口的 IPv6 入站。"
+            ;;
         direct)
             echo -e "  本机检测到公网 IP 直接挂载在网卡上。若仍有安全组/云防火墙，请同步放行以下端口。"
             ;;
@@ -902,7 +929,7 @@ show_external_access_requirements() {
     fi
     echo -e "  Subscription: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
     echo -e "  ${DIM}Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。${NC}"
-    if [[ "$access_mode" != "direct" ]]; then
+    if [[ "$access_mode" != "direct" && "$access_mode" != "ipv6-only" && "$access_mode" != "dual-stack" ]]; then
         echo -e "  ${DIM}注意: 当前脚本默认外部端口与本机监听端口相同；如果面板做了不同端口号的 NAT 映射，生成的节点链接和订阅地址需要按外部端口另行适配。${NC}"
     fi
     echo ""
@@ -1144,6 +1171,14 @@ def main():
     class Server(ThreadingHTTPServer):
         address_family = socket.AF_INET6 if ":" in args.listen else socket.AF_INET
 
+        def server_bind(self):
+            if self.address_family == socket.AF_INET6 and hasattr(socket, "IPV6_V6ONLY"):
+                try:
+                    self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                except OSError:
+                    pass
+            return super().server_bind()
+
     server = Server((args.listen, args.port), build_handler(args.token, args.file))
     server.serve_forever()
 
@@ -1155,7 +1190,7 @@ PYEOF
 }
 
 subscription_listen_host() {
-    if refresh_public_ip_stack 2>/dev/null && [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
+    if refresh_public_ip_stack 2>/dev/null && [[ "${IP_STACK_MODE:-}" == "ipv6-only" || "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
         echo "::"
     else
         echo "0.0.0.0"
@@ -1244,7 +1279,7 @@ fetch_argo_domain() {
                       tail -1 | sed 's|https://||')
         if [[ -n "$ARGO_DOMAIN" ]]; then
             if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
-                ARGO_BEST_CF_DOMAIN=""
+                clear_argo_best_cf_cache
                 info "检测到新的 Argo 临时域名，已清空缓存的优选接入域名"
             fi
             return 0
@@ -1324,6 +1359,40 @@ select_random_cf_domain() {
     return 0
 }
 
+select_random_cf_domain_by_family() {
+    local family="$1"
+    local available=()
+    local curl_ip_arg=()
+
+    case "$family" in
+        ipv4) curl_ip_arg=(-4) ;;
+        ipv6) curl_ip_arg=(-6) ;;
+    esac
+
+    for domain in "${CF_DOMAINS[@]}"; do
+        if curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null; then
+            available+=("$domain")
+        fi
+    done
+    if [[ ${#available[@]} -gt 0 ]]; then
+        echo "${available[$((RANDOM % ${#available[@]}))]}"
+    fi
+    return 0
+}
+
+check_cf_domain_available_by_family() {
+    local domain="$1"
+    local family="$2"
+    local curl_ip_arg=()
+
+    [[ -n "$domain" ]] || return 1
+    case "$family" in
+        ipv4) curl_ip_arg=(-4) ;;
+        ipv6) curl_ip_arg=(-6) ;;
+    esac
+    curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+}
+
 check_cf_domain_available() {
     local domain="$1"
     local curl_ip_arg=()
@@ -1382,51 +1451,153 @@ urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
 }
 
+append_subscription_link() {
+    local link="$1"
+    if [[ -z "$GENERATED_SUBSCRIPTION_RAW" ]]; then
+        GENERATED_SUBSCRIPTION_RAW="$link"
+    else
+        GENERATED_SUBSCRIPTION_RAW+=$'\n'"$link"
+    fi
+}
+
+append_reality_link() {
+    local link="$1"
+    if [[ -z "$GENERATED_REALITY_LINKS" ]]; then
+        GENERATED_REALITY_LINKS="$link"
+    else
+        GENERATED_REALITY_LINKS+=$'\n'"$link"
+    fi
+    append_subscription_link "$link"
+}
+
+append_hy2_link() {
+    local link="$1"
+    if [[ -z "$GENERATED_HY2_LINKS" ]]; then
+        GENERATED_HY2_LINKS="$link"
+    else
+        GENERATED_HY2_LINKS+=$'\n'"$link"
+    fi
+    append_subscription_link "$link"
+}
+
+hy2_share_link_available() {
+    [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]] || return 1
+    [[ -f "$CONFIG_FILE" ]] || return 1
+    grep -q '"type"[[:space:]]*:[[:space:]]*"hysteria2"' "$CONFIG_FILE"
+}
+
+build_direct_share_links_for_ip() {
+    local ip="$1"
+    local family_label="$2"
+    local host remark reality_name
+
+    [[ -n "$ip" ]] || return
+    host=$(format_url_host "$ip")
+
+    if [[ -n "$family_label" ]]; then
+        reality_name="${NODE_NAME}-${family_label}-Reality"
+    else
+        reality_name="${NODE_NAME}-Reality"
+    fi
+
+    remark=$(urlencode "$reality_name")
+    append_reality_link "vless://${UUID}@${host}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
+
+    if hy2_share_link_available; then
+        local hy2_remark hy2_pass_enc hy2_name
+        if [[ -n "$family_label" ]]; then
+            hy2_name="${NODE_NAME}-${family_label}-Hysteria2"
+        else
+            hy2_name="${NODE_NAME}-Hysteria2"
+        fi
+        hy2_remark=$(urlencode "$hy2_name")
+        hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
+        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
+    fi
+}
+
+append_argo_link() {
+    local link="$1"
+    if [[ -z "$GENERATED_ARGO_LINKS" ]]; then
+        GENERATED_ARGO_LINKS="$link"
+    else
+        GENERATED_ARGO_LINKS+=$'\n'"$link"
+    fi
+    append_subscription_link "$link"
+}
+
+build_argo_link_for_domain() {
+    local best_cf_domain="$1"
+    local family_label="$2"
+    local argo_name argo_remark
+
+    [[ -n "$best_cf_domain" ]] || return
+
+    if [[ -n "$family_label" ]]; then
+        argo_name="${NODE_NAME}-${family_label}-Argo"
+    else
+        argo_name="${NODE_NAME}-Argo"
+    fi
+    argo_remark=$(urlencode "$argo_name")
+    append_argo_link "vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
+}
+
 # ─── 链接与订阅生成 ──────────────────────────────────────────
 build_share_links() {
     get_public_ip
 
-    GENERATED_REALITY_LINK=""
-    GENERATED_ARGO_LINK=""
-    GENERATED_HY2_LINK=""
+    GENERATED_REALITY_LINKS=""
+    GENERATED_ARGO_LINKS=""
+    GENERATED_HY2_LINKS=""
     GENERATED_SUBSCRIPTION_RAW=""
+    ARGO_BEST_CF_DOMAIN_IPV4=""
+    ARGO_BEST_CF_DOMAIN_IPV6=""
 
-    if [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
-        warn "检测到 IPv6-only VPS，仅生成 Argo 节点链接。"
-    else
-        local remark
-        remark=$(urlencode "${NODE_NAME}-Reality")
-        GENERATED_REALITY_LINK="vless://${UUID}@${PUBLIC_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
-
-        if [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]]; then
-            local hy2_remark hy2_pass_enc
-            hy2_remark=$(urlencode "${NODE_NAME}-Hysteria2")
-            hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
-            GENERATED_HY2_LINK="hysteria2://${hy2_pass_enc}@${PUBLIC_IP}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
-        fi
-    fi
+    case "${IP_STACK_MODE:-}" in
+        dual-stack)
+            build_direct_share_links_for_ip "${PUBLIC_IPV4:-}" ""
+            ;;
+        ipv6-only)
+            warn "检测到 IPv6-only VPS，仅生成 Argo 节点链接。"
+            ;;
+        *)
+            build_direct_share_links_for_ip "${PUBLIC_IPV4:-$PUBLIC_IP}" ""
+            ;;
+    esac
 
     if [[ -n "${ARGO_DOMAIN:-}" ]]; then
-        local argo_remark
-        argo_remark=$(urlencode "${NODE_NAME}-Argo")
+        if [[ "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
+            local old_cf_v4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
+            local old_cf_v6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
 
-        resolve_argo_best_cf_domain
-        local best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
-
-        GENERATED_ARGO_LINK="vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
-    elif [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
-        warn "Argo 域名未就绪，暂无法生成 IPv6-only 可导入链接。"
-    fi
-
-    local link
-    for link in "$GENERATED_REALITY_LINK" "$GENERATED_ARGO_LINK" "$GENERATED_HY2_LINK"; do
-        [[ -z "$link" ]] && continue
-        if [[ -z "$GENERATED_SUBSCRIPTION_RAW" ]]; then
-            GENERATED_SUBSCRIPTION_RAW="$link"
+            if ! check_cf_domain_available_by_family "${ARGO_BEST_CF_DOMAIN_IPV4:-}" ipv4; then
+                ARGO_BEST_CF_DOMAIN_IPV4=$(select_random_cf_domain_by_family ipv4)
+            fi
+            if ! check_cf_domain_available_by_family "${ARGO_BEST_CF_DOMAIN_IPV6:-}" ipv6; then
+                ARGO_BEST_CF_DOMAIN_IPV6=$(select_random_cf_domain_by_family ipv6)
+            fi
+            if [[ -z "$ARGO_BEST_CF_DOMAIN_IPV4" ]]; then
+                ARGO_BEST_CF_DOMAIN_IPV4="${ARGO_BEST_CF_DOMAIN:-${CF_DOMAINS[0]}}"
+                warn "未探测到可用的 IPv4 CF 优选域名，使用默认/缓存地址: ${ARGO_BEST_CF_DOMAIN_IPV4}"
+            fi
+            if [[ -z "$ARGO_BEST_CF_DOMAIN_IPV6" ]]; then
+                ARGO_BEST_CF_DOMAIN_IPV6="${ARGO_DOMAIN}"
+                warn "未探测到可用的 IPv6 CF 优选域名，使用 Argo 域名作为 IPv6 接入地址"
+            fi
+            ARGO_BEST_CF_DOMAIN="$ARGO_BEST_CF_DOMAIN_IPV4"
+            if [[ "$ARGO_BEST_CF_DOMAIN_IPV4" != "$old_cf_v4" || "$ARGO_BEST_CF_DOMAIN_IPV6" != "$old_cf_v6" ]]; then
+                save_params
+            fi
+            build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV4" "IPv4"
+            build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV6" "IPv6"
         else
-            GENERATED_SUBSCRIPTION_RAW+=$'\n'"$link"
+            resolve_argo_best_cf_domain
+            local best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
+            build_argo_link_for_domain "$best_cf_domain" ""
         fi
-    done
+    elif [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
+        warn "Argo 域名未就绪，暂无法生成 Argo 节点链接。"
+    fi
 }
 
 write_subscription_assets() {
@@ -1440,19 +1611,29 @@ write_subscription_assets() {
 show_subscription_url() {
     [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return
 
-    local public_host
-    public_host=$(format_url_host "$PUBLIC_IP")
-
     echo -e "${CYAN}${BOLD}── 订阅地址 ──${NC}"
-    echo -e "  ${BOLD}http://${public_host}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
-    echo -e "  ${DIM}兼容写法: http://${public_host}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
+    case "${IP_STACK_MODE:-}" in
+        dual-stack)
+            local public_host_v4 public_host_v6
+            public_host_v4=$(format_url_host "$PUBLIC_IPV4")
+            public_host_v6=$(format_url_host "$PUBLIC_IPV6")
+            echo -e "  IPv4: ${BOLD}http://${public_host_v4}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
+            echo -e "  IPv6: ${BOLD}http://${public_host_v6}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
+            echo -e "  ${DIM}兼容写法: http://${public_host_v4}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
+            echo -e "  ${DIM}兼容写法: http://${public_host_v6}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
+            ;;
+        *)
+            local public_host
+            public_host=$(format_url_host "$PUBLIC_IP")
+            echo -e "  ${BOLD}http://${public_host}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
+            echo -e "  ${DIM}兼容写法: http://${public_host}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
+            ;;
+    esac
     echo ""
 }
 
 generate_and_show_links() {
     build_share_links
-    local is_ipv6_only=false
-    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && is_ipv6_only=true
 
     echo ""
     echo -e "${PURPLE}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
@@ -1461,14 +1642,23 @@ generate_and_show_links() {
     echo ""
 
     echo -e "${CYAN}${BOLD}── 基本信息 ──${NC}"
-    if [[ "$is_ipv6_only" == "true" ]]; then
-        echo -e "  公网类型:      ${BOLD}IPv6-only${NC}"
-        echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IP}${NC}"
-    else
-        echo -e "  服务器 IP:     ${BOLD}${PUBLIC_IP}${NC}"
-    fi
+    case "${IP_STACK_MODE:-}" in
+        dual-stack)
+            echo -e "  公网类型:      ${BOLD}IPv4 + IPv6${NC}"
+            echo -e "  服务器 IPv4:   ${BOLD}${PUBLIC_IPV4}${NC}"
+            echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IPV6}${NC}"
+            ;;
+        ipv6-only)
+            echo -e "  公网类型:      ${BOLD}IPv6-only${NC}"
+            echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IP}${NC}"
+            ;;
+        *)
+            echo -e "  公网类型:      ${BOLD}IPv4-only${NC}"
+            echo -e "  服务器 IPv4:   ${BOLD}${PUBLIC_IP}${NC}"
+            ;;
+    esac
     echo -e "  UUID:          ${BOLD}${UUID}${NC}"
-    if [[ "$is_ipv6_only" != "true" ]]; then
+    if [[ "${IP_STACK_MODE:-}" != "ipv6-only" ]]; then
         echo -e "  Reality 端口:  ${BOLD}${REALITY_PORT}${NC}"
         echo -e "  Reality SNI:   ${BOLD}${REALITY_SNI}${NC}"
         echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
@@ -1483,35 +1673,40 @@ generate_and_show_links() {
         [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
     fi
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
-    if [[ "$is_ipv6_only" != "true" ]]; then
+    if [[ "${IP_STACK_MODE:-}" != "ipv6-only" ]]; then
         echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
         echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
     fi
     echo ""
 
-    if [[ -n "${GENERATED_REALITY_LINK}" ]]; then
+    if [[ -n "${GENERATED_REALITY_LINKS}" ]]; then
         echo -e "${GREEN}${BOLD}── VLESS + Reality (直连) ──${NC}"
-        echo -e "${YELLOW}${GENERATED_REALITY_LINK}${NC}"
+        echo -e "${YELLOW}${GENERATED_REALITY_LINKS}${NC}"
         echo -e "  ${DIM}提示: Reality 请使用 Xray-core / sing-box 内核；若 v2rayN 当前使用 v2fly core，请先切换到 Xray core。${NC}"
         echo ""
     fi
 
-    if [[ -n "${GENERATED_ARGO_LINK}" ]]; then
+    if [[ -n "${GENERATED_ARGO_LINKS}" ]]; then
         echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
         echo -e "  伪装域名(SNI): ${BOLD}${ARGO_DOMAIN}${NC}"
-        echo -e "  优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN}${NC}"
-        echo -e "${YELLOW}${GENERATED_ARGO_LINK}${NC}"
+        if [[ "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
+            echo -e "  IPv4 优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN_IPV4}${NC}"
+            echo -e "  IPv6 优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN_IPV6}${NC}"
+        else
+            echo -e "  优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN}${NC}"
+        fi
+        echo -e "${YELLOW}${GENERATED_ARGO_LINKS}${NC}"
         echo ""
-    elif [[ "$is_ipv6_only" == "true" ]]; then
+    elif [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
         echo -e "${YELLOW}  Argo 域名未就绪，稍后执行 sbm links 重新生成。${NC}"
         echo ""
     fi
 
-    if [[ -n "${GENERATED_HY2_LINK}" ]]; then
+    if [[ -n "${GENERATED_HY2_LINKS}" ]]; then
         echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
-        echo -e "${YELLOW}${GENERATED_HY2_LINK}${NC}"
+        echo -e "${YELLOW}${GENERATED_HY2_LINKS}${NC}"
         echo ""
-    elif [[ "$is_ipv6_only" != "true" ]]; then
+    elif [[ "${IP_STACK_MODE:-}" != "ipv6-only" ]]; then
         echo -e "${DIM}  Hysteria2: 未启用 (重新安装即可自动启用)${NC}"
         echo ""
     fi
@@ -1521,32 +1716,39 @@ generate_and_show_links() {
     write_subscription_assets
 
     {
-        if [[ "$is_ipv6_only" == "true" ]]; then
-            [[ -n "$GENERATED_ARGO_LINK" ]] && echo "$GENERATED_ARGO_LINK"
-        else
-            echo "# sing-box 分享链接 - $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# sing-box 分享链接 - $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        if [[ -n "$GENERATED_REALITY_LINKS" ]]; then
+            echo "# VLESS + Reality (直连)"
+            printf '%s\n' "$GENERATED_REALITY_LINKS"
+        fi
+        if [[ -n "$GENERATED_ARGO_LINKS" ]]; then
             echo ""
-            if [[ -n "$GENERATED_REALITY_LINK" ]]; then
-                echo "# VLESS + Reality (直连)"
-                echo "$GENERATED_REALITY_LINK"
-            fi
-            if [[ -n "$GENERATED_ARGO_LINK" ]]; then
-                echo ""
-                echo "# VLESS + WS + Argo (CDN)"
-                echo "$GENERATED_ARGO_LINK"
-            fi
-            if [[ -n "$GENERATED_HY2_LINK" ]]; then
-                echo ""
-                echo "# Hysteria2 (QUIC/UDP 高速)"
-                echo "$GENERATED_HY2_LINK"
-            fi
-            if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]]; then
-                local public_host
-                public_host=$(format_url_host "$PUBLIC_IP")
-                echo ""
-                echo "# Subscription"
-                echo "http://${public_host}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
-            fi
+            echo "# VLESS + WS + Argo (CDN)"
+            printf '%s\n' "$GENERATED_ARGO_LINKS"
+        fi
+        if [[ -n "$GENERATED_HY2_LINKS" ]]; then
+            echo ""
+            echo "# Hysteria2 (QUIC/UDP 高速)"
+            printf '%s\n' "$GENERATED_HY2_LINKS"
+        fi
+        if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]]; then
+            echo ""
+            echo "# Subscription"
+            case "${IP_STACK_MODE:-}" in
+                dual-stack)
+                    local public_host_v4 public_host_v6
+                    public_host_v4=$(format_url_host "$PUBLIC_IPV4")
+                    public_host_v6=$(format_url_host "$PUBLIC_IPV6")
+                    echo "http://${public_host_v4}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
+                    echo "http://${public_host_v6}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
+                    ;;
+                *)
+                    local public_host
+                    public_host=$(format_url_host "$PUBLIC_IP")
+                    echo "http://${public_host}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
+                    ;;
+            esac
         fi
     } > "$LINK_FILE"
     chmod 600 "$LINK_FILE"
@@ -1791,12 +1993,12 @@ do_modify_config() {
                         ARGO_DOMAIN="${ARGO_DOMAIN%/}"
                     fi
                     if [[ "${ARGO_DOMAIN:-}" != "$old_argo_domain" || "${ARGO_TOKEN:-}" != "$old_argo_token" ]]; then
-                        ARGO_BEST_CF_DOMAIN=""
+                        clear_argo_best_cf_cache
                     fi
                 else
                     ARGO_TOKEN=""
                     ARGO_DOMAIN=""
-                    ARGO_BEST_CF_DOMAIN=""
+                    clear_argo_best_cf_cache
                 fi
                 changed=true
                 restart_argo=true
