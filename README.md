@@ -16,7 +16,7 @@
 ## 📦 一键安装配置
 
 ```bash
-(curl -fsSL https://raw.githubusercontent.com/iceeyes27/sing-box/main/bootstrap.sh || wget -qO- https://raw.githubusercontent.com/iceeyes27/sing-box/main/bootstrap.sh) | sh
+wget -qO- https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh | sh
 ```
 
 > 需要 root 权限，支持 Ubuntu / Debian / CentOS / RHEL / Fedora / Alpine。
@@ -34,7 +34,7 @@ sbm
 **面板概览：**
 ```text
 ╔══════════════════════════════════════════════╗
-║     sing-box 管理面板  v2.6.8              ║
+║     sing-box 管理面板  v2.6.9              ║
 ╚══════════════════════════════════════════════╝
 
  1) 安装 / 重新安装
