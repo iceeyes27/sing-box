@@ -7,7 +7,7 @@
 # ════════════════════════════════════════════════════════════════
 #
 #  在线安装:
-#    wget -qO- https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh | sh
+#    bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh")
 #
 
 if [ -z "${BASH_VERSION:-}" ]; then
@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.9"
+SCRIPT_VERSION="2.6.10"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -436,6 +436,11 @@ load_params() {
         return 0
     fi
     return 1
+}
+
+ensure_command_aliases() {
+    [[ -f /usr/local/bin/sbm ]] || return 0
+    ln -sf /usr/local/bin/sbm /usr/local/bin/sing-box-manager 2>/dev/null || true
 }
 
 clear_argo_best_cf_cache() {
@@ -2571,7 +2576,7 @@ do_upgrade() {
             local script_url="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
             if curl -fsSL "$script_url" -o /usr/local/bin/sbm; then
                 chmod +x /usr/local/bin/sbm
-                ln -sf /usr/local/bin/sbm /usr/local/bin/sing-box-manager
+                ensure_command_aliases
                 hash -r 2>/dev/null || true
                 # 从新下载的脚本中提取版本号
                 local new_ver
@@ -2619,6 +2624,8 @@ do_uninstall() {
 
     if command -v apt-get &>/dev/null; then
         apt-get remove -y sing-box 2>/dev/null || true
+    elif command -v dnf &>/dev/null; then
+        dnf remove -y sing-box 2>/dev/null || true
     elif command -v yum &>/dev/null; then
         yum remove -y sing-box 2>/dev/null || true
     elif command -v apk &>/dev/null; then
@@ -2627,6 +2634,7 @@ do_uninstall() {
 
     rm -f /usr/local/bin/cloudflared
     rm -f /usr/local/bin/sbm
+    rm -f /usr/local/bin/sing-box-manager
     rm -f "$SUBSCRIPTION_SERVER"
     rm -rf "$CONFIG_DIR"
 
@@ -2719,6 +2727,7 @@ detect_os
 if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sbm" ]]; then
     curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sbm 2>/dev/null || true
     chmod +x /usr/local/bin/sbm 2>/dev/null || true
+    ensure_command_aliases
     # 为在线初次安装的用户顺便清一下 hash 缓存
     hash -r 2>/dev/null || true
 fi
