@@ -7,13 +7,13 @@
 # ════════════════════════════════════════════════════════════════
 #
 #  在线安装:
-#    wget -qO- https://raw.githubusercontent.com/iceeyes27/sing-box/main/bootstrap.sh | sh
+#    (curl -fsSL https://raw.githubusercontent.com/iceeyes27/sing-box/main/bootstrap.sh || wget -qO- https://raw.githubusercontent.com/iceeyes27/sing-box/main/bootstrap.sh) | sh
 #
 
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.7"
+SCRIPT_VERSION="2.6.8"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
