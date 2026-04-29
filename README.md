@@ -27,7 +27,7 @@ bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/ins
 ```
 
 > 需要 root 权限，支持 Ubuntu / Debian / CentOS / RHEL / Fedora / Alpine。
-> 低内存 VPS 会自动分批安装依赖；当内存低于 768MB 且无可用 swap 时，会临时启用 512MB swap 以降低安装进程被系统杀掉的概率。
+> 低内存 VPS 会自动分批安装关键依赖；当内存低于 768MB 且无可用 swap 时，会尝试临时启用 512MB swap，若 VPS 不允许启用 swap，则跳过可选依赖安装，避免安装进程被系统杀掉。
 
 ## 🎛️ 管理面板使用指南
 
@@ -40,7 +40,7 @@ sbm
 **面板概览：**
 ```text
 ╔══════════════════════════════════════════════╗
-║     sing-box 管理面板  v2.6.2              ║
+║     sing-box 管理面板  v2.6.3              ║
 ╚══════════════════════════════════════════════╝
 
  1) 安装 / 重新安装

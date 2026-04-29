@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.2"
+SCRIPT_VERSION="2.6.3"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -463,6 +463,13 @@ prepare_low_memory_swap() {
     fi
 }
 
+is_low_memory_without_swap() {
+    local mem_total swap_total
+    mem_total=$(get_meminfo_kb MemTotal 2>/dev/null || echo 0)
+    swap_total=$(get_meminfo_kb SwapTotal 2>/dev/null || echo 0)
+    (( mem_total > 0 && mem_total < 786432 && swap_total < 131072 )) && [[ "$LOW_MEMORY_SWAP_CREATED" != "true" ]]
+}
+
 run_low_resource() {
     nice -n 19 "$@"
 }
@@ -523,21 +530,59 @@ install_apk_packages_low_resource() {
     done
 }
 
+install_packages_low_resource() {
+    if command -v apt-get &>/dev/null; then
+        install_apt_packages_low_resource "$@"
+    elif command -v dnf &>/dev/null; then
+        install_yum_packages_low_resource dnf "$@"
+    elif command -v yum &>/dev/null; then
+        install_yum_packages_low_resource yum "$@"
+    elif command -v apk &>/dev/null; then
+        install_apk_packages_low_resource "$@"
+    else
+        return 1
+    fi
+}
+
+install_missing_required_deps() {
+    local missing=()
+
+    command -v curl &>/dev/null || missing+=(curl)
+    command -v openssl &>/dev/null || missing+=(openssl)
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+
+    warn "缺少关键依赖: ${missing[*]}"
+    install_packages_low_resource "${missing[@]}"
+}
+
+install_optional_deps() {
+    local optional=()
+
+    if is_low_memory_without_swap; then
+        warn "检测到低内存且无可用 swap，跳过可选依赖安装"
+        return 0
+    fi
+
+    command -v wget &>/dev/null || optional+=(wget)
+    command -v jq &>/dev/null || optional+=(jq)
+    command -v python3 &>/dev/null || optional+=(python3)
+    command -v ip &>/dev/null || optional+=(iproute2)
+    command -v lsof &>/dev/null || optional+=(lsof)
+    [[ -f /etc/ssl/certs/ca-certificates.crt ]] || optional+=(ca-certificates)
+
+    [[ ${#optional[@]} -gt 0 ]] || return 0
+    info "安装可选依赖: ${optional[*]}"
+    if ! install_packages_low_resource "${optional[@]}"; then
+        warn "部分可选依赖安装失败，继续核心部署；订阅服务或端口检测能力可能受限"
+    fi
+}
+
 install_deps() {
     info "安装基础依赖..."
     prepare_low_memory_swap
-    if command -v apt-get &>/dev/null; then
-        install_apt_packages_low_resource curl wget jq openssl python3 || error "基础依赖安装失败，请检查系统内存、磁盘空间或软件源"
-    elif command -v dnf &>/dev/null; then
-        install_yum_packages_low_resource dnf curl wget jq openssl python3 || error "基础依赖安装失败，请检查系统内存、磁盘空间或软件源"
-    elif command -v yum &>/dev/null; then
-        install_yum_packages_low_resource yum curl wget jq openssl python3 || error "基础依赖安装失败，请检查系统内存、磁盘空间或软件源"
-    elif command -v apk &>/dev/null; then
-        install_apk_packages_low_resource bash curl wget jq openssl python3 iproute2 lsof ca-certificates || error "基础依赖安装失败，请检查系统内存、磁盘空间或软件源"
-    else
-        error "未检测到支持的软件包管理器"
-    fi
-    success "依赖就绪"
+    install_missing_required_deps || error "关键依赖安装失败: curl openssl。请检查系统内存、磁盘空间或软件源"
+    install_optional_deps
+    success "关键依赖就绪"
 }
 
 get_rtc_utc_epoch() {
