@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.3"
+SCRIPT_VERSION="2.6.4"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -118,6 +118,21 @@ service_manager() {
     else
         echo "none"
     fi
+}
+
+service_exists() {
+    local svc=$1
+    case "$(service_manager)" in
+        systemd)
+            local load_state
+            load_state=$(systemctl show -p LoadState --value "$svc" 2>/dev/null || echo "not-found")
+            [[ -n "$load_state" && "$load_state" != "not-found" ]]
+            ;;
+        openrc)
+            [[ -x "/etc/init.d/${svc}" ]]
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 service_daemon_reload() {
@@ -411,6 +426,34 @@ get_meminfo_kb() {
     return 1
 }
 
+get_resource_profile() {
+    local mem_total swap_total
+    mem_total=$(get_meminfo_kb MemTotal 2>/dev/null || echo 0)
+    swap_total=$(get_meminfo_kb SwapTotal 2>/dev/null || echo 0)
+
+    if (( mem_total <= 0 )); then
+        echo "unknown"
+    elif (( mem_total < 786432 && swap_total < 131072 )); then
+        echo "low-noswap"
+    elif (( mem_total < 786432 )); then
+        echo "low-swap"
+    elif (( mem_total < 1572864 )); then
+        echo "standard"
+    else
+        echo "high"
+    fi
+}
+
+resource_profile_label() {
+    case "$(get_resource_profile)" in
+        low-noswap) echo "低内存 / 无可用 swap" ;;
+        low-swap)   echo "低内存 / 有可用 swap" ;;
+        standard)   echo "标准内存" ;;
+        high)       echo "高内存" ;;
+        *)          echo "未知内存状态" ;;
+    esac
+}
+
 cleanup_low_memory_swap() {
     [[ "$LOW_MEMORY_SWAP_CREATED" == "true" ]] || return 0
     swapoff "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1 || true
@@ -419,11 +462,9 @@ cleanup_low_memory_swap() {
 }
 
 prepare_low_memory_swap() {
-    local mem_total swap_total available_mb
-    mem_total=$(get_meminfo_kb MemTotal 2>/dev/null || echo 0)
-    swap_total=$(get_meminfo_kb SwapTotal 2>/dev/null || echo 0)
+    local available_mb
 
-    (( mem_total > 0 && mem_total < 786432 && swap_total < 131072 )) || return 0
+    [[ "$(get_resource_profile)" == "low-noswap" ]] || return 0
     command -v mkswap &>/dev/null && command -v swapon &>/dev/null || return 0
 
     if [[ -e "$LOW_MEMORY_SWAP_FILE" ]]; then
@@ -464,10 +505,7 @@ prepare_low_memory_swap() {
 }
 
 is_low_memory_without_swap() {
-    local mem_total swap_total
-    mem_total=$(get_meminfo_kb MemTotal 2>/dev/null || echo 0)
-    swap_total=$(get_meminfo_kb SwapTotal 2>/dev/null || echo 0)
-    (( mem_total > 0 && mem_total < 786432 && swap_total < 131072 )) && [[ "$LOW_MEMORY_SWAP_CREATED" != "true" ]]
+    [[ "$(get_resource_profile)" == "low-noswap" && "$LOW_MEMORY_SWAP_CREATED" != "true" ]]
 }
 
 run_low_resource() {
@@ -557,11 +595,26 @@ install_missing_required_deps() {
 
 install_optional_deps() {
     local optional=()
+    local profile
 
-    if is_low_memory_without_swap; then
-        warn "检测到低内存且无可用 swap，跳过可选依赖安装"
-        return 0
-    fi
+    profile=$(get_resource_profile)
+    case "$profile" in
+        low-noswap)
+            if is_low_memory_without_swap; then
+                warn "检测到低内存且无可用 swap，跳过可选依赖安装"
+                return 0
+            fi
+            ;;
+        low-swap)
+            info "低内存但已有可用 swap，将分批安装缺失的可选依赖"
+            ;;
+        standard|high)
+            info "当前资源状态允许安装缺失的可选依赖"
+            ;;
+        *)
+            info "内存状态未知，按保守策略分批安装缺失的可选依赖"
+            ;;
+    esac
 
     command -v wget &>/dev/null || optional+=(wget)
     command -v jq &>/dev/null || optional+=(jq)
@@ -579,6 +632,7 @@ install_optional_deps() {
 
 install_deps() {
     info "安装基础依赖..."
+    info "资源检测: $(resource_profile_label)"
     prepare_low_memory_swap
     install_missing_required_deps || error "关键依赖安装失败: curl openssl。请检查系统内存、磁盘空间或软件源"
     install_optional_deps
@@ -626,17 +680,38 @@ is_time_synchronized() {
     fi
 }
 
+existing_time_sync_service() {
+    local svc
+    for svc in systemd-timesyncd chrony chronyd ntp ntpd openntpd; do
+        if service_exists "$svc"; then
+            echo "$svc"
+            return 0
+        fi
+    done
+    if command -v chronyc &>/dev/null; then
+        echo "chrony"
+        return 0
+    fi
+    if command -v ntpq &>/dev/null || command -v ntpd &>/dev/null; then
+        echo "ntp"
+        return 0
+    fi
+    return 1
+}
+
 start_time_sync_service() {
-    for svc in systemd-timesyncd chrony chronyd; do
+    local svc
+    for svc in systemd-timesyncd chrony chronyd ntp ntpd openntpd; do
+        service_exists "$svc" || continue
         service_enable_now "$svc" 2>/dev/null || true
     done
 }
 
 install_time_sync_service() {
-    if [[ "$(service_manager)" == "systemd" ]] && systemctl list-unit-files systemd-timesyncd.service >/dev/null 2>&1; then
-        return 0
-    fi
-    if command -v chronyc &>/dev/null; then
+    local existing_svc
+
+    if existing_svc=$(existing_time_sync_service 2>/dev/null); then
+        info "检测到已有时间同步服务: ${existing_svc}，不安装新的时间同步服务"
         return 0
     fi
 
@@ -1227,13 +1302,15 @@ SINGBOX_EOF
 
 # ─── Argo 服务 ───────────────────────────────────────────────
 write_argo_service() {
-    local exec_cmd
+    local cloudflared_bin exec_cmd
+    cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
+
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         info "使用 Token 模式启动 Argo 隧道 (固定域名)"
-        exec_cmd="/usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate run --token ${ARGO_TOKEN}"
+        exec_cmd="${cloudflared_bin} tunnel --protocol http2 --no-autoupdate run --token ${ARGO_TOKEN}"
     else
         info "使用临时隧道模式 (trycloudflare.com)"
-        exec_cmd="/usr/local/bin/cloudflared tunnel --url http://127.0.0.1:${WS_PORT} --no-autoupdate --protocol http2"
+        exec_cmd="${cloudflared_bin} tunnel --url http://127.0.0.1:${WS_PORT} --no-autoupdate --protocol http2"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
@@ -1241,8 +1318,8 @@ write_argo_service() {
 #!/sbin/openrc-run
 name="argo-tunnel"
 description="Cloudflare Argo Tunnel"
-command="/usr/local/bin/cloudflared"
-command_args="${exec_cmd#/usr/local/bin/cloudflared }"
+command="${cloudflared_bin}"
+command_args="${exec_cmd#${cloudflared_bin} }"
 command_background=true
 pidfile="/run/argo-tunnel.pid"
 output_log="/var/log/argo-tunnel.log"
