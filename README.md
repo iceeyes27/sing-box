@@ -16,17 +16,11 @@
 ## 📦 一键安装配置
 
 ```bash
-bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh")
-```
-
-Alpine 初始系统请先安装 Bash 和 curl：
-
-```bash
-apk add --no-cache bash curl
-bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh")
+sh -c 'set -e; URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"; if ! command -v bash >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then if command -v apk >/dev/null 2>&1; then apk add --no-cache bash curl; elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq --no-install-recommends bash curl; elif command -v dnf >/dev/null 2>&1; then dnf install -y -q bash curl; elif command -v yum >/dev/null 2>&1; then yum install -y -q bash curl; fi; fi; curl -fsSL "$URL" | bash'
 ```
 
 > 需要 root 权限，支持 Ubuntu / Debian / CentOS / RHEL / Fedora / Alpine。
+> Alpine 初始系统会自动补齐 Bash 和 curl 后继续安装。
 > 脚本会按实际 CPU、内存和 swap 状态选择安装策略：低内存且无 swap 时仅安装关键依赖，低内存有 swap 时分批补齐缺失依赖，标准/高内存会正常安装缺失依赖；单核 CPU 会降低探测并发并使用低优先级安装；VPS 已存在的命令和时间同步服务会直接复用，不重复安装。
 
 ## 🎛️ 管理面板使用指南
@@ -40,7 +34,7 @@ sbm
 **面板概览：**
 ```text
 ╔══════════════════════════════════════════════╗
-║     sing-box 管理面板  v2.6.5              ║
+║     sing-box 管理面板  v2.6.6              ║
 ╚══════════════════════════════════════════════╝
 
  1) 安装 / 重新安装

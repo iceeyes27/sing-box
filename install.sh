@@ -7,13 +7,13 @@
 # ════════════════════════════════════════════════════════════════
 #
 #  在线安装:
-#    bash <(curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh")
+#    sh -c 'set -e; URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"; if ! command -v bash >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then if command -v apk >/dev/null 2>&1; then apk add --no-cache bash curl; elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq --no-install-recommends bash curl; elif command -v dnf >/dev/null 2>&1; then dnf install -y -q bash curl; elif command -v yum >/dev/null 2>&1; then yum install -y -q bash curl; fi; fi; curl -fsSL "$URL" | bash'
 #
 
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.5"
+SCRIPT_VERSION="2.6.6"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
