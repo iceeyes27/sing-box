@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.4"
+SCRIPT_VERSION="2.6.5"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -444,6 +444,33 @@ get_resource_profile() {
     fi
 }
 
+get_cpu_count() {
+    local cpu_count
+    if command -v nproc &>/dev/null; then
+        cpu_count=$(nproc 2>/dev/null || echo 1)
+    elif command -v getconf &>/dev/null; then
+        cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+    elif [[ -r /proc/cpuinfo ]]; then
+        cpu_count=$(grep -c '^processor[[:space:]]*:' /proc/cpuinfo 2>/dev/null || echo 1)
+    else
+        cpu_count=1
+    fi
+    [[ "$cpu_count" =~ ^[0-9]+$ && "$cpu_count" -gt 0 ]] || cpu_count=1
+    echo "$cpu_count"
+}
+
+get_cpu_profile() {
+    local cpu_count
+    cpu_count=$(get_cpu_count)
+    if (( cpu_count <= 1 )); then
+        echo "low"
+    elif (( cpu_count <= 2 )); then
+        echo "standard"
+    else
+        echo "high"
+    fi
+}
+
 resource_profile_label() {
     case "$(get_resource_profile)" in
         low-noswap) echo "低内存 / 无可用 swap" ;;
@@ -451,6 +478,15 @@ resource_profile_label() {
         standard)   echo "标准内存" ;;
         high)       echo "高内存" ;;
         *)          echo "未知内存状态" ;;
+    esac
+}
+
+cpu_profile_label() {
+    case "$(get_cpu_profile)" in
+        low)      echo "低 CPU ($(get_cpu_count) 核)" ;;
+        standard) echo "标准 CPU ($(get_cpu_count) 核)" ;;
+        high)     echo "高 CPU ($(get_cpu_count) 核)" ;;
+        *)        echo "未知 CPU 状态" ;;
     esac
 }
 
@@ -509,7 +545,11 @@ is_low_memory_without_swap() {
 }
 
 run_low_resource() {
-    nice -n 19 "$@"
+    if command -v ionice &>/dev/null; then
+        ionice -c 3 nice -n 19 "$@"
+    else
+        nice -n 19 "$@"
+    fi
 }
 
 is_apt_package_installed() {
@@ -595,9 +635,10 @@ install_missing_required_deps() {
 
 install_optional_deps() {
     local optional=()
-    local profile
+    local cpu_profile profile
 
     profile=$(get_resource_profile)
+    cpu_profile=$(get_cpu_profile)
     case "$profile" in
         low-noswap)
             if is_low_memory_without_swap; then
@@ -616,6 +657,10 @@ install_optional_deps() {
             ;;
     esac
 
+    if [[ "$cpu_profile" == "low" ]]; then
+        info "检测到低 CPU，缺失依赖将使用低优先级串行安装"
+    fi
+
     command -v wget &>/dev/null || optional+=(wget)
     command -v jq &>/dev/null || optional+=(jq)
     command -v python3 &>/dev/null || optional+=(python3)
@@ -632,7 +677,7 @@ install_optional_deps() {
 
 install_deps() {
     info "安装基础依赖..."
-    info "资源检测: $(resource_profile_label)"
+    info "资源检测: $(resource_profile_label), $(cpu_profile_label)"
     prepare_low_memory_swap
     install_missing_required_deps || error "关键依赖安装失败: curl openssl。请检查系统内存、磁盘空间或软件源"
     install_optional_deps
@@ -1552,17 +1597,36 @@ refresh_argo_domain_if_needed() {
 }
 
 # ─── Reality 优选 SNI ────────────────────────────────────────
+get_reality_probe_parallelism() {
+    local cpu_count profile
+    cpu_count=$(get_cpu_count)
+    profile=$(get_resource_profile)
+
+    if [[ "$profile" == "low-noswap" ]]; then
+        echo 1
+    elif (( cpu_count <= 1 )); then
+        echo 1
+    elif (( cpu_count <= 2 )); then
+        echo 3
+    else
+        echo 6
+    fi
+}
+
 select_reality_sni() {
     if [[ -n "${REALITY_SNI:-}" ]]; then
         info "当前已设定伪装域名: $REALITY_SNI，跳过测速"
         return
     fi
-    info "正在按兼容性优先顺序探测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名..."
+    local probe_parallelism
+    probe_parallelism=$(get_reality_probe_parallelism)
+    info "正在按兼容性优先顺序探测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名，并发数: ${probe_parallelism}"
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
 
     # Reality 目标站优先保证兼容性和稳定性，其次才是连接时间。
+    local active_jobs=0
     for idx in "${!REALITY_SNI_LIST[@]}"; do
         local sni="${REALITY_SNI_LIST[$idx]}"
         (
@@ -1574,6 +1638,11 @@ select_reality_sni() {
                 echo "$idx $ms $sni" >> "${tmp_dir}/results.txt"
             fi
         ) &
+        active_jobs=$((active_jobs + 1))
+        if (( active_jobs >= probe_parallelism )); then
+            wait
+            active_jobs=0
+        fi
     done
     wait
 
