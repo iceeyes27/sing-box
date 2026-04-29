@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.1"
+SCRIPT_VERSION="2.6.2"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -29,6 +29,8 @@ SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
 TIME_SKEW_THRESHOLD=30
+LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
+LOW_MEMORY_SWAP_CREATED=false
 
 # Reality 伪装域名候选列表
 # Reality 更看重目标站点兼容性，不是单纯 HTTPS 连通或延迟最低即可。
@@ -397,15 +399,143 @@ clear_argo_best_cf_cache() {
 }
 
 # ─── 安装组件 ────────────────────────────────────────────────
+get_meminfo_kb() {
+    local key="$1" name value unit
+    [[ -r /proc/meminfo ]] || return 1
+    while read -r name value unit; do
+        if [[ "$name" == "${key}:" && "$value" =~ ^[0-9]+$ ]]; then
+            echo "$value"
+            return 0
+        fi
+    done < /proc/meminfo
+    return 1
+}
+
+cleanup_low_memory_swap() {
+    [[ "$LOW_MEMORY_SWAP_CREATED" == "true" ]] || return 0
+    swapoff "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1 || true
+    rm -f "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1 || true
+    LOW_MEMORY_SWAP_CREATED=false
+}
+
+prepare_low_memory_swap() {
+    local mem_total swap_total available_mb
+    mem_total=$(get_meminfo_kb MemTotal 2>/dev/null || echo 0)
+    swap_total=$(get_meminfo_kb SwapTotal 2>/dev/null || echo 0)
+
+    (( mem_total > 0 && mem_total < 786432 && swap_total < 131072 )) || return 0
+    command -v mkswap &>/dev/null && command -v swapon &>/dev/null || return 0
+
+    if [[ -e "$LOW_MEMORY_SWAP_FILE" ]]; then
+        warn "检测到低内存，但 ${LOW_MEMORY_SWAP_FILE} 已存在，跳过临时 swap 创建"
+        return 0
+    fi
+
+    available_mb=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
+    [[ "$available_mb" =~ ^[0-9]+$ ]] || available_mb=0
+    if (( available_mb < 640 )); then
+        warn "检测到低内存且磁盘可用空间不足，继续使用分批安装"
+        return 0
+    fi
+
+    info "检测到低内存且无可用 swap，临时启用 512MB swap 支撑安装..."
+    if command -v fallocate &>/dev/null; then
+        fallocate -l 512M "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1 || \
+            dd if=/dev/zero of="$LOW_MEMORY_SWAP_FILE" bs=1M count=512 status=none >/dev/null 2>&1 || true
+    else
+        dd if=/dev/zero of="$LOW_MEMORY_SWAP_FILE" bs=1M count=512 status=none >/dev/null 2>&1 || true
+    fi
+
+    if [[ ! -s "$LOW_MEMORY_SWAP_FILE" ]]; then
+        rm -f "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1 || true
+        warn "临时 swap 文件创建失败，继续使用分批安装"
+        return 0
+    fi
+
+    chmod 600 "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1 || true
+    if mkswap "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1 && swapon "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1; then
+        LOW_MEMORY_SWAP_CREATED=true
+        trap cleanup_low_memory_swap EXIT
+        success "临时 swap 已启用"
+    else
+        rm -f "$LOW_MEMORY_SWAP_FILE" >/dev/null 2>&1 || true
+        warn "当前 VPS 不允许启用临时 swap，继续使用分批安装"
+    fi
+}
+
+run_low_resource() {
+    nice -n 19 "$@"
+}
+
+is_apt_package_installed() {
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+}
+
+install_apt_packages_low_resource() {
+    local pkg
+    export DEBIAN_FRONTEND=noninteractive
+    run_low_resource apt-get update -qq -o Acquire::Languages=none 2>/dev/null || return 1
+    apt-get clean >/dev/null 2>&1 || true
+
+    for pkg in "$@"; do
+        if is_apt_package_installed "$pkg"; then
+            continue
+        fi
+        info "安装依赖: ${pkg}"
+        if ! run_low_resource apt-get install -y -qq --no-install-recommends \
+            -o Dpkg::Use-Pty=0 \
+            -o APT::Install-Recommends=false \
+            -o APT::Install-Suggests=false \
+            "$pkg" > /dev/null 2>&1; then
+            warn "依赖安装失败: ${pkg}"
+            return 1
+        fi
+        apt-get clean >/dev/null 2>&1 || true
+    done
+}
+
+install_yum_packages_low_resource() {
+    local manager="$1" pkg
+    shift
+    for pkg in "$@"; do
+        if command -v rpm &>/dev/null && rpm -q "$pkg" >/dev/null 2>&1; then
+            continue
+        fi
+        info "安装依赖: ${pkg}"
+        if ! run_low_resource "$manager" install -y -q "$pkg" > /dev/null 2>&1; then
+            warn "依赖安装失败: ${pkg}"
+            return 1
+        fi
+    done
+}
+
+install_apk_packages_low_resource() {
+    local pkg
+    for pkg in "$@"; do
+        if apk info -e "$pkg" >/dev/null 2>&1; then
+            continue
+        fi
+        info "安装依赖: ${pkg}"
+        if ! run_low_resource apk add --no-cache "$pkg" > /dev/null 2>&1; then
+            warn "依赖安装失败: ${pkg}"
+            return 1
+        fi
+    done
+}
+
 install_deps() {
     info "安装基础依赖..."
+    prepare_low_memory_swap
     if command -v apt-get &>/dev/null; then
-        apt-get update -qq 2>/dev/null
-        apt-get install -y -qq curl wget jq openssl python3 > /dev/null 2>&1
+        install_apt_packages_low_resource curl wget jq openssl python3 || error "基础依赖安装失败，请检查系统内存、磁盘空间或软件源"
+    elif command -v dnf &>/dev/null; then
+        install_yum_packages_low_resource dnf curl wget jq openssl python3 || error "基础依赖安装失败，请检查系统内存、磁盘空间或软件源"
     elif command -v yum &>/dev/null; then
-        yum install -y -q curl wget jq openssl python3 > /dev/null 2>&1
+        install_yum_packages_low_resource yum curl wget jq openssl python3 || error "基础依赖安装失败，请检查系统内存、磁盘空间或软件源"
     elif command -v apk &>/dev/null; then
-        apk add --no-cache bash curl wget jq openssl python3 iproute2 lsof ca-certificates > /dev/null 2>&1
+        install_apk_packages_low_resource bash curl wget jq openssl python3 iproute2 lsof ca-certificates || error "基础依赖安装失败，请检查系统内存、磁盘空间或软件源"
+    else
+        error "未检测到支持的软件包管理器"
     fi
     success "依赖就绪"
 }
@@ -467,18 +597,20 @@ install_time_sync_service() {
 
     if command -v apt-get &>/dev/null; then
         info "安装时间同步服务 systemd-timesyncd..."
-        apt-get update -qq 2>/dev/null
-        if apt-get install -y -qq systemd-timesyncd > /dev/null 2>&1; then
+        if install_apt_packages_low_resource systemd-timesyncd; then
             return 0
         fi
         info "systemd-timesyncd 安装失败，回退安装 chrony..."
-        apt-get install -y -qq chrony > /dev/null 2>&1 || return 1
+        install_apt_packages_low_resource chrony || return 1
+    elif command -v dnf &>/dev/null; then
+        info "安装时间同步服务 chrony..."
+        install_yum_packages_low_resource dnf chrony || return 1
     elif command -v yum &>/dev/null; then
         info "安装时间同步服务 chrony..."
-        yum install -y -q chrony > /dev/null 2>&1 || return 1
+        install_yum_packages_low_resource yum chrony || return 1
     elif command -v apk &>/dev/null; then
         info "安装时间同步服务 chrony..."
-        apk add --no-cache chrony > /dev/null 2>&1 || return 1
+        install_apk_packages_low_resource chrony || return 1
     else
         return 1
     fi
