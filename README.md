@@ -16,7 +16,7 @@
 ## 📦 一键安装配置
 
 ```bash
-sh -c 'set -e; URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"; if ! command -v bash >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then if command -v apk >/dev/null 2>&1; then apk add --no-cache bash curl; elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq --no-install-recommends bash curl; elif command -v dnf >/dev/null 2>&1; then dnf install -y -q bash curl; elif command -v yum >/dev/null 2>&1; then yum install -y -q bash curl; fi; fi; curl -fsSL "$URL" | bash'
+wget -qO- https://raw.githubusercontent.com/iceeyes27/sing-box/main/bootstrap.sh | sh
 ```
 
 > 需要 root 权限，支持 Ubuntu / Debian / CentOS / RHEL / Fedora / Alpine。
@@ -34,7 +34,7 @@ sbm
 **面板概览：**
 ```text
 ╔══════════════════════════════════════════════╗
-║     sing-box 管理面板  v2.6.6              ║
+║     sing-box 管理面板  v2.6.7              ║
 ╚══════════════════════════════════════════════╝
 
  1) 安装 / 重新安装
