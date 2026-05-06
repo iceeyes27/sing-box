@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.10"
+SCRIPT_VERSION="2.6.11"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -711,6 +711,92 @@ install_optional_deps() {
     fi
 }
 
+get_singbox_release_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        armv7l|armv7) echo "armv7" ;;
+        i386|i686|x86) echo "386" ;;
+        *) return 1 ;;
+    esac
+}
+
+get_latest_singbox_version() {
+    local version latest_url
+
+    version=$(curl -fsSL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
+        | awk -F'"' '/"tag_name"/ { gsub(/^v/, "", $4); print $4; exit }' || true)
+
+    if [[ -z "$version" ]]; then
+        latest_url=$(curl -fsSIL -o /dev/null -w '%{url_effective}' \
+            "https://github.com/SagerNet/sing-box/releases/latest" 2>/dev/null || true)
+        version="${latest_url##*/v}"
+    fi
+
+    [[ "$version" =~ ^[0-9]+(\.[0-9]+)+$ ]] || return 1
+    echo "$version"
+}
+
+install_singbox_from_official_tarball() {
+    local version arch tmp_dir archive url bin_path
+
+    arch=$(get_singbox_release_arch) || return 1
+    version=$(get_latest_singbox_version) || return 1
+    tmp_dir=$(mktemp -d)
+    archive="${tmp_dir}/sing-box.tar.gz"
+    url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}-musl.tar.gz"
+
+    info "下载 sing-box 官方二进制: v${version} (${arch}-musl)"
+    if ! curl -fL --retry 3 --connect-timeout 15 -o "$archive" "$url"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if ! tar -xzf "$archive" -C "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    bin_path=$(find "$tmp_dir" -type f -name sing-box | head -n 1 || true)
+    if [[ -z "$bin_path" || ! -f "$bin_path" ]]; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if command -v install &>/dev/null; then
+        install -m 0755 "$bin_path" /usr/local/bin/sing-box
+    else
+        cp "$bin_path" /usr/local/bin/sing-box
+        chmod 755 /usr/local/bin/sing-box
+    fi
+
+    hash -r 2>/dev/null || true
+    if ! command -v sing-box &>/dev/null && [[ -x /usr/local/bin/sing-box ]]; then
+        ln -sf /usr/local/bin/sing-box /usr/bin/sing-box 2>/dev/null || true
+        hash -r 2>/dev/null || true
+    fi
+
+    rm -rf "$tmp_dir"
+    command -v sing-box &>/dev/null
+}
+
+install_or_upgrade_singbox_package() {
+    local upgrade="${1:-false}"
+    local apk_args=(add --no-cache)
+
+    if command -v apk &>/dev/null; then
+        [[ "$upgrade" == "true" ]] && apk_args+=(--upgrade)
+        if ! run_low_resource apk "${apk_args[@]}" sing-box > /dev/null 2>&1 || ! command -v sing-box &>/dev/null; then
+            warn "Alpine 软件源安装 sing-box 失败，改用官方 musl 二进制"
+            install_singbox_from_official_tarball || return 1
+        fi
+    else
+        curl -fsSL https://sing-box.app/install.sh | sh || return 1
+    fi
+
+    command -v sing-box &>/dev/null
+}
+
 install_deps() {
     info "安装基础依赖..."
     info "资源检测: $(resource_profile_label), $(cpu_profile_label)"
@@ -886,11 +972,7 @@ install_singbox() {
         info "sing-box 已安装: $ver"
     else
         info "安装 sing-box..."
-        if command -v apk &>/dev/null; then
-            apk add --no-cache sing-box > /dev/null 2>&1 || curl -fsSL https://sing-box.app/install.sh | sh
-        else
-            curl -fsSL https://sing-box.app/install.sh | sh
-        fi
+        install_or_upgrade_singbox_package false || error "sing-box 安装失败。请检查网络、磁盘空间或 GitHub 访问"
         success "sing-box 安装完成"
     fi
     mkdir -p "$CONFIG_DIR"
@@ -2554,11 +2636,7 @@ do_upgrade() {
     case "$choice" in
         1)
             info "更新 sing-box..."
-            if command -v apk &>/dev/null; then
-                apk add --no-cache --upgrade sing-box > /dev/null 2>&1 || curl -fsSL https://sing-box.app/install.sh | sh
-            else
-                curl -fsSL https://sing-box.app/install.sh | sh
-            fi
+            install_or_upgrade_singbox_package true || error "sing-box 更新失败。请检查网络、磁盘空间或 GitHub 访问"
             write_singbox_service
             service_restart sing-box 2>/dev/null || true
             success "sing-box 已更新并重启"
