@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.11"
+SCRIPT_VERSION="2.6.12"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -449,6 +449,27 @@ clear_argo_best_cf_cache() {
     ARGO_BEST_CF_DOMAIN_IPV6=""
 }
 
+restore_runtime_params() {
+    UUID="$1"
+    SHORT_ID="$2"
+    PRIVATE_KEY="$3"
+    PUBLIC_KEY="$4"
+    REALITY_PORT="$5"
+    REALITY_SNI="$6"
+    WS_PORT="$7"
+    WS_PATH="$8"
+    NODE_NAME="$9"
+    HY2_PORT="${10}"
+    HY2_PASSWORD="${11}"
+    HY2_SNI="${12}"
+    SUBSCRIPTION_PORT="${13}"
+    ARGO_DOMAIN="${14}"
+    ARGO_TOKEN="${15}"
+    ARGO_BEST_CF_DOMAIN="${16}"
+    ARGO_BEST_CF_DOMAIN_IPV4="${17}"
+    ARGO_BEST_CF_DOMAIN_IPV6="${18}"
+}
+
 # ─── 安装组件 ────────────────────────────────────────────────
 get_meminfo_kb() {
     local key="$1" name value unit
@@ -588,6 +609,24 @@ run_low_resource() {
     fi
 }
 
+package_manager() {
+    if command -v apt-get &>/dev/null; then
+        echo "apt"
+    elif command -v dnf &>/dev/null; then
+        echo "dnf"
+    elif command -v yum &>/dev/null; then
+        echo "yum"
+    elif command -v apk &>/dev/null; then
+        echo "apk"
+    else
+        echo "none"
+    fi
+}
+
+singbox_binary_available() {
+    command -v sing-box &>/dev/null
+}
+
 is_apt_package_installed() {
     dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
 }
@@ -645,17 +684,13 @@ install_apk_packages_low_resource() {
 }
 
 install_packages_low_resource() {
-    if command -v apt-get &>/dev/null; then
-        install_apt_packages_low_resource "$@"
-    elif command -v dnf &>/dev/null; then
-        install_yum_packages_low_resource dnf "$@"
-    elif command -v yum &>/dev/null; then
-        install_yum_packages_low_resource yum "$@"
-    elif command -v apk &>/dev/null; then
-        install_apk_packages_low_resource "$@"
-    else
-        return 1
-    fi
+    case "$(package_manager)" in
+        apt) install_apt_packages_low_resource "$@" ;;
+        dnf) install_yum_packages_low_resource dnf "$@" ;;
+        yum) install_yum_packages_low_resource yum "$@" ;;
+        apk) install_apk_packages_low_resource "$@" ;;
+        *)   return 1 ;;
+    esac
 }
 
 install_missing_required_deps() {
@@ -771,22 +806,22 @@ install_singbox_from_official_tarball() {
     fi
 
     hash -r 2>/dev/null || true
-    if ! command -v sing-box &>/dev/null && [[ -x /usr/local/bin/sing-box ]]; then
+    if ! singbox_binary_available && [[ -x /usr/local/bin/sing-box ]]; then
         ln -sf /usr/local/bin/sing-box /usr/bin/sing-box 2>/dev/null || true
         hash -r 2>/dev/null || true
     fi
 
     rm -rf "$tmp_dir"
-    command -v sing-box &>/dev/null
+    singbox_binary_available
 }
 
 install_or_upgrade_singbox_package() {
     local upgrade="${1:-false}"
     local apk_args=(add --no-cache)
 
-    if command -v apk &>/dev/null; then
+    if [[ "$(package_manager)" == "apk" ]]; then
         [[ "$upgrade" == "true" ]] && apk_args+=(--upgrade)
-        if ! run_low_resource apk "${apk_args[@]}" sing-box > /dev/null 2>&1 || ! command -v sing-box &>/dev/null; then
+        if ! run_low_resource apk "${apk_args[@]}" sing-box > /dev/null 2>&1 || ! singbox_binary_available; then
             warn "Alpine 软件源安装 sing-box 失败，改用官方 musl 二进制"
             install_singbox_from_official_tarball || return 1
         fi
@@ -794,7 +829,7 @@ install_or_upgrade_singbox_package() {
         curl -fsSL https://sing-box.app/install.sh | sh || return 1
     fi
 
-    command -v sing-box &>/dev/null
+    singbox_binary_available
 }
 
 install_deps() {
@@ -882,25 +917,29 @@ install_time_sync_service() {
         return 0
     fi
 
-    if command -v apt-get &>/dev/null; then
-        info "安装时间同步服务 systemd-timesyncd..."
-        if install_apt_packages_low_resource systemd-timesyncd; then
-            return 0
-        fi
-        info "systemd-timesyncd 安装失败，回退安装 chrony..."
-        install_apt_packages_low_resource chrony || return 1
-    elif command -v dnf &>/dev/null; then
-        info "安装时间同步服务 chrony..."
-        install_yum_packages_low_resource dnf chrony || return 1
-    elif command -v yum &>/dev/null; then
-        info "安装时间同步服务 chrony..."
-        install_yum_packages_low_resource yum chrony || return 1
-    elif command -v apk &>/dev/null; then
-        info "安装时间同步服务 chrony..."
-        install_apk_packages_low_resource chrony || return 1
-    else
-        return 1
-    fi
+    case "$(package_manager)" in
+        apt)
+            info "安装时间同步服务 systemd-timesyncd..."
+            if install_apt_packages_low_resource systemd-timesyncd; then
+                return 0
+            fi
+            info "systemd-timesyncd 安装失败，回退安装 chrony..."
+            install_apt_packages_low_resource chrony || return 1
+            ;;
+        dnf)
+            info "安装时间同步服务 chrony..."
+            install_yum_packages_low_resource dnf chrony || return 1
+            ;;
+        yum)
+            info "安装时间同步服务 chrony..."
+            install_yum_packages_low_resource yum chrony || return 1
+            ;;
+        apk)
+            info "安装时间同步服务 chrony..."
+            install_apk_packages_low_resource chrony || return 1
+            ;;
+        *) return 1 ;;
+    esac
     return 0
 }
 
@@ -2320,9 +2359,24 @@ do_modify_config() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
     while true; do
+        local old_uuid="${UUID}"
+        local old_short_id="${SHORT_ID}"
+        local old_private_key="${PRIVATE_KEY}"
+        local old_public_key="${PUBLIC_KEY}"
         local old_reality_port="${REALITY_PORT}"
+        local old_reality_sni="${REALITY_SNI}"
+        local old_ws_port="${WS_PORT}"
+        local old_ws_path="${WS_PATH}"
+        local old_node_name="${NODE_NAME}"
         local old_hy2_port="${HY2_PORT}"
+        local old_hy2_password="${HY2_PASSWORD}"
+        local old_hy2_sni="${HY2_SNI}"
         local old_subscription_port="${SUBSCRIPTION_PORT}"
+        local old_argo_domain="${ARGO_DOMAIN:-}"
+        local old_argo_token="${ARGO_TOKEN:-}"
+        local old_argo_best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
+        local old_argo_best_cf_domain_ipv4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
+        local old_argo_best_cf_domain_ipv6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
         clear
         echo -e "${CYAN}${BOLD}"
         echo "  ── 修改配置 ──"
@@ -2457,9 +2511,11 @@ do_modify_config() {
 
         if [[ "$changed" == "true" ]]; then
             if ! validate_service_ports "$old_reality_port" "$old_hy2_port" "$old_subscription_port"; then
-                REALITY_PORT="$old_reality_port"
-                HY2_PORT="$old_hy2_port"
-                SUBSCRIPTION_PORT="$old_subscription_port"
+                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
+                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
+                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
+                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
                 warn "端口检查未通过，已保留原配置"
                 press_enter
                 continue
@@ -2474,9 +2530,11 @@ do_modify_config() {
                 ensure_time_sync || true
                 info "重启 sing-box..."
                 if ! service_restart sing-box; then
-                    REALITY_PORT="$old_reality_port"
-                    HY2_PORT="$old_hy2_port"
-                    SUBSCRIPTION_PORT="$old_subscription_port"
+                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
+                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
+                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
+                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -2489,9 +2547,11 @@ do_modify_config() {
                 if service_is_active sing-box; then
                     success "配置已更新并重启"
                 else
-                    REALITY_PORT="$old_reality_port"
-                    HY2_PORT="$old_hy2_port"
-                    SUBSCRIPTION_PORT="$old_subscription_port"
+                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
+                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
+                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
+                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -2700,15 +2760,12 @@ do_uninstall() {
     rm -f "$SINGBOX_OPENRC_SERVICE"
     service_daemon_reload
 
-    if command -v apt-get &>/dev/null; then
-        apt-get remove -y sing-box 2>/dev/null || true
-    elif command -v dnf &>/dev/null; then
-        dnf remove -y sing-box 2>/dev/null || true
-    elif command -v yum &>/dev/null; then
-        yum remove -y sing-box 2>/dev/null || true
-    elif command -v apk &>/dev/null; then
-        apk del sing-box 2>/dev/null || true
-    fi
+    case "$(package_manager)" in
+        apt) apt-get remove -y sing-box 2>/dev/null || true ;;
+        dnf) dnf remove -y sing-box 2>/dev/null || true ;;
+        yum) yum remove -y sing-box 2>/dev/null || true ;;
+        apk) apk del sing-box 2>/dev/null || true ;;
+    esac
 
     rm -f /usr/local/bin/cloudflared
     rm -f /usr/local/bin/sbm
@@ -2798,47 +2855,53 @@ main_menu() {
 #  入口
 # ════════════════════════════════════════════════════════════
 
-check_root
-detect_os
+main() {
+    check_root
+    detect_os
 
-# 安装脚本副本到系统路径（方便后续直接调用 sbm）
-if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sbm" ]]; then
-    curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sbm 2>/dev/null || true
-    chmod +x /usr/local/bin/sbm 2>/dev/null || true
-    ensure_command_aliases
-    # 为在线初次安装的用户顺便清一下 hash 缓存
-    hash -r 2>/dev/null || true
+    # 安装脚本副本到系统路径（方便后续直接调用 sbm）
+    if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sbm" ]]; then
+        curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sbm 2>/dev/null || true
+        chmod +x /usr/local/bin/sbm 2>/dev/null || true
+        ensure_command_aliases
+        # 为在线初次安装的用户顺便清一下 hash 缓存
+        hash -r 2>/dev/null || true
+    fi
+
+    # 命令行快捷参数
+    # 若用户使用了旧命令名通过兼容链接启动，提示其换用新命令
+    if [[ "$(basename "$0")" == "sing-box-manager" ]]; then
+        warn "sing-box-manager 命令已更名，推荐后续直接输入: sbm"
+        sleep 1
+    fi
+
+    case "${1:-}" in
+        install)     do_install ;;
+        links|sub)   load_params && { ensure_time_sync || true; refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; } || warn "未安装" ;;
+        start)       do_start ;;
+        stop)        do_stop ;;
+        restart)     do_restart ;;
+        status)      do_status ;;
+        uninstall)   do_uninstall ;;
+        --help|-h)
+            echo "用法: bash $0 [命令]"
+            echo ""
+            echo "命令:"
+            echo "  (无参数)   交互式管理菜单"
+            echo "  install    直接安装"
+            echo "  links      显示分享链接与订阅地址"
+            echo "  sub        同 links"
+            echo "  start      启动服务"
+            echo "  stop       停止服务"
+            echo "  restart    重启服务"
+            echo "  status     查看状态"
+            echo "  uninstall  卸载"
+            exit 0
+            ;;
+        *)  main_menu ;;
+    esac
+}
+
+if [[ "${SBM_TEST_MODE:-}" != "1" ]]; then
+    main "$@"
 fi
-
-# 命令行快捷参数
-# 若用户使用了旧命令名通过兼容链接启动，提示其换用新命令
-if [[ "$(basename "$0")" == "sing-box-manager" ]]; then
-    warn "sing-box-manager 命令已更名，推荐后续直接输入: sbm"
-    sleep 1
-fi
-
-case "${1:-}" in
-    install)     do_install ;;
-    links|sub)   load_params && { ensure_time_sync || true; refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; } || warn "未安装" ;;
-    start)       do_start ;;
-    stop)        do_stop ;;
-    restart)     do_restart ;;
-    status)      do_status ;;
-    uninstall)   do_uninstall ;;
-    --help|-h)
-        echo "用法: bash $0 [命令]"
-        echo ""
-        echo "命令:"
-        echo "  (无参数)   交互式管理菜单"
-        echo "  install    直接安装"
-        echo "  links      显示分享链接与订阅地址"
-        echo "  sub        同 links"
-        echo "  start      启动服务"
-        echo "  stop       停止服务"
-        echo "  restart    重启服务"
-        echo "  status     查看状态"
-        echo "  uninstall  卸载"
-        exit 0
-        ;;
-    *)  main_menu ;;
-esac
