@@ -213,6 +213,54 @@ test_runtime_param_restore_is_complete() {
     assert_eq "cf6-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV6" "restore Argo IPv6 cache"
 }
 
+test_relay_script_generation_uses_argo_upstream() {
+    local tmp relay_script script_body
+
+    tmp=$(mktemp -d)
+    relay_script="${tmp}/relay-install.sh"
+    UUID="uuid-main"
+    WS_PATH="/ws-main"
+
+    write_relay_install_script \
+        "$relay_script" \
+        "443" \
+        "www.microsoft.com" \
+        "cf.example.com" \
+        "argo.example.com" \
+        "node-Relay"
+
+    bash -n "$relay_script"
+    script_body=$(<"$relay_script")
+    assert_contains "$script_body" '#!/usr/bin/env sh' "relay script sh bootstrap"
+    assert_contains "$script_body" 'exec bash "$0" "$@"' "relay script bash exec"
+    assert_contains "$script_body" 'install_singbox_from_musl_tarball' "relay Alpine musl fallback"
+    assert_contains "$script_body" 'RELAY_PORT="443"' "relay port"
+    assert_contains "$script_body" 'RELAY_SNI="www.microsoft.com"' "relay Reality SNI"
+    assert_contains "$script_body" 'UPSTREAM_SERVER="cf.example.com"' "relay upstream server"
+    assert_contains "$script_body" 'UPSTREAM_HOST="argo.example.com"' "relay upstream host"
+    assert_contains "$script_body" 'UPSTREAM_UUID="uuid-main"' "relay upstream UUID"
+    assert_contains "$script_body" 'UPSTREAM_WS_PATH="/ws-main"' "relay upstream WS path"
+    assert_contains "$script_body" '"outbound": "main-argo-out"' "relay route"
+    assert_not_contains "$script_body" "__UPSTREAM_SERVER__" "relay placeholders replaced"
+
+    rm -rf "$tmp"
+}
+
+test_relay_script_requires_argo_upstream() {
+    local tmp relay_script
+
+    tmp=$(mktemp -d)
+    relay_script="${tmp}/relay-install.sh"
+    UUID="uuid-main"
+    WS_PATH="/ws-main"
+
+    if write_relay_install_script "$relay_script" "443" "www.microsoft.com" "" "argo.example.com" "node-Relay"; then
+        fail "relay script accepted empty upstream server"
+    fi
+
+    rm -rf "$tmp"
+}
+
 test_alpine_package_fallback() {
     local tmp fallback_file
     tmp=$(mktemp -d)
@@ -262,6 +310,8 @@ test_package_manager_alpine
 test_legacy_params_migration
 test_ipv6_only_links_are_argo_only
 test_runtime_param_restore_is_complete
+test_relay_script_generation_uses_argo_upstream
+test_relay_script_requires_argo_upstream
 test_alpine_package_fallback
 test_non_alpine_package_verifies_binary
 

@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.12"
+SCRIPT_VERSION="2.6.13"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -54,6 +54,7 @@ SUBSCRIPTION_SERVER="/usr/local/bin/sbm-subscription-server.py"
 SUBSCRIPTION_SERVICE="/etc/systemd/system/sbm-subscription.service"
 SUBSCRIPTION_OPENRC_SERVICE="/etc/init.d/sbm-subscription"
 SUBSCRIPTION_PORT=24630
+RELAY_SCRIPT_PATH="${TMPDIR:-/tmp}/sbm-relay-install.sh"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
@@ -2236,12 +2237,382 @@ generate_and_show_links() {
     echo -e "${DIM}链接已保存至: ${LINK_FILE}${NC}"
 }
 
+escape_sed_replacement() {
+    printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+replace_file_token() {
+    local file="$1"
+    local token="$2"
+    local value
+
+    value=$(escape_sed_replacement "$3")
+    sed -i "s|${token}|${value}|g" "$file"
+}
+
+write_relay_install_script() {
+    local relay_script="$1"
+    local relay_port="$2"
+    local relay_sni="$3"
+    local upstream_server="$4"
+    local upstream_host="$5"
+    local relay_name="$6"
+
+    [[ -n "$relay_script" && -n "$relay_port" && -n "$relay_sni" ]] || return 1
+    [[ -n "$upstream_server" && -n "$upstream_host" && -n "${UUID:-}" && -n "${WS_PATH:-}" ]] || return 1
+
+    cat > "$relay_script" <<'RELAY_EOF'
+#!/usr/bin/env sh
+if [ -z "${BASH_VERSION:-}" ]; then
+    set -e
+    if ! command -v bash >/dev/null 2>&1; then
+        if command -v apk >/dev/null 2>&1; then
+            apk update
+            apk add --no-cache bash
+        elif command -v apt-get >/dev/null 2>&1; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y
+            apt-get install -y bash
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y bash
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y bash
+        else
+            echo "[ERROR] 未检测到 Bash 或可用包管理器" >&2
+            exit 1
+        fi
+    fi
+    exec bash "$0" "$@"
+fi
+
+set -euo pipefail
+
+RELAY_PORT="__RELAY_PORT__"
+RELAY_SNI="__RELAY_SNI__"
+UPSTREAM_SERVER="__UPSTREAM_SERVER__"
+UPSTREAM_HOST="__UPSTREAM_HOST__"
+UPSTREAM_UUID="__UPSTREAM_UUID__"
+UPSTREAM_WS_PATH="__UPSTREAM_WS_PATH__"
+RELAY_NAME="__RELAY_NAME__"
+
+info() { echo -e "\033[1;32m[INFO]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
+err()  { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
+
+[[ "${EUID}" -eq 0 ]] || err "请使用 root 权限运行"
+
+package_manager() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo apt
+    elif command -v dnf >/dev/null 2>&1; then
+        echo dnf
+    elif command -v yum >/dev/null 2>&1; then
+        echo yum
+    elif command -v apk >/dev/null 2>&1; then
+        echo apk
+    else
+        echo none
+    fi
+}
+
+install_deps() {
+    case "$(package_manager)" in
+        apt)
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y
+            apt-get install -y curl ca-certificates openssl
+            ;;
+        dnf) dnf install -y curl ca-certificates openssl ;;
+        yum) yum install -y curl ca-certificates openssl ;;
+        apk)
+            apk update
+            apk add --no-cache curl ca-certificates openssl openrc tar
+            ;;
+        *) err "未识别系统包管理器" ;;
+    esac
+}
+
+singbox_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo amd64 ;;
+        aarch64|arm64) echo arm64 ;;
+        armv7l|armv7) echo armv7 ;;
+        *) echo amd64 ;;
+    esac
+}
+
+latest_singbox_version() {
+    local latest_url
+    latest_url=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/SagerNet/sing-box/releases/latest)
+    printf '%s' "${latest_url##*/v}"
+}
+
+install_singbox_from_musl_tarball() {
+    local version arch tmp url archive bin_path
+
+    version=$(latest_singbox_version)
+    arch=$(singbox_arch)
+    tmp=$(mktemp -d)
+    archive="${tmp}/sing-box.tar.gz"
+    url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}-musl.tar.gz"
+
+    curl -fL "$url" -o "$archive"
+    tar -xzf "$archive" -C "$tmp"
+    bin_path=$(find "$tmp" -type f -name sing-box | head -n 1)
+    [[ -n "$bin_path" ]] || err "未找到 sing-box 二进制"
+    cp "$bin_path" /usr/local/bin/sing-box
+    chmod +x /usr/local/bin/sing-box
+    rm -rf "$tmp"
+}
+
+install_singbox() {
+    command -v sing-box >/dev/null 2>&1 && return 0
+
+    case "$(package_manager)" in
+        apk) apk add --no-cache sing-box 2>/dev/null || install_singbox_from_musl_tarball ;;
+        apt|dnf|yum) bash <(curl -fsSL https://sing-box.app/install.sh) || true ;;
+    esac
+
+    command -v sing-box >/dev/null 2>&1 || err "sing-box 安装失败"
+}
+
+format_host() {
+    case "$1" in
+        *:*) printf '[%s]' "$1" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+urlencode() {
+    python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || printf '%s' "$1"
+}
+
+public_ip() {
+    curl -fsS4 https://api.ipify.org 2>/dev/null || curl -fsS6 https://api64.ipify.org 2>/dev/null || printf 'YOUR_RELAY_IP'
+}
+
+open_firewall_port() {
+    local port="$1"
+
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active; then
+        ufw allow "${port}/tcp" >/dev/null 2>&1 || true
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+}
+
+write_service() {
+    local sing_box_bin
+    sing_box_bin=$(command -v sing-box)
+
+    if command -v rc-service >/dev/null 2>&1; then
+        cat > /etc/init.d/sing-box <<EOF
+#!/sbin/openrc-run
+name="sing-box"
+command="${sing_box_bin}"
+command_args="run -c /etc/sing-box/config.json"
+command_background="yes"
+pidfile="/run/sing-box.pid"
+supervisor=supervise-daemon
+supervise_daemon_args="--respawn-max 0 --respawn-delay 5"
+depend() { need net; }
+EOF
+        chmod +x /etc/init.d/sing-box
+        rc-update add sing-box default
+        rc-service sing-box restart
+    elif command -v systemctl >/dev/null 2>&1; then
+        cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${sing_box_bin} run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now sing-box
+    else
+        err "未检测到 systemd 或 OpenRC"
+    fi
+}
+
+install_deps
+install_singbox
+
+RELAY_UUID=$(sing-box generate uuid)
+REALITY_KEYS=$(sing-box generate reality-keypair)
+REALITY_PRIVATE_KEY=$(printf '%s\n' "$REALITY_KEYS" | awk '/PrivateKey/ {print $NF; exit}')
+REALITY_PUBLIC_KEY=$(printf '%s\n' "$REALITY_KEYS" | awk '/PublicKey/ {print $NF; exit}')
+REALITY_SHORT_ID=$(sing-box generate rand 8 --hex 2>/dev/null || openssl rand -hex 4)
+
+[[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" ]] || err "Reality 密钥生成失败"
+
+mkdir -p /etc/sing-box
+cat > /etc/sing-box/config.json <<EOF
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "relay-in",
+      "listen": "::",
+      "listen_port": ${RELAY_PORT},
+      "sniff": true,
+      "users": [
+        {
+          "uuid": "${RELAY_UUID}",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "${RELAY_SNI}",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "${RELAY_SNI}",
+            "server_port": 443
+          },
+          "private_key": "${REALITY_PRIVATE_KEY}",
+          "short_id": [
+            "${REALITY_SHORT_ID}"
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "main-argo-out",
+      "server": "${UPSTREAM_SERVER}",
+      "server_port": 443,
+      "uuid": "${UPSTREAM_UUID}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${UPSTREAM_HOST}",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "transport": {
+        "type": "ws",
+        "path": "${UPSTREAM_WS_PATH}",
+        "headers": {
+          "Host": "${UPSTREAM_HOST}"
+        }
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": "relay-in",
+        "outbound": "main-argo-out"
+      }
+    ]
+  }
+}
+EOF
+
+open_firewall_port "$RELAY_PORT"
+write_service
+
+RELAY_PUBLIC_IP=$(public_ip)
+RELAY_HOST=$(format_host "$RELAY_PUBLIC_IP")
+RELAY_REMARK=$(urlencode "$RELAY_NAME")
+RELAY_URI="vless://${RELAY_UUID}@${RELAY_HOST}:${RELAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${RELAY_SNI}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp#${RELAY_REMARK}"
+
+printf '%s\n' "$RELAY_URI" > /etc/sing-box/relay-link.txt
+chmod 600 /etc/sing-box/relay-link.txt
+
+echo ""
+info "线路机部署完成"
+echo "$RELAY_URI"
+echo ""
+info "链接保存位置: /etc/sing-box/relay-link.txt"
+RELAY_EOF
+
+    replace_file_token "$relay_script" "__RELAY_PORT__" "$relay_port"
+    replace_file_token "$relay_script" "__RELAY_SNI__" "$relay_sni"
+    replace_file_token "$relay_script" "__UPSTREAM_SERVER__" "$upstream_server"
+    replace_file_token "$relay_script" "__UPSTREAM_HOST__" "$upstream_host"
+    replace_file_token "$relay_script" "__UPSTREAM_UUID__" "$UUID"
+    replace_file_token "$relay_script" "__UPSTREAM_WS_PATH__" "$WS_PATH"
+    replace_file_token "$relay_script" "__RELAY_NAME__" "$relay_name"
+    chmod +x "$relay_script"
+}
+
+do_generate_relay_script() {
+    load_params || { warn "未找到主节点配置，请先安装"; press_enter; return; }
+
+    refresh_argo_domain_if_needed
+    build_share_links >/dev/null
+
+    if [[ -z "${ARGO_DOMAIN:-}" ]]; then
+        warn "Argo 域名未就绪，暂不能生成线路机脚本"
+        press_enter
+        return
+    fi
+
+    local relay_port relay_sni upstream_server relay_name input
+
+    upstream_server="${ARGO_BEST_CF_DOMAIN:-${ARGO_BEST_CF_DOMAIN_IPV4:-${ARGO_DOMAIN}}}"
+    relay_sni="${REALITY_SNI:-www.microsoft.com}"
+    relay_name="${NODE_NAME}-Relay"
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── 线路机部署脚本 ──${NC}"
+    echo -e "  主节点接入地址: ${BOLD}${upstream_server}${NC}"
+    echo -e "  主节点 Argo Host: ${BOLD}${ARGO_DOMAIN}${NC}"
+    read -rp "  线路机监听端口 [443]: " relay_port
+    relay_port=${relay_port:-443}
+    read -rp "  线路机 Reality 伪装域名 [${relay_sni}]: " input
+    [[ -n "$input" ]] && relay_sni="$input"
+
+    if ! validate_port "$relay_port" "线路机监听"; then
+        press_enter
+        return
+    fi
+
+    if ! write_relay_install_script "$RELAY_SCRIPT_PATH" "$relay_port" "$relay_sni" "$upstream_server" "$ARGO_DOMAIN" "$relay_name"; then
+        warn "线路机脚本生成失败"
+        press_enter
+        return
+    fi
+
+    echo ""
+    success "线路机脚本已生成: $RELAY_SCRIPT_PATH"
+    echo -e "  在线路机执行: ${BOLD}sh $RELAY_SCRIPT_PATH${NC}"
+    echo ""
+    echo "--------------------"
+    cat "$RELAY_SCRIPT_PATH"
+    echo "--------------------"
+    press_enter
+}
+
 # ════════════════════════════════════════════════════════════
 #  菜单功能
 # ════════════════════════════════════════════════════════════
 
 # ─── 完整安装 ────────────────────────────────────────────────
-do_install() {
+do_primary_install() {
     echo ""
     info "开始完整安装..."
     separator
@@ -2352,6 +2723,23 @@ do_install() {
     echo ""
     echo -e "${GREEN}${BOLD}✅ 部署完成！复制上方链接导入 v2rayN / v2rayNG 即可使用。${NC}"
     press_enter
+}
+
+do_install() {
+    echo ""
+    echo -e "${CYAN}${BOLD}── 部署目标 ──${NC}"
+    echo -e "  1) 主节点完整部署 ${GREEN}推荐${NC}"
+    echo -e "  2) 生成线路机部署脚本"
+    echo -e "  0) 返回"
+    read -rp "  请选择 [1]: " target
+    target=${target:-1}
+
+    case "$target" in
+        1) do_primary_install ;;
+        2) do_generate_relay_script ;;
+        0) return ;;
+        *) warn "无效选项"; sleep 0.5 ;;
+    esac
 }
 
 # ─── 修改配置 ────────────────────────────────────────────────
@@ -2809,7 +3197,7 @@ show_menu() {
     local installed=false
     [[ -f "$CONFIG_FILE" ]] && installed=true
 
-    echo -e "  ${BOLD} 1)${NC} 安装 / 重新安装"
+    echo -e "  ${BOLD} 1)${NC} 部署目标选择"
     echo -e "  ${BOLD} 2)${NC} 修改配置 ${DIM}(端口/域名/UUID)${NC}"
     echo -e "  ${BOLD} 3)${NC} 查看节点链接"
     separator
@@ -2876,7 +3264,8 @@ main() {
     fi
 
     case "${1:-}" in
-        install)     do_install ;;
+        install)     do_primary_install ;;
+        relay)       do_generate_relay_script ;;
         links|sub)   load_params && { ensure_time_sync || true; refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; } || warn "未安装" ;;
         start)       do_start ;;
         stop)        do_stop ;;
@@ -2889,6 +3278,7 @@ main() {
             echo "命令:"
             echo "  (无参数)   交互式管理菜单"
             echo "  install    直接安装"
+            echo "  relay      生成线路机部署脚本"
             echo "  links      显示分享链接与订阅地址"
             echo "  sub        同 links"
             echo "  start      启动服务"
