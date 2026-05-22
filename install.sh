@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.14"
+SCRIPT_VERSION="2.6.15"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -56,6 +56,8 @@ SUBSCRIPTION_OPENRC_SERVICE="/etc/init.d/sbm-subscription"
 SUBSCRIPTION_PORT=24630
 RELAY_SCRIPT_PATH="${TMPDIR:-/tmp}/sbm-relay-install.sh"
 SCRIPT_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
+MANAGER_COMMAND="/usr/local/bin/sbm"
+MANAGER_ALIAS_COMMAND="/usr/local/bin/sing-box-manager"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
@@ -441,41 +443,73 @@ load_params() {
 }
 
 ensure_command_aliases() {
-    [[ -f /usr/local/bin/sbm ]] || return 0
-    ln -sf /usr/local/bin/sbm /usr/local/bin/sing-box-manager 2>/dev/null || true
+    [[ -f "$MANAGER_COMMAND" ]] || return 0
+    ln -sf "$MANAGER_COMMAND" "$MANAGER_ALIAS_COMMAND" 2>/dev/null || true
+}
+
+manager_script_valid() {
+    local script_path="$1"
+    [[ -f "$script_path" && -s "$script_path" ]] || return 1
+    grep -q '^SCRIPT_VERSION=' "$script_path" 2>/dev/null || return 1
+    grep -q 'main "$@"' "$script_path" 2>/dev/null || return 1
+    return 0
+}
+
+install_manager_from_file() {
+    local source_path="$1"
+
+    manager_script_valid "$source_path" || return 1
+    mkdir -p "$(dirname "$MANAGER_COMMAND")" 2>/dev/null || return 1
+
+    if command -v install >/dev/null 2>&1; then
+        install -m 0755 "$source_path" "$MANAGER_COMMAND" 2>/dev/null || return 1
+    else
+        cp "$source_path" "$MANAGER_COMMAND" 2>/dev/null || return 1
+        chmod +x "$MANAGER_COMMAND" 2>/dev/null || return 1
+    fi
+
+    manager_script_valid "$MANAGER_COMMAND" || return 1
+    chmod +x "$MANAGER_COMMAND" 2>/dev/null || true
+    ensure_command_aliases
+    hash -r 2>/dev/null || true
+    return 0
+}
+
+download_manager_command() {
+    local tmp_file
+    tmp_file=$(mktemp) || return 1
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$SCRIPT_URL" -o "$tmp_file" 2>/dev/null || {
+            rm -f "$tmp_file"
+            return 1
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$tmp_file" "$SCRIPT_URL" 2>/dev/null || {
+            rm -f "$tmp_file"
+            return 1
+        }
+    else
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    install_manager_from_file "$tmp_file"
+    local result=$?
+    rm -f "$tmp_file"
+    return "$result"
 }
 
 install_manager_command() {
-    [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sbm" ]] || {
+    [[ "${BASH_SOURCE[0]:-}" != "$MANAGER_COMMAND" ]] || {
         ensure_command_aliases
         return 0
     }
 
-    mkdir -p /usr/local/bin 2>/dev/null || true
-
     local source_path
     source_path="${BASH_SOURCE[0]:-}"
-    if [[ -n "$source_path" && -r "$source_path" ]]; then
-        if command -v install >/dev/null 2>&1; then
-            install -m 0755 "$source_path" /usr/local/bin/sbm 2>/dev/null && {
-                ensure_command_aliases
-                hash -r 2>/dev/null || true
-                return 0
-            }
-        fi
-        cp "$source_path" /usr/local/bin/sbm 2>/dev/null && chmod +x /usr/local/bin/sbm 2>/dev/null && {
-            ensure_command_aliases
-            hash -r 2>/dev/null || true
-            return 0
-        }
-    fi
-
-    if curl -fsSL "$SCRIPT_URL" -o /usr/local/bin/sbm 2>/dev/null; then
-        chmod +x /usr/local/bin/sbm 2>/dev/null || true
-        ensure_command_aliases
-        hash -r 2>/dev/null || true
-        return 0
-    fi
+    install_manager_from_file "$source_path" 2>/dev/null && return 0
+    download_manager_command && return 0
 
     warn "未能安装 sbm 命令，当前安装流程继续；请稍后重新执行在线安装命令修复"
     return 0
@@ -3149,14 +3183,10 @@ do_upgrade() {
             ;;
         3)
             info "更新管理脚本..."
-            local script_url="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
-            if curl -fsSL "$script_url" -o /usr/local/bin/sbm; then
-                chmod +x /usr/local/bin/sbm
-                ensure_command_aliases
-                hash -r 2>/dev/null || true
+            if download_manager_command; then
                 # 从新下载的脚本中提取版本号
                 local new_ver
-                new_ver=$(grep -m1 '^SCRIPT_VERSION=' /usr/local/bin/sbm | cut -d'"' -f2 2>/dev/null || echo "未知")
+                new_ver=$(grep -m1 '^SCRIPT_VERSION=' "$MANAGER_COMMAND" | cut -d'"' -f2 2>/dev/null || echo "未知")
                 success "脚本已更新: v${SCRIPT_VERSION} → v${new_ver}"
                 echo ""
                 info "当前配置和服务未受影响，不会重写配置或重启服务。"
@@ -3169,7 +3199,7 @@ do_upgrade() {
                 fi
                 echo ""
                 read -rp "按 Enter 重启面板并进入新版本..." _
-                exec bash /usr/local/bin/sbm
+                exec bash "$MANAGER_COMMAND"
             else
                 warn "更新失败，请检查网络或手动更新"
             fi
@@ -3206,8 +3236,8 @@ do_uninstall() {
     esac
 
     rm -f /usr/local/bin/cloudflared
-    rm -f /usr/local/bin/sbm
-    rm -f /usr/local/bin/sing-box-manager
+    rm -f "$MANAGER_COMMAND"
+    rm -f "$MANAGER_ALIAS_COMMAND"
     rm -f "$SUBSCRIPTION_SERVER"
     rm -rf "$CONFIG_DIR"
 

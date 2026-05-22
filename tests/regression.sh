@@ -315,14 +315,32 @@ test_reality_sni_probe_failure_uses_default() {
 
     select_reality_sni >/dev/null
     assert_eq "www.microsoft.com" "$REALITY_SNI" "Reality SNI default after probe failure"
+    unset -f curl get_reality_probe_parallelism
 }
 
-test_manager_command_prefers_running_script() {
-    local script_body
-    script_body=$(<"$SCRIPT")
-    assert_contains "$script_body" 'install_manager_command()' "manager command installer function"
-    assert_contains "$script_body" 'install -m 0755 "$source_path" /usr/local/bin/sbm' "manager command local install"
-    assert_contains "$script_body" 'curl -fsSL "$SCRIPT_URL" -o /usr/local/bin/sbm' "manager command remote fallback"
+test_manager_command_rejects_empty_source() {
+    local tmp empty_script valid_script old_manager old_alias
+
+    tmp=$(mktemp -d)
+    empty_script="${tmp}/empty"
+    valid_script="${tmp}/install.sh"
+    old_manager="$MANAGER_COMMAND"
+    old_alias="$MANAGER_ALIAS_COMMAND"
+    MANAGER_COMMAND="${tmp}/sbm"
+    MANAGER_ALIAS_COMMAND="${tmp}/sing-box-manager"
+
+    : > "$empty_script"
+    cp "$SCRIPT" "$valid_script"
+
+    if install_manager_from_file "$empty_script" 2>/dev/null; then
+        fail "manager command accepted empty source"
+    fi
+    install_manager_from_file "$valid_script" || fail "manager command rejected valid script"
+    manager_script_valid "$MANAGER_COMMAND" || fail "installed manager command is invalid"
+
+    MANAGER_COMMAND="$old_manager"
+    MANAGER_ALIAS_COMMAND="$old_alias"
+    rm -rf "$tmp"
 }
 
 test_service_manager_systemd
@@ -337,6 +355,6 @@ test_relay_script_requires_argo_upstream
 test_alpine_package_fallback
 test_non_alpine_package_verifies_binary
 test_reality_sni_probe_failure_uses_default
-test_manager_command_prefers_running_script
+test_manager_command_rejects_empty_source
 
 echo "OK: regression tests passed"
