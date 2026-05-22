@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.13"
+SCRIPT_VERSION="2.6.14"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -55,6 +55,7 @@ SUBSCRIPTION_SERVICE="/etc/systemd/system/sbm-subscription.service"
 SUBSCRIPTION_OPENRC_SERVICE="/etc/init.d/sbm-subscription"
 SUBSCRIPTION_PORT=24630
 RELAY_SCRIPT_PATH="${TMPDIR:-/tmp}/sbm-relay-install.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
@@ -442,6 +443,42 @@ load_params() {
 ensure_command_aliases() {
     [[ -f /usr/local/bin/sbm ]] || return 0
     ln -sf /usr/local/bin/sbm /usr/local/bin/sing-box-manager 2>/dev/null || true
+}
+
+install_manager_command() {
+    [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sbm" ]] || {
+        ensure_command_aliases
+        return 0
+    }
+
+    mkdir -p /usr/local/bin 2>/dev/null || true
+
+    local source_path
+    source_path="${BASH_SOURCE[0]:-}"
+    if [[ -n "$source_path" && -r "$source_path" ]]; then
+        if command -v install >/dev/null 2>&1; then
+            install -m 0755 "$source_path" /usr/local/bin/sbm 2>/dev/null && {
+                ensure_command_aliases
+                hash -r 2>/dev/null || true
+                return 0
+            }
+        fi
+        cp "$source_path" /usr/local/bin/sbm 2>/dev/null && chmod +x /usr/local/bin/sbm 2>/dev/null && {
+            ensure_command_aliases
+            hash -r 2>/dev/null || true
+            return 0
+        }
+    fi
+
+    if curl -fsSL "$SCRIPT_URL" -o /usr/local/bin/sbm 2>/dev/null; then
+        chmod +x /usr/local/bin/sbm 2>/dev/null || true
+        ensure_command_aliases
+        hash -r 2>/dev/null || true
+        return 0
+    fi
+
+    warn "未能安装 sbm 命令，当前安装流程继续；请稍后重新执行在线安装命令修复"
+    return 0
 }
 
 clear_argo_best_cf_cache() {
@@ -1771,6 +1808,23 @@ get_reality_probe_parallelism() {
     fi
 }
 
+probe_reality_sni_candidate() {
+    local idx="$1" sni="$2" result_file="$3"
+    local time_s ms
+
+    time_s=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 --tlsv1.3 "https://${sni}" 2>/dev/null || true)
+    if [[ "$time_s" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        ms=$(awk -v t="$time_s" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo "9999")
+    else
+        ms=9999
+    fi
+
+    if [[ "$ms" =~ ^[0-9]+$ && "$ms" -gt 0 && "$ms" -lt 9999 ]]; then
+        echo "$idx $ms $sni" >> "$result_file"
+    fi
+    return 0
+}
+
 select_reality_sni() {
     if [[ -n "${REALITY_SNI:-}" ]]; then
         info "当前已设定伪装域名: $REALITY_SNI，跳过测速"
@@ -1781,28 +1835,24 @@ select_reality_sni() {
     info "正在按兼容性优先顺序探测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名，并发数: ${probe_parallelism}"
 
     local tmp_dir
-    tmp_dir=$(mktemp -d)
+    if ! tmp_dir=$(mktemp -d); then
+        REALITY_SNI="${REALITY_SNI_LIST[0]}"
+        warn "创建临时目录失败，使用默认伪装域名: ${REALITY_SNI}"
+        return 0
+    fi
 
     # Reality 目标站优先保证兼容性和稳定性，其次才是连接时间。
     local active_jobs=0
     for idx in "${!REALITY_SNI_LIST[@]}"; do
         local sni="${REALITY_SNI_LIST[$idx]}"
-        (
-            local time_ms
-            time_ms=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 --tlsv1.3 "https://${sni}" 2>/dev/null || echo "9999")
-            local ms
-            ms=$(awk -v t="$time_ms" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo "9999")
-            if [[ "$ms" -gt 0 && "$ms" -lt 9999 ]]; then
-                echo "$idx $ms $sni" >> "${tmp_dir}/results.txt"
-            fi
-        ) &
+        probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" &
         active_jobs=$((active_jobs + 1))
         if (( active_jobs >= probe_parallelism )); then
-            wait
+            wait || true
             active_jobs=0
         fi
     done
-    wait
+    wait || true
 
     local best_sni="" best_time=9999
     if [[ -f "${tmp_dir}/results.txt" ]]; then
@@ -3247,14 +3297,7 @@ main() {
     check_root
     detect_os
 
-    # 安装脚本副本到系统路径（方便后续直接调用 sbm）
-    if [[ "${BASH_SOURCE[0]:-}" != "/usr/local/bin/sbm" ]]; then
-        curl -fsSL "https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh" -o /usr/local/bin/sbm 2>/dev/null || true
-        chmod +x /usr/local/bin/sbm 2>/dev/null || true
-        ensure_command_aliases
-        # 为在线初次安装的用户顺便清一下 hash 缓存
-        hash -r 2>/dev/null || true
-    fi
+    install_manager_command
 
     # 命令行快捷参数
     # 若用户使用了旧命令名通过兼容链接启动，提示其换用新命令

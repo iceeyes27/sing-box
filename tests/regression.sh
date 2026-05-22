@@ -303,6 +303,28 @@ EOF
     rm -rf "$tmp"
 }
 
+test_reality_sni_probe_failure_uses_default() {
+    REALITY_SNI=""
+    REALITY_SNI_LIST=("www.microsoft.com" "www.apple.com")
+    get_reality_probe_parallelism() {
+        echo 1
+    }
+    curl() {
+        return 7
+    }
+
+    select_reality_sni >/dev/null
+    assert_eq "www.microsoft.com" "$REALITY_SNI" "Reality SNI default after probe failure"
+}
+
+test_manager_command_prefers_running_script() {
+    local script_body
+    script_body=$(<"$SCRIPT")
+    assert_contains "$script_body" 'install_manager_command()' "manager command installer function"
+    assert_contains "$script_body" 'install -m 0755 "$source_path" /usr/local/bin/sbm' "manager command local install"
+    assert_contains "$script_body" 'curl -fsSL "$SCRIPT_URL" -o /usr/local/bin/sbm' "manager command remote fallback"
+}
+
 test_service_manager_systemd
 test_service_manager_openrc
 test_package_manager_priority
@@ -314,5 +336,7 @@ test_relay_script_generation_uses_argo_upstream
 test_relay_script_requires_argo_upstream
 test_alpine_package_fallback
 test_non_alpine_package_verifies_binary
+test_reality_sni_probe_failure_uses_default
+test_manager_command_prefers_running_script
 
 echo "OK: regression tests passed"
