@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.15"
+SCRIPT_VERSION="2.6.16"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -58,6 +58,8 @@ RELAY_SCRIPT_PATH="${TMPDIR:-/tmp}/sbm-relay-install.sh"
 SCRIPT_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
 MANAGER_COMMAND="/usr/local/bin/sbm"
 MANAGER_ALIAS_COMMAND="/usr/local/bin/sing-box-manager"
+MANAGER_SYSTEM_COMMAND="/usr/bin/sbm"
+MANAGER_SYSTEM_ALIAS_COMMAND="/usr/bin/sing-box-manager"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
@@ -118,7 +120,24 @@ separator() {
 
 press_enter() {
     echo ""
-    read -rp "按 Enter 返回主菜单..." _
+    prompt_read _ "按 Enter 返回主菜单..." || true
+}
+
+prompt_read() {
+    local __var_name="$1"
+    local __prompt="$2"
+
+    if [[ -t 0 ]]; then
+        read -r -p "$__prompt" "$__var_name"
+        return $?
+    fi
+
+    if [[ -r /dev/tty ]]; then
+        read -r -p "$__prompt" "$__var_name" </dev/tty
+        return $?
+    fi
+
+    return 1
 }
 
 # ─── 权限 / 系统检测 ─────────────────────────────────────────
@@ -444,7 +463,62 @@ load_params() {
 
 ensure_command_aliases() {
     [[ -f "$MANAGER_COMMAND" ]] || return 0
-    ln -sf "$MANAGER_COMMAND" "$MANAGER_ALIAS_COMMAND" 2>/dev/null || true
+    ensure_command_link "$MANAGER_COMMAND" "$MANAGER_ALIAS_COMMAND"
+    ensure_command_link "$MANAGER_COMMAND" "$MANAGER_SYSTEM_COMMAND"
+    ensure_command_link "$MANAGER_COMMAND" "$MANAGER_SYSTEM_ALIAS_COMMAND"
+}
+
+resolve_existing_path() {
+    local path="$1"
+    local dir base
+
+    if command -v readlink >/dev/null 2>&1; then
+        readlink -f "$path" 2>/dev/null && return 0
+    fi
+
+    dir="$(dirname "$path")"
+    base="$(basename "$path")"
+    (cd "$dir" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$base")
+}
+
+is_manager_source() {
+    local source_path="$1"
+    local resolved_source resolved_manager
+
+    [[ "$source_path" == "$MANAGER_COMMAND" ]] && return 0
+    [[ -e "$source_path" && -e "$MANAGER_COMMAND" ]] || return 1
+
+    resolved_source="$(resolve_existing_path "$source_path" 2>/dev/null || true)"
+    resolved_manager="$(resolve_existing_path "$MANAGER_COMMAND" 2>/dev/null || true)"
+    [[ -n "$resolved_source" && "$resolved_source" == "$resolved_manager" ]]
+}
+
+ensure_command_link() {
+    local target="$1"
+    local link_path="$2"
+    local link_dir
+
+    link_dir="$(dirname "$link_path")"
+    [[ -d "$link_dir" ]] || return 0
+
+    if [[ -e "$link_path" || -L "$link_path" ]]; then
+        [[ -L "$link_path" ]] || return 0
+        [[ "$(readlink "$link_path" 2>/dev/null)" == "$target" ]] || return 0
+    fi
+
+    ln -sf "$target" "$link_path" 2>/dev/null || true
+}
+
+remove_manager_link() {
+    local link_path="$1"
+    local target="$2"
+
+    if [[ -L "$link_path" ]]; then
+        [[ "$(readlink "$link_path" 2>/dev/null)" == "$target" ]] && rm -f "$link_path"
+        return 0
+    fi
+
+    [[ "$link_path" == "$target" ]] && rm -f "$link_path"
 }
 
 manager_script_valid() {
@@ -501,7 +575,7 @@ download_manager_command() {
 }
 
 install_manager_command() {
-    [[ "${BASH_SOURCE[0]:-}" != "$MANAGER_COMMAND" ]] || {
+    is_manager_source "${BASH_SOURCE[0]:-}" && {
         ensure_command_aliases
         return 0
     }
@@ -2665,9 +2739,9 @@ do_generate_relay_script() {
     echo -e "${CYAN}${BOLD}── 线路机部署脚本 ──${NC}"
     echo -e "  主节点接入地址: ${BOLD}${upstream_server}${NC}"
     echo -e "  主节点 Argo Host: ${BOLD}${ARGO_DOMAIN}${NC}"
-    read -rp "  线路机监听端口 [443]: " relay_port
+    prompt_read relay_port "  线路机监听端口 [443]: "
     relay_port=${relay_port:-443}
-    read -rp "  线路机 Reality 伪装域名 [${relay_sni}]: " input
+    prompt_read input "  线路机 Reality 伪装域名 [${relay_sni}]: "
     [[ -n "$input" ]] && relay_sni="$input"
 
     if ! validate_port "$relay_port" "线路机监听"; then
@@ -2712,7 +2786,7 @@ do_primary_install() {
     echo -e "${CYAN}${BOLD}── 端口配置 ──${NC}"
     echo -e "  1) 极简单端口模式 (Reality & Hysteria2 共用 443/TCP+UDP) ${GREEN}推荐${NC}"
     echo -e "  2) 自定义分端口模式 (手动设置各个协议端口)"
-    read -rp "  请选择 [1]: " port_mode
+    prompt_read port_mode "  请选择 [1]: "
     port_mode=${port_mode:-1}
 
     if [[ "$port_mode" == "1" ]]; then
@@ -2720,20 +2794,20 @@ do_primary_install() {
         HY2_PORT=443
         info "已选择单端口模式: 443"
     else
-        read -rp "  Reality 端口 [${REALITY_PORT}]: " input
+        prompt_read input "  Reality 端口 [${REALITY_PORT}]: "
         [[ -n "$input" ]] && REALITY_PORT="$input"
 
-        read -rp "  Hysteria2 端口 [${HY2_PORT}]: " input
+        prompt_read input "  Hysteria2 端口 [${HY2_PORT}]: "
         [[ -n "$input" ]] && HY2_PORT="$input"
     fi
 
-    read -rp "  订阅服务端口 [${SUBSCRIPTION_PORT}]: " input
+    prompt_read input "  订阅服务端口 [${SUBSCRIPTION_PORT}]: "
     [[ -n "$input" ]] && SUBSCRIPTION_PORT="$input"
 
-    read -rp "  伪装域名 (留空自动测速优选): " input
+    prompt_read input "  伪装域名 (留空自动测速优选): "
     [[ -n "$input" ]] && REALITY_SNI="$input"
 
-    read -rp "  节点名称 [${NODE_NAME}]: " input
+    prompt_read input "  节点名称 [${NODE_NAME}]: "
     [[ -n "$input" ]] && NODE_NAME="$input"
     echo ""
 
@@ -2752,15 +2826,15 @@ do_primary_install() {
     echo -e "${CYAN}${BOLD}── Argo 隧道配置 ──${NC}"
     echo -e "  1) 临时域名模式 (无需自定义域名，域名随机且会变)"
     echo -e "  2) 固定域名模式 (需提供 Cloudflare Tunnel Token) ${GREEN}推荐${NC}"
-    read -rp "  请选择 [1]: " argo_choice
+    prompt_read argo_choice "  请选择 [1]: "
     argo_choice=${argo_choice:-1}
     if [[ "$argo_choice" == "2" ]]; then
         echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
         echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${WS_PORT}${NC}"
         echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
         echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
-        read -rp "  请输入 Tunnel Token: " ARGO_TOKEN
-        read -rp "  请输入该隧道绑定的域名 (如 v2.example.com): " ARGO_DOMAIN
+        prompt_read ARGO_TOKEN "  请输入 Tunnel Token: "
+        prompt_read ARGO_DOMAIN "  请输入该隧道绑定的域名 (如 v2.example.com): "
         # 清除用户可能误输入的 http://, https:// 以及结尾的 /
         ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
         ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
@@ -2815,7 +2889,7 @@ do_install() {
     echo -e "  1) 主节点完整部署 ${GREEN}推荐${NC}"
     echo -e "  2) 生成线路机部署脚本"
     echo -e "  0) 返回"
-    read -rp "  请选择 [1]: " target
+    prompt_read target "  请选择 [1]: "
     target=${target:-1}
 
     case "$target" in
@@ -2866,14 +2940,14 @@ do_modify_config() {
         echo -e "  11) 修改订阅服务端口       ${DIM}(当前: ${SUBSCRIPTION_PORT})${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        read -rp "  请选择 [0-11]: " choice
+        prompt_read choice "  请选择 [0-11]: "
 
         local changed=false
         local restart_singbox=false
         local restart_argo=false
         case "$choice" in
             1)
-                read -rp "  新端口: " input
+                prompt_read input "  新端口: "
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     REALITY_PORT="$input"
                     changed=true
@@ -2881,7 +2955,7 @@ do_modify_config() {
                 fi
                 ;;
             2)
-                read -rp "  新伪装域名: " input
+                prompt_read input "  新伪装域名: "
                 if [[ -n "$input" ]]; then
                     REALITY_SNI="$input"
                     changed=true
@@ -2906,7 +2980,7 @@ do_modify_config() {
                 restart_singbox=true
                 ;;
             5)
-                read -rp "  新节点名称: " input
+                prompt_read input "  新节点名称: "
                 if [[ -n "$input" ]]; then
                     NODE_NAME="$input"
                     changed=true
@@ -2919,7 +2993,7 @@ do_modify_config() {
                 restart_singbox=true
                 ;;
             7)
-                read -rp "  新 Hysteria2 端口: " input
+                prompt_read input "  新 Hysteria2 端口: "
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     HY2_PORT="$input"
                     changed=true
@@ -2943,16 +3017,16 @@ do_modify_config() {
                 echo -e "\n  当前模式: $( [[ -n "$ARGO_TOKEN" ]] && echo "固定域名" || echo "临时域名" )"
                 echo -e "  1) 切换为/修改临时域名模式"
                 echo -e "  2) 切换为/修改固定域名 Token 模式"
-                read -rp "  请选择 [2]: " sub_choice
+                prompt_read sub_choice "  请选择 [2]: "
                 sub_choice=${sub_choice:-2}
                 if [[ "$sub_choice" == "2" ]]; then
                     local old_argo_domain="${ARGO_DOMAIN:-}"
                     local old_argo_token="${ARGO_TOKEN:-}"
                     echo -e "  ${YELLOW}提示: 请确保在 Cloudflare 仪表盘中将该域名转发至 http://127.0.0.1:${WS_PORT}${NC}"
                     echo -e "  ${RED}注意: 请填写完整的 Token (以 eyJ 开头)，千万不要误填为 Tunnel ID。${NC}"
-                    read -rp "  新 Tunnel Token [${ARGO_TOKEN:0:10}...]: " input
+                    prompt_read input "  新 Tunnel Token [${ARGO_TOKEN:0:10}...]: "
                     [[ -n "$input" ]] && ARGO_TOKEN="$input"
-                    read -rp "  新自定义域名 [${ARGO_DOMAIN}]: " input
+                    prompt_read input "  新自定义域名 [${ARGO_DOMAIN}]: "
                     if [[ -n "$input" ]]; then
                         ARGO_DOMAIN="$input"
                         ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
@@ -2971,7 +3045,7 @@ do_modify_config() {
                 restart_argo=true
                 ;;
             11)
-                read -rp "  新订阅服务端口: " input
+                prompt_read input "  新订阅服务端口: "
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     SUBSCRIPTION_PORT="$input"
                     changed=true
@@ -3124,7 +3198,7 @@ do_logs() {
     echo -e "  2) argo-tunnel 日志"
     echo -e "  3) 订阅服务日志"
     echo -e "  0) 返回"
-    read -rp "  请选择: " choice
+    prompt_read choice "  请选择: "
     case "$choice" in
         1) service_logs sing-box 50 || warn "未找到 sing-box 日志" ;;
         2) service_logs argo-tunnel 50 || warn "未找到 argo-tunnel 日志" ;;
@@ -3139,7 +3213,7 @@ do_boot_manage() {
     echo -e "  1) 开启 sing-box / argo-tunnel / 订阅服务 开机自启"
     echo -e "  2) 关闭 sing-box / argo-tunnel / 订阅服务 开机自启"
     echo -e "  0) 返回"
-    read -rp "  请选择: " choice
+    prompt_read choice "  请选择: "
     case "$choice" in
         1)
             service_enable sing-box 2>/dev/null || true
@@ -3164,7 +3238,7 @@ do_upgrade() {
     echo -e "  2) 更新 cloudflared"
     echo -e "  3) 更新此管理脚本"
     echo -e "  0) 返回"
-    read -rp "  请选择: " choice
+    prompt_read choice "  请选择: "
     case "$choice" in
         1)
             info "更新 sing-box..."
@@ -3198,7 +3272,7 @@ do_upgrade() {
                     ensure_subscription_service || warn "订阅服务未成功启动"
                 fi
                 echo ""
-                read -rp "按 Enter 重启面板并进入新版本..." _
+                prompt_read _ "按 Enter 重启面板并进入新版本..." || true
                 exec bash "$MANAGER_COMMAND"
             else
                 warn "更新失败，请检查网络或手动更新"
@@ -3212,7 +3286,7 @@ do_upgrade() {
 do_uninstall() {
     echo ""
     warn "即将卸载 sing-box 和 Argo 隧道"
-    read -rp "  确认卸载？(y/N): " confirm
+    prompt_read confirm "  确认卸载？(y/N): "
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消"; press_enter; return; }
 
     service_stop sing-box 2>/dev/null || true
@@ -3236,8 +3310,10 @@ do_uninstall() {
     esac
 
     rm -f /usr/local/bin/cloudflared
-    rm -f "$MANAGER_COMMAND"
-    rm -f "$MANAGER_ALIAS_COMMAND"
+    remove_manager_link "$MANAGER_SYSTEM_COMMAND" "$MANAGER_COMMAND"
+    remove_manager_link "$MANAGER_SYSTEM_ALIAS_COMMAND" "$MANAGER_COMMAND"
+    remove_manager_link "$MANAGER_ALIAS_COMMAND" "$MANAGER_COMMAND"
+    remove_manager_link "$MANAGER_COMMAND" "$MANAGER_COMMAND"
     rm -f "$SUBSCRIPTION_SERVER"
     rm -rf "$CONFIG_DIR"
 
@@ -3300,7 +3376,11 @@ main_menu() {
     while true; do
         show_banner
         show_menu
-        read -rp "  请选择 [0-11]: " choice
+        if ! prompt_read choice "  请选择 [0-11]: "; then
+            echo ""
+            warn "未检测到交互式终端，请在服务器终端直接执行: sbm"
+            exit 1
+        fi
         case "$choice" in
             1)  do_install ;;
             2)  do_modify_config ;;

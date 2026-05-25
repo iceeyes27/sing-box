@@ -319,15 +319,20 @@ test_reality_sni_probe_failure_uses_default() {
 }
 
 test_manager_command_rejects_empty_source() {
-    local tmp empty_script valid_script old_manager old_alias
+    local tmp empty_script valid_script old_manager old_alias old_system old_system_alias
 
     tmp=$(mktemp -d)
     empty_script="${tmp}/empty"
     valid_script="${tmp}/install.sh"
     old_manager="$MANAGER_COMMAND"
     old_alias="$MANAGER_ALIAS_COMMAND"
-    MANAGER_COMMAND="${tmp}/sbm"
-    MANAGER_ALIAS_COMMAND="${tmp}/sing-box-manager"
+    old_system="$MANAGER_SYSTEM_COMMAND"
+    old_system_alias="$MANAGER_SYSTEM_ALIAS_COMMAND"
+    MANAGER_COMMAND="${tmp}/usr-local/bin/sbm"
+    MANAGER_ALIAS_COMMAND="${tmp}/usr-local/bin/sing-box-manager"
+    MANAGER_SYSTEM_COMMAND="${tmp}/usr/bin/sbm"
+    MANAGER_SYSTEM_ALIAS_COMMAND="${tmp}/usr/bin/sing-box-manager"
+    mkdir -p "${tmp}/usr/bin"
 
     : > "$empty_script"
     cp "$SCRIPT" "$valid_script"
@@ -337,9 +342,19 @@ test_manager_command_rejects_empty_source() {
     fi
     install_manager_from_file "$valid_script" || fail "manager command rejected valid script"
     manager_script_valid "$MANAGER_COMMAND" || fail "installed manager command is invalid"
+    [[ -L "$MANAGER_ALIAS_COMMAND" ]] || fail "manager alias link was not created"
+    [[ -L "$MANAGER_SYSTEM_COMMAND" ]] || fail "system manager link was not created"
+    [[ -L "$MANAGER_SYSTEM_ALIAS_COMMAND" ]] || fail "system manager alias link was not created"
+    assert_eq "$MANAGER_COMMAND" "$(readlink "$MANAGER_SYSTEM_COMMAND")" "system manager link target"
+    is_manager_source "$MANAGER_SYSTEM_COMMAND" || fail "system manager link was not recognized as manager source"
+    if is_manager_source "$valid_script"; then
+        fail "separate source script was mistaken for installed manager"
+    fi
 
     MANAGER_COMMAND="$old_manager"
     MANAGER_ALIAS_COMMAND="$old_alias"
+    MANAGER_SYSTEM_COMMAND="$old_system"
+    MANAGER_SYSTEM_ALIAS_COMMAND="$old_system_alias"
     rm -rf "$tmp"
 }
 
