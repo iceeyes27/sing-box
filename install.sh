@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.16"
+SCRIPT_VERSION="2.6.17"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -1899,6 +1899,42 @@ refresh_argo_domain_if_needed() {
     fi
 }
 
+refresh_argo_runtime() {
+    if [[ -n "${ARGO_TOKEN:-}" && -z "${ARGO_DOMAIN:-}" ]]; then
+        warn "固定域名模式缺少 Argo 域名，无法生成 Argo 订阅链接"
+        return 1
+    fi
+
+    if [[ -z "${ARGO_TOKEN:-}" ]]; then
+        ARGO_DOMAIN=""
+        clear_argo_best_cf_cache
+    fi
+
+    write_argo_service
+    if ! service_restart argo-tunnel; then
+        warn "argo-tunnel 重启失败，无法更新 Argo 订阅链接"
+        return 1
+    fi
+
+    if [[ -z "${ARGO_TOKEN:-}" ]]; then
+        sleep 5
+        if ! fetch_argo_domain; then
+            warn "未获取到新的 Argo 临时域名，订阅链接未更新"
+            return 1
+        fi
+    fi
+
+    save_params
+    return 0
+}
+
+update_argo_subscription_links() {
+    refresh_argo_runtime || return 1
+    generate_and_show_links
+    ensure_subscription_service || warn "订阅服务启动失败，请检查 python3 或服务日志"
+    success "Argo 订阅链接已更新"
+}
+
 # ─── Reality 优选 SNI ────────────────────────────────────────
 get_reality_probe_parallelism() {
     local cpu_count profile
@@ -2937,10 +2973,11 @@ do_modify_config() {
         echo -e "  8) 重新生成 Hysteria2 密码"
         echo -e "  9) 切换为单端口模式 (443)  ${GREEN}推荐${NC}"
         echo -e "  10) 修改 Argo 隧道 (Token/域名)"
-        echo -e "  11) 修改订阅服务端口       ${DIM}(当前: ${SUBSCRIPTION_PORT})${NC}"
+        echo -e "  11) 更新 Argo 订阅链接"
+        echo -e "  12) 修改订阅服务端口       ${DIM}(当前: ${SUBSCRIPTION_PORT})${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        prompt_read choice "  请选择 [0-11]: "
+        prompt_read choice "  请选择 [0-12]: "
 
         local changed=false
         local restart_singbox=false
@@ -3045,6 +3082,13 @@ do_modify_config() {
                 restart_argo=true
                 ;;
             11)
+                if ! update_argo_subscription_links; then
+                    warn "Argo 订阅链接更新失败"
+                fi
+                press_enter
+                continue
+                ;;
+            12)
                 prompt_read input "  新订阅服务端口: "
                 if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
                     SUBSCRIPTION_PORT="$input"
@@ -3112,8 +3156,19 @@ do_modify_config() {
             fi
 
             if [[ "$restart_argo" == "true" ]]; then
-                write_argo_service
-                service_restart argo-tunnel 2>/dev/null || true
+                if ! refresh_argo_runtime; then
+                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
+                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
+                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
+                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                    save_params
+                    write_argo_service
+                    service_restart argo-tunnel 2>/dev/null || true
+                    warn "Argo 配置更新失败，已恢复原配置"
+                    press_enter
+                    continue
+                fi
             fi
             generate_and_show_links
             ensure_subscription_service || warn "订阅服务启动失败，请检查 python3 或服务日志"

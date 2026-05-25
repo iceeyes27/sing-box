@@ -358,6 +358,53 @@ test_manager_command_rejects_empty_source() {
     rm -rf "$tmp"
 }
 
+test_refresh_argo_runtime_renews_temporary_domain() {
+    local tmp
+    tmp=$(mktemp -d)
+
+    PARAMS_FILE="${tmp}/params"
+    UUID="uuid-1"
+    SHORT_ID="abcd1234"
+    PRIVATE_KEY="private"
+    PUBLIC_KEY="public"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    WS_PORT="18080"
+    WS_PATH="/abcd1234"
+    NODE_NAME="node"
+    SUB_TOKEN="sub-token"
+    SUBSCRIPTION_PORT="24630"
+    ARGO_TOKEN=""
+    ARGO_DOMAIN="old.trycloudflare.com"
+    ARGO_BEST_CF_DOMAIN="cf-old.example.com"
+    ARGO_BEST_CF_DOMAIN_IPV4="cf4-old.example.com"
+    ARGO_BEST_CF_DOMAIN_IPV6="cf6-old.example.com"
+    HY2_PORT="443"
+    HY2_PASSWORD="hy2"
+    HY2_SNI="bing.com"
+
+    write_argo_service() {
+        :
+    }
+    service_restart() {
+        [[ "$1" == "argo-tunnel" ]]
+    }
+    service_logs() {
+        echo "https://new.trycloudflare.com"
+    }
+    sleep() {
+        :
+    }
+
+    refresh_argo_runtime >/dev/null
+    assert_eq "new.trycloudflare.com" "$ARGO_DOMAIN" "temporary Argo domain renew"
+    assert_eq "" "$ARGO_BEST_CF_DOMAIN" "temporary Argo cache clear"
+    assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN="new.trycloudflare.com"' "temporary Argo params save"
+
+    unset -f write_argo_service service_restart service_logs sleep
+    rm -rf "$tmp"
+}
+
 test_service_manager_systemd
 test_service_manager_openrc
 test_package_manager_priority
@@ -371,5 +418,6 @@ test_alpine_package_fallback
 test_non_alpine_package_verifies_binary
 test_reality_sni_probe_failure_uses_default
 test_manager_command_rejects_empty_source
+test_refresh_argo_runtime_renews_temporary_domain
 
 echo "OK: regression tests passed"
