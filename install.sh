@@ -1500,13 +1500,13 @@ show_external_access_requirements() {
         ipv6-only)
             echo -e "  检测到 IPv6-only VPS，当前仅生成 Argo 节点链接。"
             echo -e "  Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。"
-            echo -e "  Subscription: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(订阅内容仅包含 Argo 节点)${NC}"
+            echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
             echo ""
             return
             ;;
         dual-stack)
             echo -e "  检测到 IPv4 + IPv6 双栈 VPS，直连节点仅使用 IPv4，Argo 会分别输出 IPv4 / IPv6 接入链接。"
-            echo -e "  如需使用 IPv6 订阅地址，请同步放行订阅服务端口的 IPv6 入站。"
+            echo -e "  订阅地址通过 Argo HTTPS 域名访问，本机订阅端口不需要外部放行。"
             ;;
         direct)
             echo -e "  本机检测到公网 IP 直接挂载在网卡上。若仍有安全组/云防火墙，请同步放行以下端口。"
@@ -1527,8 +1527,8 @@ show_external_access_requirements() {
     else
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
     fi
-    echo -e "  Subscription: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
-    echo -e "  ${DIM}Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。${NC}"
+    echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
+    echo -e "  ${DIM}Argo 和订阅网关均仅供本机回环/隧道使用，一般不需要在外部面板放行。${NC}"
     if [[ "$access_mode" != "direct" && "$access_mode" != "ipv6-only" && "$access_mode" != "dual-stack" ]]; then
         echo -e "  ${DIM}注意: 当前脚本默认外部端口与本机监听端口相同；如果面板做了不同端口号的 NAT 映射，生成的节点链接和订阅地址需要按外部端口另行适配。${NC}"
     fi
@@ -1650,15 +1650,17 @@ SINGBOX_EOF
 
 # ─── Argo 服务 ───────────────────────────────────────────────
 write_argo_service() {
-    local cloudflared_bin exec_cmd
+    local cloudflared_bin exec_cmd argo_origin_url
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
+    argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
 
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         info "使用 Token 模式启动 Argo 隧道 (固定域名)"
+        info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
         exec_cmd="${cloudflared_bin} tunnel --protocol http2 --no-autoupdate run --token ${ARGO_TOKEN}"
     else
         info "使用临时隧道模式 (trycloudflare.com)"
-        exec_cmd="${cloudflared_bin} tunnel --url http://127.0.0.1:${WS_PORT} --no-autoupdate --protocol http2"
+        exec_cmd="${cloudflared_bin} tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
@@ -1709,13 +1711,14 @@ write_subscription_server() {
     cat > "$SUBSCRIPTION_SERVER" << 'PYEOF'
 #!/usr/bin/env python3
 import argparse
+import select
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-def build_handler(token: str, data_file: str):
+def build_handler(token: str, data_file: str, upstream_host: str, upstream_port: int):
     subscription_path = f"/sub/{token}"
     data_path = Path(data_file)
 
@@ -1735,10 +1738,7 @@ def build_handler(token: str, data_file: str):
                     self.wfile.write(b"Forbidden\n")
                     return
             else:
-                self.send_response(404)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b"Not Found\n")
+                self.proxy_to_upstream()
                 return
 
             if not data_path.exists():
@@ -1756,6 +1756,45 @@ def build_handler(token: str, data_file: str):
             self.end_headers()
             self.wfile.write(payload)
 
+        def proxy_to_upstream(self):
+            self.close_connection = True
+            try:
+                upstream = socket.create_connection((upstream_host, upstream_port), timeout=10)
+            except OSError:
+                self.send_response(502)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Upstream is not ready\n")
+                return
+
+            with upstream:
+                upstream.settimeout(None)
+                is_upgrade = self.headers.get("Upgrade", "").lower() == "websocket"
+                request_lines = [f"{self.command} {self.path} HTTP/1.1\r\n"]
+                for key, value in self.headers.items():
+                    lower_key = key.lower()
+                    if lower_key in {"host", "connection", "proxy-connection", "keep-alive"}:
+                        continue
+                    request_lines.append(f"{key}: {value}\r\n")
+                request_lines.append(f"Host: {upstream_host}:{upstream_port}\r\n")
+                request_lines.append("Connection: Upgrade\r\n" if is_upgrade else "Connection: close\r\n")
+                request_lines.append("\r\n")
+                upstream.sendall("".join(request_lines).encode("iso-8859-1"))
+                self.relay(upstream)
+
+        def relay(self, upstream):
+            sockets = [self.connection, upstream]
+            while True:
+                readable, _, _ = select.select(sockets, [], [], 60)
+                if not readable:
+                    continue
+                for source in readable:
+                    chunk = source.recv(65536)
+                    if not chunk:
+                        return
+                    target = upstream if source is self.connection else self.connection
+                    target.sendall(chunk)
+
         def log_message(self, format, *args):
             return
 
@@ -1768,6 +1807,8 @@ def main():
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--token", required=True)
     parser.add_argument("--file", required=True)
+    parser.add_argument("--upstream-host", default="127.0.0.1")
+    parser.add_argument("--upstream-port", type=int, required=True)
     args = parser.parse_args()
 
     class Server(ThreadingHTTPServer):
@@ -1781,7 +1822,7 @@ def main():
                     pass
             return super().server_bind()
 
-    server = Server((args.listen, args.port), build_handler(args.token, args.file))
+    server = Server((args.listen, args.port), build_handler(args.token, args.file, args.upstream_host, args.upstream_port))
     server.serve_forever()
 
 
@@ -1792,11 +1833,7 @@ PYEOF
 }
 
 subscription_listen_host() {
-    if refresh_public_ip_stack 2>/dev/null && [[ "${IP_STACK_MODE:-}" == "ipv6-only" || "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
-        echo "::"
-    else
-        echo "0.0.0.0"
-    fi
+    echo "127.0.0.1"
 }
 
 write_subscription_service() {
@@ -1809,7 +1846,7 @@ write_subscription_service() {
 name="sbm-subscription"
 description="SBM Subscription Server"
 command="/usr/bin/python3"
-command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE}"
+command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}"
 command_background=true
 pidfile="/run/sbm-subscription.pid"
 output_log="/var/log/sbm-subscription.log"
@@ -1830,7 +1867,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE}
+ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -1843,8 +1880,6 @@ EOF
 }
 
 ensure_subscription_service() {
-    local backend
-
     validate_port "${SUBSCRIPTION_PORT}" "订阅服务" || return 1
     if ! command -v python3 &>/dev/null; then
         warn "未检测到 python3，无法启动订阅服务"
@@ -1853,9 +1888,6 @@ ensure_subscription_service() {
 
     write_subscription_server
     write_subscription_service
-
-    backend=$(detect_firewall_backend)
-    open_firewall "${SUBSCRIPTION_PORT}" "$backend" tcp || return 1
 
     service_enable_now sbm-subscription
 }
@@ -2283,27 +2315,30 @@ write_subscription_assets() {
     chmod 600 "$SUBSCRIPTION_FILE"
 }
 
+subscription_https_url() {
+    [[ -n "${ARGO_DOMAIN:-}" && -n "${SUB_TOKEN:-}" ]] || return 1
+    echo "https://${ARGO_DOMAIN}/sub/${SUB_TOKEN}"
+}
+
+subscription_local_url() {
+    [[ -n "${SUB_TOKEN:-}" ]] || return 1
+    echo "http://127.0.0.1:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
+}
+
 show_subscription_url() {
+    local public_subscription_url local_subscription_url
+
     [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return
 
     echo -e "${CYAN}${BOLD}── 订阅地址 ──${NC}"
-    case "${IP_STACK_MODE:-}" in
-        dual-stack)
-            local public_host_v4 public_host_v6
-            public_host_v4=$(format_url_host "$PUBLIC_IPV4")
-            public_host_v6=$(format_url_host "$PUBLIC_IPV6")
-            echo -e "  IPv4: ${BOLD}http://${public_host_v4}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
-            echo -e "  IPv6: ${BOLD}http://${public_host_v6}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
-            echo -e "  ${DIM}兼容写法: http://${public_host_v4}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
-            echo -e "  ${DIM}兼容写法: http://${public_host_v6}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
-            ;;
-        *)
-            local public_host
-            public_host=$(format_url_host "$PUBLIC_IP")
-            echo -e "  ${BOLD}http://${public_host}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}${NC}"
-            echo -e "  ${DIM}兼容写法: http://${public_host}:${SUBSCRIPTION_PORT}/sub?token=${SUB_TOKEN}${NC}"
-            ;;
-    esac
+    if public_subscription_url=$(subscription_https_url); then
+        echo -e "  ${BOLD}${public_subscription_url}${NC}"
+    else
+        echo -e "  ${YELLOW}Argo 域名未就绪，稍后执行 sbm links 重新生成 HTTPS 订阅地址。${NC}"
+    fi
+    if local_subscription_url=$(subscription_local_url); then
+        echo -e "  ${DIM}本机调试: ${local_subscription_url}${NC}"
+    fi
     echo ""
 }
 
@@ -2410,20 +2445,12 @@ generate_and_show_links() {
         if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]]; then
             echo ""
             echo "# Subscription"
-            case "${IP_STACK_MODE:-}" in
-                dual-stack)
-                    local public_host_v4 public_host_v6
-                    public_host_v4=$(format_url_host "$PUBLIC_IPV4")
-                    public_host_v6=$(format_url_host "$PUBLIC_IPV6")
-                    echo "http://${public_host_v4}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
-                    echo "http://${public_host_v6}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
-                    ;;
-                *)
-                    local public_host
-                    public_host=$(format_url_host "$PUBLIC_IP")
-                    echo "http://${public_host}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}"
-                    ;;
-            esac
+            local subscription_url
+            if subscription_url=$(subscription_https_url); then
+                echo "$subscription_url"
+            else
+                echo "# Argo domain is not ready. Run: sbm links"
+            fi
         fi
     } > "$LINK_FILE"
     chmod 600 "$LINK_FILE"
@@ -2866,7 +2893,7 @@ do_primary_install() {
     argo_choice=${argo_choice:-1}
     if [[ "$argo_choice" == "2" ]]; then
         echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
-        echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${WS_PORT}${NC}"
+        echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${SUBSCRIPTION_PORT}${NC}"
         echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
         echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
         prompt_read ARGO_TOKEN "  请输入 Tunnel Token: "
@@ -2895,6 +2922,8 @@ do_primary_install() {
         error "sing-box 启动失败，请查看服务日志"
     fi
 
+    ensure_subscription_service || warn "订阅服务启动失败，可稍后执行 sbm restart 重试"
+
     # 启动 Argo
     info "启动 Argo 隧道..."
     service_enable_now argo-tunnel
@@ -2912,7 +2941,6 @@ do_primary_install() {
 
     # 显示链接
     generate_and_show_links
-    ensure_subscription_service || warn "订阅服务启动失败，可稍后执行 sbm restart 重试"
 
     echo ""
     echo -e "${GREEN}${BOLD}✅ 部署完成！复制上方链接导入 v2rayN / v2rayNG 即可使用。${NC}"
@@ -3059,7 +3087,7 @@ do_modify_config() {
                 if [[ "$sub_choice" == "2" ]]; then
                     local old_argo_domain="${ARGO_DOMAIN:-}"
                     local old_argo_token="${ARGO_TOKEN:-}"
-                    echo -e "  ${YELLOW}提示: 请确保在 Cloudflare 仪表盘中将该域名转发至 http://127.0.0.1:${WS_PORT}${NC}"
+                    echo -e "  ${YELLOW}提示: 请确保在 Cloudflare 仪表盘中将该域名转发至 http://127.0.0.1:${SUBSCRIPTION_PORT}${NC}"
                     echo -e "  ${RED}注意: 请填写完整的 Token (以 eyJ 开头)，千万不要误填为 Tunnel ID。${NC}"
                     prompt_read input "  新 Tunnel Token [${ARGO_TOKEN:0:10}...]: "
                     [[ -n "$input" ]] && ARGO_TOKEN="$input"

@@ -405,6 +405,107 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     rm -rf "$tmp"
 }
 
+test_subscription_gateway_uses_local_https_origin() {
+    local tmp service_body argo_body server_body
+    local service_manager_def service_daemon_reload_def
+
+    tmp=$(mktemp -d)
+    service_manager_def=$(declare -f service_manager)
+    service_daemon_reload_def=$(declare -f service_daemon_reload)
+
+    SUBSCRIPTION_SERVER="${tmp}/sbm-subscription-server.py"
+    SUBSCRIPTION_SERVICE="${tmp}/sbm-subscription.service"
+    SUBSCRIPTION_OPENRC_SERVICE="${tmp}/sbm-subscription"
+    SUBSCRIPTION_FILE="${tmp}/subscription.txt"
+    ARGO_SERVICE="${tmp}/argo.service"
+    ARGO_OPENRC_SERVICE="${tmp}/argo"
+    SUB_TOKEN="sub-token"
+    SUBSCRIPTION_PORT="24630"
+    WS_PORT="18080"
+    ARGO_TOKEN=""
+
+    service_manager() {
+        echo "systemd"
+    }
+    service_daemon_reload() {
+        :
+    }
+
+    write_subscription_server
+    write_subscription_service
+    write_argo_service
+
+    service_body=$(<"$SUBSCRIPTION_SERVICE")
+    argo_body=$(<"$ARGO_SERVICE")
+    server_body=$(<"$SUBSCRIPTION_SERVER")
+    assert_contains "$service_body" "--listen 127.0.0.1" "subscription local listen"
+    assert_contains "$service_body" "--upstream-port 18080" "subscription WS upstream"
+    assert_contains "$argo_body" "--url http://127.0.0.1:24630" "Argo HTTPS origin"
+    assert_contains "$server_body" "def proxy_to_upstream" "subscription gateway proxy"
+
+    unset -f service_manager service_daemon_reload
+    eval "$service_manager_def"
+    eval "$service_daemon_reload_def"
+    rm -rf "$tmp"
+}
+
+test_subscription_url_prefers_https_argo() {
+    local output
+
+    GENERATED_SUBSCRIPTION_RAW="vless://uuid@example.com:443"
+    ARGO_DOMAIN="sub.example.com"
+    SUB_TOKEN="sub-token"
+    SUBSCRIPTION_PORT="24630"
+    PUBLIC_IP="198.51.100.10"
+    IP_STACK_MODE="ipv4-only"
+
+    output=$(show_subscription_url)
+    assert_contains "$output" "https://sub.example.com/sub/sub-token" "HTTPS subscription URL"
+    assert_contains "$output" "http://127.0.0.1:24630/sub/sub-token" "local debug subscription URL"
+    assert_not_contains "$output" "http://198.51.100.10:24630" "public HTTP subscription URL"
+}
+
+test_subscription_service_does_not_open_firewall() {
+    local tmp
+    local service_manager_def service_daemon_reload_def service_enable_now_def open_firewall_def
+
+    tmp=$(mktemp -d)
+    service_manager_def=$(declare -f service_manager)
+    service_daemon_reload_def=$(declare -f service_daemon_reload)
+    service_enable_now_def=$(declare -f service_enable_now)
+    open_firewall_def=$(declare -f open_firewall)
+
+    SUBSCRIPTION_SERVER="${tmp}/sbm-subscription-server.py"
+    SUBSCRIPTION_SERVICE="${tmp}/sbm-subscription.service"
+    SUBSCRIPTION_OPENRC_SERVICE="${tmp}/sbm-subscription"
+    SUBSCRIPTION_FILE="${tmp}/subscription.txt"
+    SUB_TOKEN="sub-token"
+    SUBSCRIPTION_PORT="24630"
+    WS_PORT="18080"
+
+    service_manager() {
+        echo "systemd"
+    }
+    service_daemon_reload() {
+        :
+    }
+    service_enable_now() {
+        [[ "$1" == "sbm-subscription" ]]
+    }
+    open_firewall() {
+        fail "subscription service opened firewall"
+    }
+
+    ensure_subscription_service
+
+    unset -f service_manager service_daemon_reload service_enable_now open_firewall
+    eval "$service_manager_def"
+    eval "$service_daemon_reload_def"
+    eval "$service_enable_now_def"
+    eval "$open_firewall_def"
+    rm -rf "$tmp"
+}
+
 test_service_manager_systemd
 test_service_manager_openrc
 test_package_manager_priority
@@ -419,5 +520,8 @@ test_non_alpine_package_verifies_binary
 test_reality_sni_probe_failure_uses_default
 test_manager_command_rejects_empty_source
 test_refresh_argo_runtime_renews_temporary_domain
+test_subscription_gateway_uses_local_https_origin
+test_subscription_url_prefers_https_argo
+test_subscription_service_does_not_open_firewall
 
 echo "OK: regression tests passed"
