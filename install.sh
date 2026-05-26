@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.18"
+SCRIPT_VERSION="2.6.19"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -1450,6 +1450,7 @@ validate_service_ports() {
     local old_reality_port=${1:-}
     local old_hy2_port=${2:-}
     local old_subscription_port=${3:-}
+    local should_open_firewall=${4:-true}
 
     validate_port "${REALITY_PORT:-}" "Reality" || return 1
     validate_port "${WS_PORT:-}" "VLESS-WS" || return 1
@@ -1487,7 +1488,51 @@ validate_service_ports() {
         info "订阅服务端口未变化，跳过占用检查"
     fi
 
-    open_service_ports || return 1
+    if [[ "$should_open_firewall" == "true" ]]; then
+        open_service_ports || return 1
+    fi
+    return 0
+}
+
+prompt_port_value() {
+    local __var_name=$1
+    local label=$2
+    local current=$3
+    local prompt=$4
+    local input candidate
+
+    while true; do
+        prompt_read input "$prompt" || return 1
+        candidate="${input:-$current}"
+        if validate_port "$candidate" "$label"; then
+            printf -v "$__var_name" '%s' "$candidate"
+            return 0
+        fi
+        warn "请重新输入 ${label} 端口"
+    done
+}
+
+show_port_confirmation() {
+    echo ""
+    echo -e "${CYAN}${BOLD}── 端口确认 ──${NC}"
+    echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
+    if [[ "${HY2_PORT}" == "${REALITY_PORT}" ]]; then
+        echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC} ${DIM}(与 Reality 共用端口号，协议不同)${NC}"
+    else
+        echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
+    fi
+    echo -e "  订阅服务:     ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(仅本机/Argo 使用)${NC}"
+    echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}, ${BOLD}${HY2_PORT}/UDP${NC}"
+    echo -e "  不需要外部放行: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
+    echo ""
+}
+
+confirm_port_selection() {
+    local input
+
+    show_port_confirmation
+    prompt_read input "  按 Enter 继续，输入 r 重新选择: " || return 1
+    [[ "$input" =~ ^[Rr]$ ]] && return 1
     return 0
 }
 
@@ -2346,6 +2391,7 @@ generate_and_show_links() {
     build_share_links
 
     echo ""
+    show_subscription_url
     echo -e "${PURPLE}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
     echo -e "${PURPLE}${BOLD}║              📋 配置信息 & 分享链接                 ║${NC}"
     echo -e "${PURPLE}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
@@ -2421,7 +2467,6 @@ generate_and_show_links() {
         echo ""
     fi
 
-    show_subscription_url
     show_external_access_requirements
     write_subscription_assets
 
@@ -2844,28 +2889,38 @@ do_primary_install() {
     install_cloudflared
     generate_params
 
-    # 询问端口模式
-    echo ""
-    echo -e "${CYAN}${BOLD}── 端口配置 ──${NC}"
-    echo -e "  1) 极简单端口模式 (Reality & Hysteria2 共用 443/TCP+UDP) ${GREEN}推荐${NC}"
-    echo -e "  2) 自定义分端口模式 (手动设置各个协议端口)"
-    prompt_read port_mode "  请选择 [1]: "
-    port_mode=${port_mode:-1}
+    while true; do
+        # 询问端口模式
+        echo ""
+        echo -e "${CYAN}${BOLD}── 端口配置 ──${NC}"
+        echo -e "  1) 极简单端口模式 (Reality & Hysteria2 共用 443/TCP+UDP) ${GREEN}推荐${NC}"
+        echo -e "  2) 自定义分端口模式 (手动设置各个协议端口)"
+        prompt_read port_mode "  请选择 [1]: "
+        port_mode=${port_mode:-1}
 
-    if [[ "$port_mode" == "1" ]]; then
-        REALITY_PORT=443
-        HY2_PORT=443
-        info "已选择单端口模式: 443"
-    else
-        prompt_read input "  Reality 端口 [${REALITY_PORT}]: "
-        [[ -n "$input" ]] && REALITY_PORT="$input"
+        if [[ "$port_mode" == "1" ]]; then
+            REALITY_PORT=443
+            HY2_PORT=443
+            info "已选择单端口模式: 443"
+        else
+            prompt_port_value REALITY_PORT "Reality" "$REALITY_PORT" "  Reality 端口 [${REALITY_PORT}]: " || error "端口读取失败"
+            prompt_port_value HY2_PORT "Hysteria2" "$HY2_PORT" "  Hysteria2 端口 [${HY2_PORT}]: " || error "端口读取失败"
+        fi
 
-        prompt_read input "  Hysteria2 端口 [${HY2_PORT}]: "
-        [[ -n "$input" ]] && HY2_PORT="$input"
-    fi
+        prompt_port_value SUBSCRIPTION_PORT "订阅服务" "$SUBSCRIPTION_PORT" "  订阅服务端口 [${SUBSCRIPTION_PORT}]: " || error "端口读取失败"
 
-    prompt_read input "  订阅服务端口 [${SUBSCRIPTION_PORT}]: "
-    [[ -n "$input" ]] && SUBSCRIPTION_PORT="$input"
+        if ! validate_service_ports "" "" "" false; then
+            warn "端口检查失败，请调整端口后重试"
+            continue
+        fi
+        if ! confirm_port_selection; then
+            continue
+        fi
+        if open_service_ports; then
+            break
+        fi
+        warn "端口放行失败，请调整端口后重试"
+    done
 
     prompt_read input "  伪装域名 (留空自动测速优选): "
     [[ -n "$input" ]] && REALITY_SNI="$input"
@@ -2873,10 +2928,6 @@ do_primary_install() {
     prompt_read input "  节点名称 [${NODE_NAME}]: "
     [[ -n "$input" ]] && NODE_NAME="$input"
     echo ""
-
-    if ! validate_service_ports "" ""; then
-        error "端口检查失败，请调整端口后重试"
-    fi
 
     # 自动优选伪装域名
     select_reality_sni
@@ -3008,14 +3059,17 @@ do_modify_config() {
         prompt_read choice "  请选择 [0-12]: "
 
         local changed=false
+        local ports_changed=false
         local restart_singbox=false
         local restart_argo=false
         case "$choice" in
             1)
-                prompt_read input "  新端口: "
-                if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
-                    REALITY_PORT="$input"
+                local new_reality_port
+                prompt_port_value new_reality_port "Reality" "$REALITY_PORT" "  新端口 [${REALITY_PORT}]: " || continue
+                if [[ "$new_reality_port" != "$REALITY_PORT" ]]; then
+                    REALITY_PORT="$new_reality_port"
                     changed=true
+                    ports_changed=true
                     restart_singbox=true
                 fi
                 ;;
@@ -3058,10 +3112,12 @@ do_modify_config() {
                 restart_singbox=true
                 ;;
             7)
-                prompt_read input "  新 Hysteria2 端口: "
-                if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
-                    HY2_PORT="$input"
+                local new_hy2_port
+                prompt_port_value new_hy2_port "Hysteria2" "$HY2_PORT" "  新 Hysteria2 端口 [${HY2_PORT}]: " || continue
+                if [[ "$new_hy2_port" != "$HY2_PORT" ]]; then
+                    HY2_PORT="$new_hy2_port"
                     changed=true
+                    ports_changed=true
                     restart_singbox=true
                 fi
                 ;;
@@ -3076,6 +3132,7 @@ do_modify_config() {
                 HY2_PORT=443
                 info "已切换为单端口模式: 443"
                 changed=true
+                ports_changed=true
                 restart_singbox=true
                 ;;
             10)
@@ -3117,10 +3174,13 @@ do_modify_config() {
                 continue
                 ;;
             12)
-                prompt_read input "  新订阅服务端口: "
-                if [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]; then
-                    SUBSCRIPTION_PORT="$input"
+                local new_subscription_port
+                prompt_port_value new_subscription_port "订阅服务" "$SUBSCRIPTION_PORT" "  新订阅服务端口 [${SUBSCRIPTION_PORT}]: " || continue
+                if [[ "$new_subscription_port" != "$SUBSCRIPTION_PORT" ]]; then
+                    SUBSCRIPTION_PORT="$new_subscription_port"
                     changed=true
+                    ports_changed=true
+                    restart_argo=true
                 fi
                 ;;
             0) return ;;
@@ -3128,13 +3188,33 @@ do_modify_config() {
         esac
 
         if [[ "$changed" == "true" ]]; then
-            if ! validate_service_ports "$old_reality_port" "$old_hy2_port" "$old_subscription_port"; then
+            if ! validate_service_ports "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false; then
                 restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                     "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                     "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
                 warn "端口检查未通过，已保留原配置"
+                press_enter
+                continue
+            fi
+            if [[ "$ports_changed" == "true" ]] && ! confirm_port_selection; then
+                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
+                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
+                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
+                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                warn "已取消端口修改"
+                press_enter
+                continue
+            fi
+            if ! open_service_ports; then
+                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
+                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
+                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
+                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                warn "端口放行失败，已保留原配置"
                 press_enter
                 continue
             fi

@@ -360,7 +360,12 @@ test_manager_command_rejects_empty_source() {
 
 test_refresh_argo_runtime_renews_temporary_domain() {
     local tmp
+    local write_argo_service_def service_restart_def service_logs_def sleep_def
     tmp=$(mktemp -d)
+    write_argo_service_def=$(declare -f write_argo_service || true)
+    service_restart_def=$(declare -f service_restart || true)
+    service_logs_def=$(declare -f service_logs || true)
+    sleep_def=$(declare -f sleep || true)
 
     PARAMS_FILE="${tmp}/params"
     UUID="uuid-1"
@@ -402,6 +407,10 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN="new.trycloudflare.com"' "temporary Argo params save"
 
     unset -f write_argo_service service_restart service_logs sleep
+    eval "$write_argo_service_def"
+    eval "$service_restart_def"
+    eval "$service_logs_def"
+    eval "$sleep_def"
     rm -rf "$tmp"
 }
 
@@ -506,6 +515,80 @@ test_subscription_service_does_not_open_firewall() {
     rm -rf "$tmp"
 }
 
+test_port_validation_can_skip_firewall_changes() {
+    local assert_port_available_def open_service_ports_def
+
+    assert_port_available_def=$(declare -f assert_port_available)
+    open_service_ports_def=$(declare -f open_service_ports)
+
+    REALITY_PORT="443"
+    WS_PORT="18080"
+    HY2_PORT="443"
+    SUBSCRIPTION_PORT="24630"
+
+    assert_port_available() {
+        :
+    }
+    open_service_ports() {
+        fail "port confirmation changed firewall before approval"
+    }
+
+    validate_service_ports "" "" "" false
+
+    unset -f assert_port_available open_service_ports
+    eval "$assert_port_available_def"
+    eval "$open_service_ports_def"
+}
+
+test_generate_links_shows_subscription_first() {
+    local output subscription_line config_line
+    local build_share_links_def show_external_access_requirements_def write_subscription_assets_def
+
+    build_share_links_def=$(declare -f build_share_links)
+    show_external_access_requirements_def=$(declare -f show_external_access_requirements)
+    write_subscription_assets_def=$(declare -f write_subscription_assets)
+
+    UUID="uuid-1"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    PUBLIC_KEY="public"
+    SHORT_ID="abcd1234"
+    SUBSCRIPTION_PORT="24630"
+    ARGO_TOKEN=""
+    ARGO_DOMAIN="sub.example.com"
+    WS_PATH="/abcd1234"
+    HY2_PORT="443"
+    HY2_PASSWORD="hy2-password"
+    SUB_TOKEN="sub-token"
+
+    build_share_links() {
+        IP_STACK_MODE="ipv4-only"
+        PUBLIC_IP="198.51.100.10"
+        GENERATED_SUBSCRIPTION_RAW="vless://uuid@example.com:443"
+        GENERATED_REALITY_LINKS="vless://direct"
+        GENERATED_ARGO_LINKS=""
+        GENERATED_HY2_LINKS=""
+    }
+    show_external_access_requirements() {
+        echo "external access"
+    }
+    write_subscription_assets() {
+        :
+    }
+
+    output=$(generate_and_show_links)
+    subscription_line=$(printf '%s\n' "$output" | grep -n "── 订阅地址 ──" | cut -d: -f1)
+    config_line=$(printf '%s\n' "$output" | grep -n "配置信息" | cut -d: -f1)
+
+    [[ -n "$subscription_line" && -n "$config_line" ]] || fail "subscription-first output markers missing"
+    (( subscription_line < config_line )) || fail "subscription URL is not shown first"
+
+    unset -f build_share_links show_external_access_requirements write_subscription_assets
+    eval "$build_share_links_def"
+    eval "$show_external_access_requirements_def"
+    eval "$write_subscription_assets_def"
+}
+
 test_service_manager_systemd
 test_service_manager_openrc
 test_package_manager_priority
@@ -523,5 +606,7 @@ test_refresh_argo_runtime_renews_temporary_domain
 test_subscription_gateway_uses_local_https_origin
 test_subscription_url_prefers_https_argo
 test_subscription_service_does_not_open_firewall
+test_port_validation_can_skip_firewall_changes
+test_generate_links_shows_subscription_first
 
 echo "OK: regression tests passed"
