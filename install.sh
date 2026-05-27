@@ -60,6 +60,8 @@ MANAGER_COMMAND="/usr/local/bin/sbm"
 MANAGER_ALIAS_COMMAND="/usr/local/bin/sing-box-manager"
 MANAGER_SYSTEM_COMMAND="/usr/bin/sbm"
 MANAGER_SYSTEM_ALIAS_COMMAND="/usr/bin/sing-box-manager"
+MANAGER_BIN_COMMAND="/bin/sbm"
+MANAGER_BIN_ALIAS_COMMAND="/bin/sing-box-manager"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
@@ -558,6 +560,8 @@ ensure_command_aliases() {
     ensure_command_link "$MANAGER_COMMAND" "$MANAGER_ALIAS_COMMAND"
     ensure_command_link "$MANAGER_COMMAND" "$MANAGER_SYSTEM_COMMAND"
     ensure_command_link "$MANAGER_COMMAND" "$MANAGER_SYSTEM_ALIAS_COMMAND"
+    ensure_command_link "$MANAGER_COMMAND" "$MANAGER_BIN_COMMAND"
+    ensure_command_link "$MANAGER_COMMAND" "$MANAGER_BIN_ALIAS_COMMAND"
 }
 
 resolve_existing_path() {
@@ -588,14 +592,17 @@ is_manager_source() {
 ensure_command_link() {
     local target="$1"
     local link_path="$2"
-    local link_dir
+    local link_dir existing_target
 
     link_dir="$(dirname "$link_path")"
     [[ -d "$link_dir" ]] || return 0
 
     if [[ -e "$link_path" || -L "$link_path" ]]; then
         [[ -L "$link_path" ]] || return 0
-        [[ "$(readlink "$link_path" 2>/dev/null)" == "$target" ]] || return 0
+        existing_target="$(readlink "$link_path" 2>/dev/null || true)"
+        [[ "$existing_target" == "$target" ]] && return 0
+        [[ -n "$existing_target" && -e "$existing_target" ]] && manager_script_valid "$existing_target" && return 0
+        rm -f "$link_path" 2>/dev/null || return 0
     fi
 
     ln -sf "$target" "$link_path" 2>/dev/null || true
@@ -3660,6 +3667,8 @@ do_uninstall() {
     rm -f /usr/local/bin/cloudflared
     remove_manager_link "$MANAGER_SYSTEM_COMMAND" "$MANAGER_COMMAND"
     remove_manager_link "$MANAGER_SYSTEM_ALIAS_COMMAND" "$MANAGER_COMMAND"
+    remove_manager_link "$MANAGER_BIN_COMMAND" "$MANAGER_COMMAND"
+    remove_manager_link "$MANAGER_BIN_ALIAS_COMMAND" "$MANAGER_COMMAND"
     remove_manager_link "$MANAGER_ALIAS_COMMAND" "$MANAGER_COMMAND"
     remove_manager_link "$MANAGER_COMMAND" "$MANAGER_COMMAND"
     rm -f "$SUBSCRIPTION_SERVER"

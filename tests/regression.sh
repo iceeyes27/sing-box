@@ -382,23 +382,30 @@ test_reality_sni_probe_failure_uses_default() {
 }
 
 test_manager_command_rejects_empty_source() {
-    local tmp empty_script valid_script old_manager old_alias old_system old_system_alias
+    local tmp empty_script valid_script stale_target old_manager old_alias old_system old_system_alias old_bin old_bin_alias
 
     tmp=$(mktemp -d)
     empty_script="${tmp}/empty"
     valid_script="${tmp}/install.sh"
+    stale_target="${tmp}/stale-sbm"
     old_manager="$MANAGER_COMMAND"
     old_alias="$MANAGER_ALIAS_COMMAND"
     old_system="$MANAGER_SYSTEM_COMMAND"
     old_system_alias="$MANAGER_SYSTEM_ALIAS_COMMAND"
+    old_bin="$MANAGER_BIN_COMMAND"
+    old_bin_alias="$MANAGER_BIN_ALIAS_COMMAND"
     MANAGER_COMMAND="${tmp}/usr-local/bin/sbm"
     MANAGER_ALIAS_COMMAND="${tmp}/usr-local/bin/sing-box-manager"
     MANAGER_SYSTEM_COMMAND="${tmp}/usr/bin/sbm"
     MANAGER_SYSTEM_ALIAS_COMMAND="${tmp}/usr/bin/sing-box-manager"
+    MANAGER_BIN_COMMAND="${tmp}/bin/sbm"
+    MANAGER_BIN_ALIAS_COMMAND="${tmp}/bin/sing-box-manager"
     mkdir -p "${tmp}/usr/bin"
+    mkdir -p "${tmp}/bin"
 
     : > "$empty_script"
     cp "$SCRIPT" "$valid_script"
+    ln -sf "$stale_target" "$MANAGER_SYSTEM_COMMAND"
 
     if install_manager_from_file "$empty_script" 2>/dev/null; then
         fail "manager command accepted empty source"
@@ -408,7 +415,10 @@ test_manager_command_rejects_empty_source() {
     [[ -L "$MANAGER_ALIAS_COMMAND" ]] || fail "manager alias link was not created"
     [[ -L "$MANAGER_SYSTEM_COMMAND" ]] || fail "system manager link was not created"
     [[ -L "$MANAGER_SYSTEM_ALIAS_COMMAND" ]] || fail "system manager alias link was not created"
+    [[ -L "$MANAGER_BIN_COMMAND" ]] || fail "bin manager link was not created"
+    [[ -L "$MANAGER_BIN_ALIAS_COMMAND" ]] || fail "bin manager alias link was not created"
     assert_eq "$MANAGER_COMMAND" "$(readlink "$MANAGER_SYSTEM_COMMAND")" "system manager link target"
+    assert_eq "$MANAGER_COMMAND" "$(readlink "$MANAGER_BIN_COMMAND")" "bin manager link target"
     is_manager_source "$MANAGER_SYSTEM_COMMAND" || fail "system manager link was not recognized as manager source"
     if is_manager_source "$valid_script"; then
         fail "separate source script was mistaken for installed manager"
@@ -418,6 +428,8 @@ test_manager_command_rejects_empty_source() {
     MANAGER_ALIAS_COMMAND="$old_alias"
     MANAGER_SYSTEM_COMMAND="$old_system"
     MANAGER_SYSTEM_ALIAS_COMMAND="$old_system_alias"
+    MANAGER_BIN_COMMAND="$old_bin"
+    MANAGER_BIN_ALIAS_COMMAND="$old_bin_alias"
     rm -rf "$tmp"
 }
 
