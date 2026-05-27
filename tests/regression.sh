@@ -120,6 +120,7 @@ EOF
     load_params
     assert_eq "8443" "$HY2_PORT" "legacy HY2_PORT migration"
     assert_eq "legacy-hy2-password" "$HY2_PASSWORD" "legacy HY2 password migration"
+    assert_eq "https://www.bing.com" "$HY2_MASQUERADE_URL" "legacy HY2 masquerade migration"
     assert_eq "legacy-sub-token" "$SUB_TOKEN" "legacy subscription token migration"
     assert_eq "24630" "$SUBSCRIPTION_PORT" "legacy subscription port migration"
     assert_eq "cf.example.com" "$ARGO_BEST_CF_DOMAIN_IPV4" "legacy Argo IPv4 cache migration"
@@ -220,11 +221,32 @@ test_single_ipv4_falls_back_without_candidate_list() {
     assert_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@198.51.100.10:443" "single IPv4 fallback direct link"
 }
 
+test_rtc_epoch_uses_timedatectl_without_hwclock() {
+    local tmp result
+    tmp=$(mktemp -d)
+    make_cmd "${tmp}/hwclock" '#!/usr/bin/env bash
+exit 1'
+    make_cmd "${tmp}/timedatectl" '#!/usr/bin/env bash
+cat <<'"'"'EOF'"'"'
+               Local time: Wed 2026-05-27 10:00:03 CST
+           Universal time: Wed 2026-05-27 02:00:03 UTC
+                 RTC time: Wed 2026-05-27 02:00:03
+                Time zone: Asia/Shanghai (CST, +0800)
+System clock synchronized: yes
+              NTP service: active
+          RTC in local TZ: no
+EOF'
+
+    result=$(PATH="${tmp}:/usr/bin:/bin" get_rtc_utc_epoch)
+    rm -rf "$tmp"
+    assert_eq "1779847203" "$result" "timedatectl RTC epoch fallback"
+}
+
 test_runtime_param_restore_is_complete() {
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
         "443" "www.microsoft.com" "18080" "/sid-old" \
-        "node-old" "8443" "hy2-old" "bing.com" \
+        "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all"
 
@@ -240,6 +262,7 @@ test_runtime_param_restore_is_complete() {
     HY2_PORT="8444"
     HY2_PASSWORD="hy2-new"
     HY2_SNI="example.com"
+    HY2_MASQUERADE_URL="https://example.com"
     SUBSCRIPTION_PORT="24631"
     ARGO_DOMAIN="argo.new.example.com"
     ARGO_TOKEN="token-new"
@@ -251,7 +274,7 @@ test_runtime_param_restore_is_complete() {
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
         "443" "www.microsoft.com" "18080" "/sid-old" \
-        "node-old" "8443" "hy2-old" "bing.com" \
+        "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all"
 
@@ -267,6 +290,7 @@ test_runtime_param_restore_is_complete() {
     assert_eq "8443" "$HY2_PORT" "restore HY2 port"
     assert_eq "hy2-old" "$HY2_PASSWORD" "restore HY2 password"
     assert_eq "bing.com" "$HY2_SNI" "restore HY2 SNI"
+    assert_eq "https://www.bing.com" "$HY2_MASQUERADE_URL" "restore HY2 masquerade URL"
     assert_eq "24630" "$SUBSCRIPTION_PORT" "restore subscription port"
     assert_eq "argo.old.example.com" "$ARGO_DOMAIN" "restore Argo domain"
     assert_eq "token-old" "$ARGO_TOKEN" "restore Argo token"
@@ -274,6 +298,34 @@ test_runtime_param_restore_is_complete() {
     assert_eq "cf4-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV4" "restore Argo IPv4 cache"
     assert_eq "cf6-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV6" "restore Argo IPv6 cache"
     assert_eq "all" "$LINK_IPV4_SELECTION" "restore IPv4 link selection"
+}
+
+test_hysteria2_config_uses_masquerade_proxy() {
+    local tmp config
+    tmp=$(mktemp -d)
+
+    CONFIG_DIR="$tmp"
+    CONFIG_FILE="${tmp}/config.json"
+    UUID="uuid-1"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    PRIVATE_KEY="private"
+    SHORT_ID="abcd1234"
+    WS_PORT="18080"
+    WS_PATH="/abcd1234"
+    HY2_PORT="443"
+    HY2_PASSWORD="hy2-password"
+    HY2_SNI="bing.com"
+    HY2_MASQUERADE_URL="https://www.bing.com"
+
+    write_singbox_config >/dev/null
+    config=$(<"$CONFIG_FILE")
+    rm -rf "$tmp"
+
+    assert_contains "$config" '"masquerade": {' "HY2 masquerade block"
+    assert_contains "$config" '"type": "proxy"' "HY2 masquerade proxy type"
+    assert_contains "$config" '"url": "https://www.bing.com"' "HY2 masquerade proxy URL"
+    assert_contains "$config" '"rewrite_host": true' "HY2 masquerade rewrite host"
 }
 
 test_relay_script_generation_uses_argo_upstream() {
@@ -677,7 +729,9 @@ test_legacy_params_migration
 test_ipv6_only_links_are_argo_only
 test_multiple_ipv4_direct_links_follow_selection
 test_single_ipv4_falls_back_without_candidate_list
+test_rtc_epoch_uses_timedatectl_without_hwclock
 test_runtime_param_restore_is_complete
+test_hysteria2_config_uses_masquerade_proxy
 test_relay_script_generation_uses_argo_upstream
 test_relay_script_requires_argo_upstream
 test_alpine_package_fallback

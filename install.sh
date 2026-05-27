@@ -67,6 +67,7 @@ ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
+HY2_DEFAULT_MASQUERADE_URL="https://www.bing.com"
 TIME_SKEW_THRESHOLD=30
 LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
 LOW_MEMORY_SWAP_CREATED=false
@@ -498,6 +499,7 @@ LINK_IPV4_SELECTION="${LINK_IPV4_SELECTION:-all}"
 HY2_PORT="${HY2_PORT}"
 HY2_PASSWORD="${HY2_PASSWORD}"
 HY2_SNI="${HY2_SNI}"
+HY2_MASQUERADE_URL="${HY2_MASQUERADE_URL:-${HY2_DEFAULT_MASQUERADE_URL}}"
 EOF
     chmod 600 "$PARAMS_FILE"
 }
@@ -517,6 +519,10 @@ load_params() {
         fi
         if [[ -z "${HY2_SNI:-}" ]]; then
             HY2_SNI="${HY2_DEFAULT_SNI}"
+            need_save=true
+        fi
+        if [[ -z "${HY2_MASQUERADE_URL:-}" ]]; then
+            HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
             need_save=true
         fi
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
@@ -707,13 +713,14 @@ restore_runtime_params() {
     HY2_PORT="${10}"
     HY2_PASSWORD="${11}"
     HY2_SNI="${12}"
-    SUBSCRIPTION_PORT="${13}"
-    ARGO_DOMAIN="${14}"
-    ARGO_TOKEN="${15}"
-    ARGO_BEST_CF_DOMAIN="${16}"
-    ARGO_BEST_CF_DOMAIN_IPV4="${17}"
-    ARGO_BEST_CF_DOMAIN_IPV6="${18}"
-    LINK_IPV4_SELECTION="${19:-all}"
+    HY2_MASQUERADE_URL="${13:-${HY2_DEFAULT_MASQUERADE_URL}}"
+    SUBSCRIPTION_PORT="${14}"
+    ARGO_DOMAIN="${15}"
+    ARGO_TOKEN="${16}"
+    ARGO_BEST_CF_DOMAIN="${17}"
+    ARGO_BEST_CF_DOMAIN_IPV4="${18}"
+    ARGO_BEST_CF_DOMAIN_IPV6="${19}"
+    LINK_IPV4_SELECTION="${20:-all}"
 }
 
 # ─── 安装组件 ────────────────────────────────────────────────
@@ -1087,16 +1094,17 @@ install_deps() {
     success "关键依赖就绪"
 }
 
-get_rtc_utc_epoch() {
-    command -v hwclock &>/dev/null || return 1
-    local rtc_raw rtc_input rtc_epoch rtc_tz
-    rtc_raw=$(LC_ALL=C hwclock --utc --show 2>/dev/null || true)
+parse_rtc_utc_epoch() {
+    local rtc_raw="$1"
+    local rtc_input rtc_epoch rtc_tz
     [[ -n "$rtc_raw" ]] || return 1
 
     if [[ "$rtc_raw" =~ ([0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?[[:space:]]*([+-][0-9]{2}:?[0-9]{2}|UTC|Z)? ]]; then
         rtc_tz="${BASH_REMATCH[4]:-UTC}"
         [[ "$rtc_tz" == "Z" ]] && rtc_tz="UTC"
         rtc_input="${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${rtc_tz}"
+    elif [[ "$rtc_raw" =~ [A-Z][a-z]{2}[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+        rtc_input="${BASH_REMATCH[1]} ${BASH_REMATCH[2]} UTC"
     elif [[ "$rtc_raw" =~ [A-Z][a-z]{2}[[:space:]]+([A-Z][a-z]{2})[[:space:]]+([0-9]{1,2})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2})[[:space:]]+([0-9]{4}) ]]; then
         rtc_input="${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]} UTC"
     else
@@ -1107,6 +1115,22 @@ get_rtc_utc_epoch() {
     [[ "$rtc_epoch" =~ ^[0-9]+$ ]] || return 1
     (( rtc_epoch >= 946684800 )) || return 1
     echo "$rtc_epoch"
+}
+
+get_rtc_utc_epoch() {
+    local rtc_raw
+
+    if command -v hwclock &>/dev/null; then
+        rtc_raw=$(LC_ALL=C hwclock --utc --show 2>/dev/null || true)
+        parse_rtc_utc_epoch "$rtc_raw" && return 0
+    fi
+
+    if command -v timedatectl &>/dev/null; then
+        rtc_raw=$(LC_ALL=C timedatectl 2>/dev/null | awk -F': ' '/RTC time:/ {print $2; exit}' || true)
+        parse_rtc_utc_epoch "$rtc_raw" && return 0
+    fi
+
+    return 1
 }
 
 get_time_skew_seconds() {
@@ -1328,6 +1352,7 @@ generate_params() {
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
     HY2_PASSWORD=$(openssl rand -base64 16)
     HY2_SNI="${HY2_DEFAULT_SNI}"
+    HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
 
     success "参数生成完成"
 }
@@ -1732,6 +1757,7 @@ write_singbox_config() {
     [[ -z "${HY2_PORT:-}" ]]    && missing+="HY2_PORT "
     [[ -z "${HY2_PASSWORD:-}" ]] && missing+="HY2_PASSWORD "
     [[ -z "${HY2_SNI:-}" ]]     && missing+="HY2_SNI "
+    [[ -z "${HY2_MASQUERADE_URL:-}" ]] && missing+="HY2_MASQUERADE_URL "
     if [[ -n "$missing" ]]; then
         error "配置生成失败: 以下关键变量为空: ${missing}"
     fi
@@ -1802,6 +1828,11 @@ write_singbox_config() {
                 "server_name": "${HY2_SNI}",
                 "key_path": "${CONFIG_DIR}/server.key",
                 "certificate_path": "${CONFIG_DIR}/server.crt"
+            },
+            "masquerade": {
+                "type": "proxy",
+                "url": "${HY2_MASQUERADE_URL}",
+                "rewrite_host": true
             }
         }
     ],
@@ -3200,6 +3231,7 @@ do_modify_config() {
         local old_hy2_port="${HY2_PORT}"
         local old_hy2_password="${HY2_PASSWORD}"
         local old_hy2_sni="${HY2_SNI}"
+        local old_hy2_masquerade_url="${HY2_MASQUERADE_URL:-${HY2_DEFAULT_MASQUERADE_URL}}"
         local old_subscription_port="${SUBSCRIPTION_PORT}"
         local old_argo_domain="${ARGO_DOMAIN:-}"
         local old_argo_token="${ARGO_TOKEN:-}"
@@ -3375,6 +3407,7 @@ do_modify_config() {
                 restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                     "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                     "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                    "$old_hy2_masquerade_url" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                     "$old_link_ipv4_selection"
@@ -3386,6 +3419,7 @@ do_modify_config() {
                 restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                     "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                     "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                    "$old_hy2_masquerade_url" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                     "$old_link_ipv4_selection"
@@ -3397,6 +3431,7 @@ do_modify_config() {
                 restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                     "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                     "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                    "$old_hy2_masquerade_url" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                     "$old_link_ipv4_selection"
@@ -3417,6 +3452,7 @@ do_modify_config() {
                     restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                         "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                         "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                        "$old_hy2_masquerade_url" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                         "$old_link_ipv4_selection"
@@ -3435,6 +3471,7 @@ do_modify_config() {
                     restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                         "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                         "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                        "$old_hy2_masquerade_url" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                         "$old_link_ipv4_selection"
@@ -3456,6 +3493,7 @@ do_modify_config() {
                     restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                         "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                         "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
+                        "$old_hy2_masquerade_url" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                         "$old_link_ipv4_selection"
