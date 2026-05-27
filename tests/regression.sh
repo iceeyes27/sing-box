@@ -159,13 +159,74 @@ test_ipv6_only_links_are_argo_only() {
     assert_not_contains "$GENERATED_HY2_LINKS" "hysteria2://" "IPv6-only Hysteria2 suppression"
 }
 
+test_multiple_ipv4_direct_links_follow_selection() {
+    UUID="uuid-1"
+    NODE_NAME="node"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    PUBLIC_KEY="public"
+    SHORT_ID="abcd1234"
+    WS_PATH="/abcd1234"
+    ARGO_DOMAIN=""
+    ARGO_TOKEN=""
+    ARGO_BEST_CF_DOMAIN=""
+
+    get_public_ip() {
+        IP_STACK_MODE="ipv4-only"
+        PUBLIC_IP="198.51.100.10"
+        PUBLIC_IPV4="198.51.100.10"
+        PUBLIC_IPV4_LIST=$'198.51.100.10\n203.0.113.20'
+        PUBLIC_IPV6=""
+    }
+    urlencode() {
+        echo "$1"
+    }
+
+    LINK_IPV4_SELECTION="all"
+    build_share_links >/dev/null
+    assert_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@198.51.100.10:443" "first IPv4 direct link"
+    assert_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@203.0.113.20:443" "second IPv4 direct link"
+
+    LINK_IPV4_SELECTION="203.0.113.20"
+    build_share_links >/dev/null
+    assert_not_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@198.51.100.10:443" "unselected IPv4 direct link"
+    assert_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@203.0.113.20:443" "selected IPv4 direct link"
+}
+
+test_single_ipv4_falls_back_without_candidate_list() {
+    UUID="uuid-1"
+    NODE_NAME="node"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    PUBLIC_KEY="public"
+    SHORT_ID="abcd1234"
+    ARGO_DOMAIN=""
+    ARGO_TOKEN=""
+    ARGO_BEST_CF_DOMAIN=""
+
+    get_public_ip() {
+        IP_STACK_MODE="ipv4-only"
+        PUBLIC_IP="198.51.100.10"
+        PUBLIC_IPV4="198.51.100.10"
+        PUBLIC_IPV4_LIST=""
+        PUBLIC_IPV6=""
+    }
+    urlencode() {
+        echo "$1"
+    }
+
+    LINK_IPV4_SELECTION="all"
+    build_share_links >/dev/null
+    assert_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@198.51.100.10:443" "single IPv4 fallback direct link"
+}
+
 test_runtime_param_restore_is_complete() {
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
         "443" "www.microsoft.com" "18080" "/sid-old" \
         "node-old" "8443" "hy2-old" "bing.com" \
         "24630" "argo.old.example.com" "token-old" \
-        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com"
+        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all"
 
     UUID="uuid-new"
     SHORT_ID="sid-new"
@@ -185,13 +246,14 @@ test_runtime_param_restore_is_complete() {
     ARGO_BEST_CF_DOMAIN="cf-new.example.com"
     ARGO_BEST_CF_DOMAIN_IPV4="cf4-new.example.com"
     ARGO_BEST_CF_DOMAIN_IPV6="cf6-new.example.com"
+    LINK_IPV4_SELECTION="203.0.113.20"
 
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
         "443" "www.microsoft.com" "18080" "/sid-old" \
         "node-old" "8443" "hy2-old" "bing.com" \
         "24630" "argo.old.example.com" "token-old" \
-        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com"
+        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all"
 
     assert_eq "uuid-old" "$UUID" "restore UUID"
     assert_eq "sid-old" "$SHORT_ID" "restore Short ID"
@@ -211,6 +273,7 @@ test_runtime_param_restore_is_complete() {
     assert_eq "cf-old.example.com" "$ARGO_BEST_CF_DOMAIN" "restore Argo cache"
     assert_eq "cf4-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV4" "restore Argo IPv4 cache"
     assert_eq "cf6-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV6" "restore Argo IPv6 cache"
+    assert_eq "all" "$LINK_IPV4_SELECTION" "restore IPv4 link selection"
 }
 
 test_relay_script_generation_uses_argo_upstream() {
@@ -540,10 +603,12 @@ test_port_validation_can_skip_firewall_changes() {
     eval "$open_service_ports_def"
 }
 
-test_generate_links_shows_subscription_first() {
+test_subscription_page_is_final_section() {
     local output subscription_line config_line
+    local tmp
     local build_share_links_def show_external_access_requirements_def write_subscription_assets_def
 
+    tmp=$(mktemp -d)
     build_share_links_def=$(declare -f build_share_links)
     show_external_access_requirements_def=$(declare -f show_external_access_requirements)
     write_subscription_assets_def=$(declare -f write_subscription_assets)
@@ -560,6 +625,7 @@ test_generate_links_shows_subscription_first() {
     HY2_PORT="443"
     HY2_PASSWORD="hy2-password"
     SUB_TOKEN="sub-token"
+    LINK_FILE="${tmp}/share-links.txt"
 
     build_share_links() {
         IP_STACK_MODE="ipv4-only"
@@ -576,17 +642,19 @@ test_generate_links_shows_subscription_first() {
         :
     }
 
-    output=$(generate_and_show_links)
-    subscription_line=$(printf '%s\n' "$output" | grep -n "── 订阅地址 ──" | cut -d: -f1)
+    output=$(generate_and_show_links; echo "deployment complete"; show_subscription_url)
+    subscription_line=$(printf '%s\n' "$output" | grep -n "订阅地址" | tail -n1 | cut -d: -f1)
     config_line=$(printf '%s\n' "$output" | grep -n "配置信息" | cut -d: -f1)
 
-    [[ -n "$subscription_line" && -n "$config_line" ]] || fail "subscription-first output markers missing"
-    (( subscription_line < config_line )) || fail "subscription URL is not shown first"
+    [[ -n "$subscription_line" && -n "$config_line" ]] || fail "subscription-final output markers missing"
+    (( config_line < subscription_line )) || fail "subscription URL page is not shown last"
+    [[ "$(printf '%s\n' "$output" | tail -n1)" == *"http://127.0.0.1:24630/sub/sub-token"* ]] || fail "subscription page is not the final output"
 
     unset -f build_share_links show_external_access_requirements write_subscription_assets
     eval "$build_share_links_def"
     eval "$show_external_access_requirements_def"
     eval "$write_subscription_assets_def"
+    rm -rf "$tmp"
 }
 
 test_service_manager_systemd
@@ -595,6 +663,8 @@ test_package_manager_priority
 test_package_manager_alpine
 test_legacy_params_migration
 test_ipv6_only_links_are_argo_only
+test_multiple_ipv4_direct_links_follow_selection
+test_single_ipv4_falls_back_without_candidate_list
 test_runtime_param_restore_is_complete
 test_relay_script_generation_uses_argo_upstream
 test_relay_script_requires_argo_upstream
@@ -607,6 +677,6 @@ test_subscription_gateway_uses_local_https_origin
 test_subscription_url_prefers_https_argo
 test_subscription_service_does_not_open_firewall
 test_port_validation_can_skip_firewall_changes
-test_generate_links_shows_subscription_first
+test_subscription_page_is_final_section
 
 echo "OK: regression tests passed"

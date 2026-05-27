@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.19"
+SCRIPT_VERSION="2.6.20"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -308,13 +308,49 @@ fetch_public_ipv6() {
     return 1
 }
 
+append_public_ipv4_candidate() {
+    local ip="$1"
+
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 0
+    is_private_ipv4 "$ip" && return 0
+    [[ "$ip" =~ ^127\. || "$ip" =~ ^0\. || "$ip" =~ ^255\. ]] && return 0
+    printf '%s\n' "${PUBLIC_IPV4_LIST:-}" | grep -Fxq "$ip" 2>/dev/null && return 0
+
+    if [[ -z "${PUBLIC_IPV4_LIST:-}" ]]; then
+        PUBLIC_IPV4_LIST="$ip"
+    else
+        PUBLIC_IPV4_LIST+=$'\n'"$ip"
+    fi
+}
+
+collect_public_ipv4_candidates() {
+    local ip
+
+    PUBLIC_IPV4_LIST=""
+    [[ -n "${PUBLIC_IPV4:-}" ]] && append_public_ipv4_candidate "$PUBLIC_IPV4"
+
+    if command -v ip &>/dev/null; then
+        while IFS= read -r ip; do
+            append_public_ipv4_candidate "$ip"
+        done < <(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+    fi
+
+    [[ -n "$PUBLIC_IPV4_LIST" ]] || return 1
+    PUBLIC_IPV4=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | head -n 1)
+    return 0
+}
+
 refresh_public_ip_stack() {
     if [[ -n "${IP_STACK_MODE:-}" && -n "${PUBLIC_IP:-}" ]]; then
+        if [[ -n "${PUBLIC_IPV4:-}" && -z "${PUBLIC_IPV4_LIST:-}" ]]; then
+            collect_public_ipv4_candidates || true
+        fi
         return 0
     fi
 
     PUBLIC_IPV4=$(fetch_public_ipv4 || true)
     PUBLIC_IPV6=$(fetch_public_ipv6 || true)
+    collect_public_ipv4_candidates || true
 
     if [[ -n "$PUBLIC_IPV4" ]]; then
         PUBLIC_IP="$PUBLIC_IPV4"
@@ -389,6 +425,54 @@ detect_external_access_mode() {
     echo "panel"
 }
 
+public_ipv4_candidate_count() {
+    [[ -n "${PUBLIC_IPV4_LIST:-}" ]] || { echo 0; return 0; }
+    printf '%s\n' "$PUBLIC_IPV4_LIST" | sed '/^$/d' | wc -l | tr -d '[:space:]'
+}
+
+public_ipv4_display() {
+    if [[ -n "${PUBLIC_IPV4_LIST:-}" ]]; then
+        printf '%s\n' "$PUBLIC_IPV4_LIST" | awk 'NF { if (out) out=out ", " $0; else out=$0 } END { print out }'
+    else
+        printf '%s' "${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
+    fi
+}
+
+selected_public_ipv4_list() {
+    local selection="${LINK_IPV4_SELECTION:-all}"
+    local ip
+
+    if [[ -z "${PUBLIC_IPV4_LIST:-}" ]]; then
+        ip="${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
+        [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && printf '%s\n' "$ip"
+        return 0
+    fi
+    if [[ "$selection" != "all" ]]; then
+        while IFS= read -r ip; do
+            if [[ "$ip" == "$selection" ]]; then
+                printf '%s\n' "$ip"
+                return 0
+            fi
+        done <<< "$PUBLIC_IPV4_LIST"
+        warn "已保存的 IPv4 ${selection} 当前未检测到，改为输出全部 IPv4。"
+    fi
+    printf '%s\n' "$PUBLIC_IPV4_LIST"
+}
+
+link_ipv4_selection_label() {
+    local count
+    count=$(public_ipv4_candidate_count)
+    if [[ "${LINK_IPV4_SELECTION:-all}" == "all" ]]; then
+        if (( count > 1 )); then
+            echo "全部 IPv4"
+        else
+            echo "默认 IPv4"
+        fi
+    else
+        echo "${LINK_IPV4_SELECTION}"
+    fi
+}
+
 # ─── 参数持久化 ──────────────────────────────────────────────
 save_params() {
     cat > "$PARAMS_FILE" << EOF
@@ -408,6 +492,7 @@ ARGO_TOKEN="${ARGO_TOKEN:-}"
 ARGO_BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN:-}"
 ARGO_BEST_CF_DOMAIN_IPV4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
 ARGO_BEST_CF_DOMAIN_IPV6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
+LINK_IPV4_SELECTION="${LINK_IPV4_SELECTION:-all}"
 HY2_PORT="${HY2_PORT}"
 HY2_PASSWORD="${HY2_PASSWORD}"
 HY2_SNI="${HY2_SNI}"
@@ -445,6 +530,13 @@ load_params() {
         fi
         if [[ ! ${ARGO_BEST_CF_DOMAIN_IPV6+x} ]]; then
             ARGO_BEST_CF_DOMAIN_IPV6=""
+            need_save=true
+        fi
+        if [[ -z "${LINK_IPV4_SELECTION:-}" ]]; then
+            LINK_IPV4_SELECTION="all"
+            need_save=true
+        elif [[ "$LINK_IPV4_SELECTION" != "all" && ! "$LINK_IPV4_SELECTION" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            LINK_IPV4_SELECTION="all"
             need_save=true
         fi
         if [[ -z "${SUB_TOKEN:-}" ]]; then
@@ -614,6 +706,7 @@ restore_runtime_params() {
     ARGO_BEST_CF_DOMAIN="${16}"
     ARGO_BEST_CF_DOMAIN_IPV4="${17}"
     ARGO_BEST_CF_DOMAIN_IPV6="${18}"
+    LINK_IPV4_SELECTION="${19:-all}"
 }
 
 # ─── 安装组件 ────────────────────────────────────────────────
@@ -1222,6 +1315,7 @@ generate_params() {
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
+    LINK_IPV4_SELECTION="all"
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
@@ -1536,6 +1630,40 @@ confirm_port_selection() {
     return 0
 }
 
+prompt_ipv4_link_selection_if_multiple() {
+    local count input index ip selected
+
+    refresh_public_ip_stack || return 1
+    count=$(public_ipv4_candidate_count)
+    if (( count <= 1 )); then
+        return 1
+    fi
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── 多 IPv4 链接策略 ──${NC}"
+    echo -e "  检测到多个 IPv4: ${BOLD}$(public_ipv4_display)${NC}"
+    echo -e "  1) 全部启用 ${GREEN}推荐${NC}"
+    index=2
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] || continue
+        echo -e "  ${index}) 仅启用 ${ip}"
+        index=$((index + 1))
+    done <<< "$PUBLIC_IPV4_LIST"
+
+    prompt_read input "  请选择 [1]: " || input=1
+    input=${input:-1}
+
+    if [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 2 && input < index )); then
+        selected=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | sed -n "$((input - 1))p")
+        LINK_IPV4_SELECTION="$selected"
+    else
+        LINK_IPV4_SELECTION="all"
+    fi
+
+    info "已选择 IPv4 链接策略: $(link_ipv4_selection_label)"
+    return 0
+}
+
 show_external_access_requirements() {
     local access_mode
     access_mode=$(detect_external_access_mode)
@@ -1566,6 +1694,9 @@ show_external_access_requirements() {
             echo -e "  未能检测公网地址，请按实际网络环境放行端口。"
             ;;
     esac
+    if (( $(public_ipv4_candidate_count) > 1 )); then
+        echo -e "  IPv4 链接策略: ${BOLD}$(link_ipv4_selection_label)${NC} (${BOLD}$(public_ipv4_display)${NC})"
+    fi
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
     if [[ "${HY2_PORT}" == "${REALITY_PORT}" ]]; then
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC} ${DIM}(与 Reality 共用端口号，但协议不同)${NC}"
@@ -2010,6 +2141,7 @@ update_argo_subscription_links() {
     generate_and_show_links
     ensure_subscription_service || warn "订阅服务启动失败，请检查 python3 或服务日志"
     success "Argo 订阅链接已更新"
+    show_subscription_url
 }
 
 # ─── Reality 优选 SNI ────────────────────────────────────────
@@ -2268,6 +2400,24 @@ build_direct_share_links_for_ip() {
     fi
 }
 
+build_direct_share_links_for_selected_ipv4s() {
+    local selected_ips ip count index label
+
+    selected_ips=$(selected_public_ipv4_list)
+    [[ -n "$selected_ips" ]] || return 0
+    count=$(printf '%s\n' "$selected_ips" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+    index=1
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] || continue
+        label=""
+        if (( count > 1 )); then
+            label="IPv4-${index}"
+        fi
+        build_direct_share_links_for_ip "$ip" "$label"
+        index=$((index + 1))
+    done <<< "$selected_ips"
+}
+
 append_argo_link() {
     local link="$1"
     if [[ -z "$GENERATED_ARGO_LINKS" ]]; then
@@ -2307,13 +2457,13 @@ build_share_links() {
 
     case "${IP_STACK_MODE:-}" in
         dual-stack)
-            build_direct_share_links_for_ip "${PUBLIC_IPV4:-}" ""
+            build_direct_share_links_for_selected_ipv4s
             ;;
         ipv6-only)
             warn "检测到 IPv6-only VPS，仅生成 Argo 节点链接。"
             ;;
         *)
-            build_direct_share_links_for_ip "${PUBLIC_IPV4:-$PUBLIC_IP}" ""
+            build_direct_share_links_for_selected_ipv4s
             ;;
     esac
 
@@ -2375,14 +2525,21 @@ show_subscription_url() {
 
     [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return
 
-    echo -e "${CYAN}${BOLD}── 订阅地址 ──${NC}"
+    echo ""
+    echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}${BOLD}║                      订阅地址                       ║${NC}"
+    echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
+    echo ""
     if public_subscription_url=$(subscription_https_url); then
-        echo -e "  ${BOLD}${public_subscription_url}${NC}"
+        echo -e "${GREEN}${BOLD}HTTPS 订阅（导入 v2rayN / v2rayNG）${NC}"
+        echo -e "${YELLOW}${BOLD}${public_subscription_url}${NC}"
     else
-        echo -e "  ${YELLOW}Argo 域名未就绪，稍后执行 sbm links 重新生成 HTTPS 订阅地址。${NC}"
+        echo -e "${YELLOW}Argo 域名未就绪，稍后执行 sbm links 重新生成 HTTPS 订阅地址。${NC}"
     fi
     if local_subscription_url=$(subscription_local_url); then
-        echo -e "  ${DIM}本机调试: ${local_subscription_url}${NC}"
+        echo ""
+        echo -e "${DIM}本机调试${NC}"
+        echo -e "${DIM}${local_subscription_url}${NC}"
     fi
     echo ""
 }
@@ -2391,7 +2548,6 @@ generate_and_show_links() {
     build_share_links
 
     echo ""
-    show_subscription_url
     echo -e "${PURPLE}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
     echo -e "${PURPLE}${BOLD}║              📋 配置信息 & 分享链接                 ║${NC}"
     echo -e "${PURPLE}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
@@ -2401,7 +2557,7 @@ generate_and_show_links() {
     case "${IP_STACK_MODE:-}" in
         dual-stack)
             echo -e "  公网类型:      ${BOLD}IPv4 + IPv6${NC}"
-            echo -e "  服务器 IPv4:   ${BOLD}${PUBLIC_IPV4}${NC}"
+            echo -e "  服务器 IPv4:   ${BOLD}$(public_ipv4_display)${NC}"
             echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IPV6}${NC}"
             ;;
         ipv6-only)
@@ -2410,9 +2566,12 @@ generate_and_show_links() {
             ;;
         *)
             echo -e "  公网类型:      ${BOLD}IPv4-only${NC}"
-            echo -e "  服务器 IPv4:   ${BOLD}${PUBLIC_IP}${NC}"
+            echo -e "  服务器 IPv4:   ${BOLD}$(public_ipv4_display)${NC}"
             ;;
     esac
+    if (( $(public_ipv4_candidate_count) > 1 )); then
+        echo -e "  IPv4 策略:     ${BOLD}$(link_ipv4_selection_label)${NC}"
+    fi
     echo -e "  UUID:          ${BOLD}${UUID}${NC}"
     if [[ "${IP_STACK_MODE:-}" != "ipv6-only" ]]; then
         echo -e "  Reality 端口:  ${BOLD}${REALITY_PORT}${NC}"
@@ -2928,6 +3087,7 @@ do_primary_install() {
     prompt_read input "  节点名称 [${NODE_NAME}]: "
     [[ -n "$input" ]] && NODE_NAME="$input"
     echo ""
+    prompt_ipv4_link_selection_if_multiple || true
 
     # 自动优选伪装域名
     select_reality_sni
@@ -2990,11 +3150,12 @@ do_primary_install() {
     # 保存参数
     save_params
 
+    echo ""
+    echo -e "${GREEN}${BOLD}✅ 部署完成！最后展示的 HTTPS 订阅地址可导入 v2rayN / v2rayNG。${NC}"
+
     # 显示链接
     generate_and_show_links
-
-    echo ""
-    echo -e "${GREEN}${BOLD}✅ 部署完成！复制上方链接导入 v2rayN / v2rayNG 即可使用。${NC}"
+    show_subscription_url
     press_enter
 }
 
@@ -3038,6 +3199,7 @@ do_modify_config() {
         local old_argo_best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
         local old_argo_best_cf_domain_ipv4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
         local old_argo_best_cf_domain_ipv6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
+        local old_link_ipv4_selection="${LINK_IPV4_SELECTION:-all}"
         clear
         echo -e "${CYAN}${BOLD}"
         echo "  ── 修改配置 ──"
@@ -3054,14 +3216,16 @@ do_modify_config() {
         echo -e "  10) 修改 Argo 隧道 (Token/域名)"
         echo -e "  11) 更新 Argo 订阅链接"
         echo -e "  12) 修改订阅服务端口       ${DIM}(当前: ${SUBSCRIPTION_PORT})${NC}"
+        echo -e "  13) 修改 IPv4 链接策略     ${DIM}(当前: $(link_ipv4_selection_label))${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        prompt_read choice "  请选择 [0-12]: "
+        prompt_read choice "  请选择 [0-13]: "
 
         local changed=false
         local ports_changed=false
         local restart_singbox=false
         local restart_argo=false
+        local links_only_changed=false
         case "$choice" in
             1)
                 local new_reality_port
@@ -3183,17 +3347,30 @@ do_modify_config() {
                     restart_argo=true
                 fi
                 ;;
+            13)
+                if prompt_ipv4_link_selection_if_multiple; then
+                    if [[ "${LINK_IPV4_SELECTION:-all}" != "$old_link_ipv4_selection" ]]; then
+                        changed=true
+                        links_only_changed=true
+                    fi
+                else
+                    warn "当前未检测到多个 IPv4"
+                    press_enter
+                    continue
+                fi
+                ;;
             0) return ;;
             *) continue ;;
         esac
 
         if [[ "$changed" == "true" ]]; then
-            if ! validate_service_ports "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false; then
+            if [[ "$links_only_changed" != "true" ]] && ! validate_service_ports "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false; then
                 restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                     "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                     "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
+                    "$old_link_ipv4_selection"
                 warn "端口检查未通过，已保留原配置"
                 press_enter
                 continue
@@ -3203,17 +3380,19 @@ do_modify_config() {
                     "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                     "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
+                    "$old_link_ipv4_selection"
                 warn "已取消端口修改"
                 press_enter
                 continue
             fi
-            if ! open_service_ports; then
+            if [[ "$links_only_changed" != "true" ]] && ! open_service_ports; then
                 restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                     "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                     "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
+                    "$old_link_ipv4_selection"
                 warn "端口放行失败，已保留原配置"
                 press_enter
                 continue
@@ -3232,7 +3411,8 @@ do_modify_config() {
                         "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                         "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
+                        "$old_link_ipv4_selection"
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -3249,7 +3429,8 @@ do_modify_config() {
                         "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                         "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
+                        "$old_link_ipv4_selection"
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -3269,7 +3450,8 @@ do_modify_config() {
                         "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                         "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
+                        "$old_link_ipv4_selection"
                     save_params
                     write_argo_service
                     service_restart argo-tunnel 2>/dev/null || true
@@ -3280,6 +3462,7 @@ do_modify_config() {
             fi
             generate_and_show_links
             ensure_subscription_service || warn "订阅服务启动失败，请检查 python3 或服务日志"
+            show_subscription_url
             press_enter
         fi
     done
@@ -3294,6 +3477,7 @@ do_show_links() {
 
     generate_and_show_links
     ensure_subscription_service || warn "订阅服务未成功启动"
+    show_subscription_url
     press_enter
 }
 
@@ -3433,6 +3617,7 @@ do_upgrade() {
                     refresh_argo_domain_if_needed
                     generate_and_show_links
                     ensure_subscription_service || warn "订阅服务未成功启动"
+                    show_subscription_url
                 fi
                 echo ""
                 prompt_read _ "按 Enter 重启面板并进入新版本..." || true
@@ -3582,7 +3767,7 @@ main() {
     case "${1:-}" in
         install)     do_primary_install ;;
         relay)       do_generate_relay_script ;;
-        links|sub)   load_params && { ensure_time_sync || true; refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; } || warn "未安装" ;;
+        links|sub)   load_params && { ensure_time_sync || true; refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; show_subscription_url; } || warn "未安装" ;;
         start)       do_start ;;
         stop)        do_stop ;;
         restart)     do_restart ;;
