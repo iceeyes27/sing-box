@@ -124,10 +124,171 @@ EOF
     assert_eq "legacy-sub-token" "$SUB_TOKEN" "legacy subscription token migration"
     assert_eq "24630" "$SUBSCRIPTION_PORT" "legacy subscription port migration"
     assert_eq "cf.example.com" "$ARGO_BEST_CF_DOMAIN_IPV4" "legacy Argo IPv4 cache migration"
+    assert_eq "" "$PUBLIC_IPV4_OVERRIDE" "legacy public IPv4 override migration"
     rm -rf "$tmp"
 }
 
-test_ipv6_only_links_are_argo_only() {
+test_params_parser_is_safe_and_round_trips() {
+    local tmp marker
+    tmp=$(mktemp -d)
+    PARAMS_FILE="${tmp}/params"
+    CONFIG_DIR="$tmp"
+    marker="${tmp}/executed"
+
+    cat > "$PARAMS_FILE" <<EOF
+UUID="uuid old"
+SHORT_ID='sid old'
+PRIVATE_KEY=private\\ value
+PUBLIC_KEY=public
+REALITY_PORT=443
+REALITY_SNI=www.microsoft.com
+WS_PORT=18080
+WS_PATH=/old
+NODE_NAME=\$(touch "$marker")
+UNEXPECTED=value
+ARGO_TOKEN=token\;touch "$marker"
+EOF
+
+    load_params
+    [[ ! -e "$marker" ]] || fail "params parser executed file content"
+    assert_eq '$(touch "'${marker}'")' "$NODE_NAME" "params command substitution is literal"
+    assert_eq 'token\;touch "'${marker}'"' "$ARGO_TOKEN" "params semicolon is literal"
+
+    UUID='uuid "quoted"'
+    SHORT_ID="sid\\backslash"
+    PRIVATE_KEY="private key"
+    PUBLIC_KEY="public key"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    WS_PORT="18080"
+    WS_PATH='/path with spaces'
+    NODE_NAME='node # one'
+    SUB_TOKEN='sub token $value'
+    SUBSCRIPTION_PORT="24630"
+    ARGO_DOMAIN="argo.example.com"
+    ARGO_TOKEN='argo token `literal`'
+    ARGO_BEST_CF_DOMAIN="cf.example.com"
+    ARGO_BEST_CF_DOMAIN_IPV4="cf4.example.com"
+    ARGO_BEST_CF_DOMAIN_IPV6="cf6.example.com"
+    LINK_IPV4_SELECTION="all"
+    HY2_PORT="8443"
+    HY2_PASSWORD='hy2 pass "quoted"'
+    HY2_SNI="bing.com"
+    HY2_MASQUERADE_URL="https://www.bing.com/a b"
+    PUBLIC_IPV4_OVERRIDE="198.51.100.99"
+    save_params
+
+    UUID=""; SHORT_ID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; REALITY_PORT=""; REALITY_SNI=""
+    WS_PORT=""; WS_PATH=""; NODE_NAME=""; SUB_TOKEN=""; SUBSCRIPTION_PORT=""
+    ARGO_DOMAIN=""; ARGO_TOKEN=""; ARGO_BEST_CF_DOMAIN=""; ARGO_BEST_CF_DOMAIN_IPV4=""
+    ARGO_BEST_CF_DOMAIN_IPV6=""; LINK_IPV4_SELECTION=""; PUBLIC_IPV4_OVERRIDE=""
+    HY2_PORT=""; HY2_PASSWORD=""; HY2_SNI=""; HY2_MASQUERADE_URL=""
+
+    load_params
+    assert_eq 'uuid "quoted"' "$UUID" "params UUID round trip"
+    assert_eq 'sid\\backslash' "$SHORT_ID" "params short id round trip"
+    assert_eq '/path with spaces' "$WS_PATH" "params WS path round trip"
+    assert_eq 'node # one' "$NODE_NAME" "params node name round trip"
+    assert_eq 'sub token $value' "$SUB_TOKEN" "params token round trip"
+    assert_eq 'argo token `literal`' "$ARGO_TOKEN" "params argo token round trip"
+    assert_eq '198.51.100.99' "$PUBLIC_IPV4_OVERRIDE" "params public IPv4 override round trip"
+    assert_eq 'hy2 pass "quoted"' "$HY2_PASSWORD" "params HY2 password round trip"
+
+    rm -rf "$tmp"
+}
+
+test_ipv4_public_link_validation() {
+    is_valid_public_ipv4_for_link "198.51.100.10" || fail "valid public IPv4 was rejected"
+    if is_valid_public_ipv4_for_link "999.1.1.1"; then fail "out-of-range IPv4 accepted"; fi
+    if is_valid_public_ipv4_for_link "192.168.1.1"; then fail "private IPv4 accepted"; fi
+    if is_valid_public_ipv4_for_link "100.64.1.1"; then fail "CGNAT IPv4 accepted"; fi
+    if is_valid_public_ipv4_for_link "127.0.0.1"; then fail "loopback IPv4 accepted"; fi
+    if is_valid_public_ipv4_for_link "224.0.0.1"; then fail "multicast IPv4 accepted"; fi
+}
+
+test_ipv4_override_takes_priority() {
+    PUBLIC_IPV4_OVERRIDE="198.51.100.88"
+    PUBLIC_IPV4=""
+    PUBLIC_IPV4_LIST=""
+    PUBLIC_IP=""
+    PUBLIC_IPV6=""
+    IP_STACK_MODE=""
+    fetch_public_ipv4() {
+        echo "203.0.113.20"
+    }
+    fetch_public_ipv6() {
+        return 1
+    }
+
+    refresh_public_ip_stack
+    assert_eq "198.51.100.88" "$PUBLIC_IPV4" "override PUBLIC_IPV4"
+    assert_eq "198.51.100.88" "$PUBLIC_IPV4_LIST" "override PUBLIC_IPV4_LIST"
+    assert_eq "198.51.100.88" "$PUBLIC_IP" "override PUBLIC_IP"
+    assert_eq "ipv4-only" "$IP_STACK_MODE" "override IP stack mode"
+}
+
+test_ipv4_override_generates_direct_links() {
+    UUID="uuid-1"
+    NODE_NAME="node"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    PUBLIC_KEY="public"
+    SHORT_ID="abcd1234"
+    WS_PATH="/abcd1234"
+    HY2_PORT="443"
+    HY2_PASSWORD="hy2"
+    HY2_SNI="bing.com"
+    ARGO_DOMAIN=""
+    ARGO_TOKEN=""
+    ARGO_BEST_CF_DOMAIN=""
+    PUBLIC_IPV4_OVERRIDE="198.51.100.88"
+    LINK_IPV4_SELECTION="all"
+
+    fetch_public_ipv6() {
+        return 1
+    }
+    urlencode() {
+        echo "$1"
+    }
+
+    build_share_links >/dev/null
+    assert_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@198.51.100.88:443" "override Reality link"
+    assert_contains "$GENERATED_HY2_LINKS" "hysteria2://hy2@198.51.100.88:443" "override Hysteria2 link"
+}
+
+test_ip_detection_failure_keeps_argo_link_generation() {
+    UUID="uuid-1"
+    NODE_NAME="node"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    PUBLIC_KEY="public"
+    SHORT_ID="abcd1234"
+    WS_PATH="/abcd1234"
+    HY2_PORT="443"
+    HY2_PASSWORD="hy2"
+    HY2_SNI="bing.com"
+    ARGO_DOMAIN="argo.example.com"
+    ARGO_TOKEN=""
+    ARGO_BEST_CF_DOMAIN="cf.example.com"
+    PUBLIC_IPV4_OVERRIDE=""
+
+    refresh_public_ip_stack() {
+        return 1
+    }
+    resolve_argo_best_cf_domain() {
+        ARGO_BEST_CF_DOMAIN="cf.example.com"
+    }
+    urlencode() {
+        echo "$1"
+    }
+
+    build_share_links >/dev/null
+    assert_eq "unknown" "$IP_STACK_MODE" "IP detection failure stack mode"
+    assert_not_contains "$GENERATED_REALITY_LINKS" "vless://" "no direct links after IP failure"
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@cf.example.com:443" "Argo link after IP failure"
+}
+
+
     UUID="uuid-1"
     NODE_NAME="node"
     REALITY_PORT="443"
@@ -141,7 +302,7 @@ test_ipv6_only_links_are_argo_only() {
     ARGO_DOMAIN="argo.example.com"
     ARGO_BEST_CF_DOMAIN="cf.example.com"
 
-    get_public_ip() {
+    refresh_public_ip_stack() {
         IP_STACK_MODE="ipv6-only"
         PUBLIC_IP="2001:db8::1"
         PUBLIC_IPV4=""
@@ -172,7 +333,7 @@ test_multiple_ipv4_direct_links_follow_selection() {
     ARGO_TOKEN=""
     ARGO_BEST_CF_DOMAIN=""
 
-    get_public_ip() {
+    refresh_public_ip_stack() {
         IP_STACK_MODE="ipv4-only"
         PUBLIC_IP="198.51.100.10"
         PUBLIC_IPV4="198.51.100.10"
@@ -205,7 +366,7 @@ test_single_ipv4_falls_back_without_candidate_list() {
     ARGO_TOKEN=""
     ARGO_BEST_CF_DOMAIN=""
 
-    get_public_ip() {
+    refresh_public_ip_stack() {
         IP_STACK_MODE="ipv4-only"
         PUBLIC_IP="198.51.100.10"
         PUBLIC_IPV4="198.51.100.10"

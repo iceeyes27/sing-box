@@ -44,17 +44,18 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.22"
+SCRIPT_VERSION="2.6.23"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 SUBSCRIPTION_FILE="${CONFIG_DIR}/subscription.txt"
+SUBSCRIPTION_ENV_FILE="${CONFIG_DIR}/sbm-subscription.env"
 SUBSCRIPTION_SERVER="/usr/local/bin/sbm-subscription-server.py"
 SUBSCRIPTION_SERVICE="/etc/systemd/system/sbm-subscription.service"
 SUBSCRIPTION_OPENRC_SERVICE="/etc/init.d/sbm-subscription"
 SUBSCRIPTION_PORT=24630
-RELAY_SCRIPT_PATH="${TMPDIR:-/tmp}/sbm-relay-install.sh"
+RELAY_SCRIPT_TEMPLATE="${TMPDIR:-/tmp}/sbm-relay-install.XXXXXX.sh"
 SCRIPT_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
 MANAGER_COMMAND="/usr/local/bin/sbm"
 MANAGER_ALIAS_COMMAND="/usr/local/bin/sing-box-manager"
@@ -64,6 +65,7 @@ MANAGER_BIN_COMMAND="/bin/sbm"
 MANAGER_BIN_ALIAS_COMMAND="/bin/sing-box-manager"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
+ARGO_ENV_FILE="${CONFIG_DIR}/argo-tunnel.env"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
@@ -281,6 +283,41 @@ service_logs() {
     esac
 }
 
+is_valid_ipv4() {
+    local ip="$1" octet
+    local -a octets
+
+    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r -a octets <<< "$ip"
+    [[ ${#octets[@]} -eq 4 ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+    return 0
+}
+
+is_private_ipv4() {
+    local ip=$1
+    [[ "$ip" =~ ^10\. ]] && return 0
+    [[ "$ip" =~ ^192\.168\. ]] && return 0
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
+    [[ "$ip" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\. ]] && return 0
+    [[ "$ip" =~ ^169\.254\. ]] && return 0
+    return 1
+}
+
+is_valid_public_ipv4_for_link() {
+    local ip="$1" first_octet
+
+    is_valid_ipv4 "$ip" || return 1
+    is_private_ipv4 "$ip" && return 1
+    [[ "$ip" =~ ^127\. || "$ip" =~ ^0\. || "$ip" =~ ^255\. ]] && return 1
+    first_octet=${ip%%.*}
+    (( 10#$first_octet < 224 )) || return 1
+    return 0
+}
+
 fetch_public_ipv4() {
     local endpoint ip
     for endpoint in \
@@ -288,7 +325,7 @@ fetch_public_ipv4() {
         "https://api.ipify.org" \
         "https://icanhazip.com"; do
         ip=$(curl -4 -s --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)
-        if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        if is_valid_public_ipv4_for_link "$ip"; then
             printf '%s' "$ip"
             return 0
         fi
@@ -314,9 +351,7 @@ fetch_public_ipv6() {
 append_public_ipv4_candidate() {
     local ip="$1"
 
-    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 0
-    is_private_ipv4 "$ip" && return 0
-    [[ "$ip" =~ ^127\. || "$ip" =~ ^0\. || "$ip" =~ ^255\. ]] && return 0
+    is_valid_public_ipv4_for_link "$ip" || return 0
     printf '%s\n' "${PUBLIC_IPV4_LIST:-}" | grep -Fxq "$ip" 2>/dev/null && return 0
 
     if [[ -z "${PUBLIC_IPV4_LIST:-}" ]]; then
@@ -344,12 +379,30 @@ collect_public_ipv4_candidates() {
 }
 
 refresh_public_ip_stack() {
+    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+        if ! is_valid_public_ipv4_for_link "$PUBLIC_IPV4_OVERRIDE"; then
+            return 1
+        fi
+        PUBLIC_IPV4="$PUBLIC_IPV4_OVERRIDE"
+        PUBLIC_IPV4_LIST="$PUBLIC_IPV4_OVERRIDE"
+        PUBLIC_IP="$PUBLIC_IPV4_OVERRIDE"
+        PUBLIC_IPV6=$(fetch_public_ipv6 || true)
+        if [[ -n "$PUBLIC_IPV6" ]]; then
+            IP_STACK_MODE="dual-stack"
+        else
+            IP_STACK_MODE="ipv4-only"
+        fi
+        return 0
+    fi
+
     if [[ -n "${IP_STACK_MODE:-}" && -n "${PUBLIC_IP:-}" ]]; then
         if [[ -n "${PUBLIC_IPV4:-}" && -z "${PUBLIC_IPV4_LIST:-}" ]]; then
             collect_public_ipv4_candidates || true
         fi
         return 0
     fi
+
+    reset_public_ip_cache
 
     PUBLIC_IPV4=$(fetch_public_ipv4 || true)
     PUBLIC_IPV6=$(fetch_public_ipv6 || true)
@@ -385,16 +438,6 @@ format_url_host() {
     else
         printf '%s' "$host"
     fi
-}
-
-is_private_ipv4() {
-    local ip=$1
-    [[ "$ip" =~ ^10\. ]] && return 0
-    [[ "$ip" =~ ^192\.168\. ]] && return 0
-    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
-    [[ "$ip" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\. ]] && return 0
-    [[ "$ip" =~ ^169\.254\. ]] && return 0
-    return 1
 }
 
 has_public_ip_on_interface() {
@@ -433,11 +476,21 @@ public_ipv4_candidate_count() {
     printf '%s\n' "$PUBLIC_IPV4_LIST" | sed '/^$/d' | wc -l | tr -d '[:space:]'
 }
 
+reset_public_ip_cache() {
+    PUBLIC_IPV4=""
+    PUBLIC_IPV4_LIST=""
+    PUBLIC_IPV6=""
+    PUBLIC_IP=""
+    IP_STACK_MODE=""
+}
+
 public_ipv4_display() {
-    if [[ -n "${PUBLIC_IPV4_LIST:-}" ]]; then
+    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+        printf '%s (手动覆盖)' "$PUBLIC_IPV4_OVERRIDE"
+    elif [[ -n "${PUBLIC_IPV4_LIST:-}" ]]; then
         printf '%s\n' "$PUBLIC_IPV4_LIST" | awk 'NF { if (out) out=out ", " $0; else out=$0 } END { print out }'
     else
-        printf '%s' "${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
+        printf '%s' "${PUBLIC_IPV4:-${PUBLIC_IP:-未获取}}"
     fi
 }
 
@@ -445,9 +498,14 @@ selected_public_ipv4_list() {
     local selection="${LINK_IPV4_SELECTION:-all}"
     local ip
 
+    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+        is_valid_public_ipv4_for_link "$PUBLIC_IPV4_OVERRIDE" && printf '%s\n' "$PUBLIC_IPV4_OVERRIDE"
+        return 0
+    fi
+
     if [[ -z "${PUBLIC_IPV4_LIST:-}" ]]; then
         ip="${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
-        [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && printf '%s\n' "$ip"
+        is_valid_public_ipv4_for_link "$ip" && printf '%s\n' "$ip"
         return 0
     fi
     if [[ "$selection" != "all" ]]; then
@@ -464,6 +522,10 @@ selected_public_ipv4_list() {
 
 link_ipv4_selection_label() {
     local count
+    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+        echo "手动覆盖 IPv4"
+        return 0
+    fi
     count=$(public_ipv4_candidate_count)
     if [[ "${LINK_IPV4_SELECTION:-all}" == "all" ]]; then
         if (( count > 1 )); then
@@ -477,36 +539,89 @@ link_ipv4_selection_label() {
 }
 
 # ─── 参数持久化 ──────────────────────────────────────────────
+PARAM_KEYS=(
+    UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI WS_PORT WS_PATH NODE_NAME
+    SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
+    ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
+    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL
+)
+
+is_param_key() {
+    local candidate="$1" key
+    for key in "${PARAM_KEYS[@]}"; do
+        [[ "$candidate" == "$key" ]] && return 0
+    done
+    return 1
+}
+
+shell_quote() {
+    printf '%q' "${1:-}"
+}
+
+write_env_file() {
+    local file="$1"
+    shift
+
+    mkdir -p "$(dirname "$file")"
+    : > "$file"
+    chmod 600 "$file"
+    while [[ $# -gt 0 ]]; do
+        local key="$1" value="${2:-}"
+        shift 2
+        [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+        printf '%s=%s\n' "$key" "$(shell_quote "$value")" >> "$file"
+    done
+    chown root:root "$file" 2>/dev/null || true
+}
+
+write_param() {
+    local key="$1"
+    local value="${!key-}"
+    printf '%s=%s\n' "$key" "$(shell_quote "$value")"
+}
+
+parse_param_value() {
+    local raw="$1"
+
+    if [[ "$raw" == \"*\" && "$raw" == *\" && ${#raw} -ge 2 ]]; then
+        raw="${raw:1:${#raw}-2}"
+        raw="${raw//\\\"/\"}"
+        raw="${raw//\\\\/\\}"
+    elif [[ "$raw" == \'*\' && "$raw" == *\' && ${#raw} -ge 2 ]]; then
+        raw="${raw:1:${#raw}-2}"
+    fi
+
+    printf '%s' "$raw"
+}
+
+load_param_file() {
+    local line key raw_value
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -n "$line" && "$line" != \#* ]] || continue
+        [[ "$line" == *"="* ]] || continue
+        key="${line%%=*}"
+        raw_value="${line#*=}"
+        [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+        is_param_key "$key" || continue
+        printf -v "$key" '%s' "$(parse_param_value "$raw_value")"
+    done < "$PARAMS_FILE"
+}
+
 save_params() {
-    cat > "$PARAMS_FILE" << EOF
-UUID="${UUID}"
-SHORT_ID="${SHORT_ID}"
-PRIVATE_KEY="${PRIVATE_KEY}"
-PUBLIC_KEY="${PUBLIC_KEY}"
-REALITY_PORT="${REALITY_PORT}"
-REALITY_SNI="${REALITY_SNI}"
-WS_PORT="${WS_PORT}"
-WS_PATH="${WS_PATH}"
-NODE_NAME="${NODE_NAME}"
-SUB_TOKEN="${SUB_TOKEN:-}"
-SUBSCRIPTION_PORT="${SUBSCRIPTION_PORT}"
-ARGO_DOMAIN="${ARGO_DOMAIN:-}"
-ARGO_TOKEN="${ARGO_TOKEN:-}"
-ARGO_BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN:-}"
-ARGO_BEST_CF_DOMAIN_IPV4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
-ARGO_BEST_CF_DOMAIN_IPV6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
-LINK_IPV4_SELECTION="${LINK_IPV4_SELECTION:-all}"
-HY2_PORT="${HY2_PORT}"
-HY2_PASSWORD="${HY2_PASSWORD}"
-HY2_SNI="${HY2_SNI}"
-HY2_MASQUERADE_URL="${HY2_MASQUERADE_URL:-${HY2_DEFAULT_MASQUERADE_URL}}"
-EOF
+    mkdir -p "$CONFIG_DIR"
+    : > "$PARAMS_FILE"
     chmod 600 "$PARAMS_FILE"
+    local key
+    for key in "${PARAM_KEYS[@]}"; do
+        write_param "$key" >> "$PARAMS_FILE"
+    done
+    chown root:root "$PARAMS_FILE" 2>/dev/null || true
 }
 
 load_params() {
     if [[ -f "$PARAMS_FILE" ]]; then
-        source "$PARAMS_FILE"
+        load_param_file
         # 兼容旧版本: 逐字段补齐 Hysteria2 / Argo Token 参数，绝不覆盖已有值
         local need_save=false
         if [[ -z "${HY2_PORT:-}" ]]; then
@@ -543,9 +658,22 @@ load_params() {
         if [[ -z "${LINK_IPV4_SELECTION:-}" ]]; then
             LINK_IPV4_SELECTION="all"
             need_save=true
-        elif [[ "$LINK_IPV4_SELECTION" != "all" && ! "$LINK_IPV4_SELECTION" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-            LINK_IPV4_SELECTION="all"
+        elif [[ "$LINK_IPV4_SELECTION" != "all" ]]; then
+            if ! is_valid_public_ipv4_for_link "$LINK_IPV4_SELECTION"; then
+                LINK_IPV4_SELECTION="all"
+                need_save=true
+            fi
+        fi
+        if [[ ! ${PUBLIC_IPV4_OVERRIDE+x} ]]; then
+            PUBLIC_IPV4_OVERRIDE=""
             need_save=true
+        elif [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+            if ! is_valid_public_ipv4_for_link "$PUBLIC_IPV4_OVERRIDE"; then
+                warn "已保存的直连公网 IPv4 覆盖无效，已清除。"
+                PUBLIC_IPV4_OVERRIDE=""
+                reset_public_ip_cache
+                need_save=true
+            fi
         fi
         if [[ -z "${SUB_TOKEN:-}" ]]; then
             SUB_TOKEN=$(openssl rand -hex 16)
@@ -721,6 +849,8 @@ restore_runtime_params() {
     ARGO_BEST_CF_DOMAIN_IPV4="${18}"
     ARGO_BEST_CF_DOMAIN_IPV6="${19}"
     LINK_IPV4_SELECTION="${20:-all}"
+    PUBLIC_IPV4_OVERRIDE="${21:-}"
+    reset_public_ip_cache
 }
 
 # ─── 安装组件 ────────────────────────────────────────────────
@@ -1287,15 +1417,37 @@ install_singbox() {
     mkdir -p "$CONFIG_DIR"
 }
 
+install_cloudflared_binary() {
+    local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH_CF}"
+    local tmp_file
+
+    tmp_file=$(mktemp) || return 1
+    if ! curl -fsSL --retry 3 --connect-timeout 15 "$url" -o "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    chmod 755 "$tmp_file"
+    if ! "$tmp_file" --version >/dev/null 2>&1; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if command -v install >/dev/null 2>&1; then
+        install -m 0755 "$tmp_file" /usr/local/bin/cloudflared
+    else
+        cp "$tmp_file" /usr/local/bin/cloudflared
+        chmod 755 /usr/local/bin/cloudflared
+    fi
+    rm -f "$tmp_file"
+    cloudflared --version >/dev/null 2>&1
+}
+
 install_cloudflared() {
     if command -v cloudflared &>/dev/null; then
         info "cloudflared 已安装"
         return
     fi
     info "安装 cloudflared..."
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH_CF}" \
-        -o /usr/local/bin/cloudflared
-    chmod +x /usr/local/bin/cloudflared
+    install_cloudflared_binary || error "cloudflared 安装失败。请检查网络、磁盘空间或 GitHub 访问"
     success "cloudflared 安装完成"
 }
 
@@ -1347,6 +1499,7 @@ generate_params() {
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
     LINK_IPV4_SELECTION="all"
+    PUBLIC_IPV4_OVERRIDE=""
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
@@ -1662,9 +1815,78 @@ confirm_port_selection() {
     return 0
 }
 
+public_ipv4_override_label() {
+    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+        printf '%s' "$PUBLIC_IPV4_OVERRIDE"
+    else
+        printf '自动检测'
+    fi
+}
+
+prompt_public_ipv4_override_optional() {
+    local input
+
+    while true; do
+        prompt_read input "  请输入用于直连链接的公网 IPv4 (留空跳过): " || return 1
+        [[ -z "$input" ]] && return 1
+        if is_valid_public_ipv4_for_link "$input"; then
+            PUBLIC_IPV4_OVERRIDE="$input"
+            LINK_IPV4_SELECTION="all"
+            reset_public_ip_cache
+            success "已设置直连公网 IPv4 覆盖: ${PUBLIC_IPV4_OVERRIDE}"
+            return 0
+        fi
+        warn "无效的公网 IPv4。请勿填写私网、回环、CGNAT、多播或保留地址。"
+    done
+}
+
+prompt_public_ipv4_override() {
+    local choice input
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── 直连公网 IPv4 覆盖 ──${NC}"
+    echo -e "  当前覆盖值: ${BOLD}$(public_ipv4_override_label)${NC}"
+    echo -e "  ${DIM}该值仅用于生成 Reality/Hysteria2 直连分享链接和订阅内容，不会修改服务端监听配置。${NC}"
+    echo -e "  1) 设置/修改覆盖 IPv4"
+    echo -e "  2) 清除覆盖，恢复自动检测"
+    echo -e "  0) 取消"
+    prompt_read choice "  请选择 [0]: " || return 1
+    choice=${choice:-0}
+
+    case "$choice" in
+        1)
+            while true; do
+                prompt_read input "  请输入用于直连链接的公网 IPv4: " || return 1
+                if is_valid_public_ipv4_for_link "$input"; then
+                    PUBLIC_IPV4_OVERRIDE="$input"
+                    LINK_IPV4_SELECTION="all"
+                    reset_public_ip_cache
+                    success "已设置直连公网 IPv4 覆盖: ${PUBLIC_IPV4_OVERRIDE}"
+                    return 0
+                fi
+                warn "无效的公网 IPv4。请勿填写私网、回环、CGNAT、多播或保留地址。"
+            done
+            ;;
+        2)
+            PUBLIC_IPV4_OVERRIDE=""
+            LINK_IPV4_SELECTION="all"
+            reset_public_ip_cache
+            success "已清除直连公网 IPv4 覆盖，恢复自动检测。"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 prompt_ipv4_link_selection_if_multiple() {
     local count input index ip selected
 
+    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+        warn "当前已设置直连公网 IPv4 覆盖，多 IPv4 链接策略暂不生效。请先清除覆盖值。"
+        return 1
+    fi
     refresh_public_ip_stack || return 1
     count=$(public_ipv4_candidate_count)
     if (( count <= 1 )); then
@@ -1718,15 +1940,20 @@ show_external_access_requirements() {
             ;;
         nat)
             echo -e "  检测到当前环境疑似 NAT / 转发型 VPS。仅修改本机防火墙通常不够，必须在面板额外放行或映射端口。"
+            [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]] && echo -e "  当前直连链接使用手动覆盖 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
             ;;
         panel)
             echo -e "  当前环境未检测到公网 IP 直接挂载在本机网卡，可能经过宿主机、防火墙面板或云安全组。请在外部面板同步放行。"
+            [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]] && echo -e "  当前直连链接使用手动覆盖 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
             ;;
         unknown)
             echo -e "  未能检测公网地址，请按实际网络环境放行端口。"
+            echo -e "  如需直连 Reality/Hysteria2，请在修改配置中设置直连公网 IPv4 覆盖。"
             ;;
     esac
-    if (( $(public_ipv4_candidate_count) > 1 )); then
+    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+        echo -e "  IPv4 链接策略: ${BOLD}$(link_ipv4_selection_label)${NC} (${BOLD}$(public_ipv4_display)${NC})"
+    elif (( $(public_ipv4_candidate_count) > 1 )); then
         echo -e "  IPv4 链接策略: ${BOLD}$(link_ipv4_selection_label)${NC} (${BOLD}$(public_ipv4_display)${NC})"
     fi
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
@@ -1762,6 +1989,20 @@ write_singbox_config() {
         error "配置生成失败: 以下关键变量为空: ${missing}"
     fi
 
+    local json_uuid json_reality_sni json_private_key json_short_id json_ws_path
+    local json_hy2_password json_hy2_sni json_key_path json_cert_path json_hy2_masquerade_url
+
+    json_uuid=$(json_string "$UUID")
+    json_reality_sni=$(json_string "$REALITY_SNI")
+    json_private_key=$(json_string "$PRIVATE_KEY")
+    json_short_id=$(json_string "$SHORT_ID")
+    json_ws_path=$(json_string "$WS_PATH")
+    json_hy2_password=$(json_string "$HY2_PASSWORD")
+    json_hy2_sni=$(json_string "$HY2_SNI")
+    json_key_path=$(json_string "${CONFIG_DIR}/server.key")
+    json_cert_path=$(json_string "${CONFIG_DIR}/server.crt")
+    json_hy2_masquerade_url=$(json_string "$HY2_MASQUERADE_URL")
+
     cat > "$CONFIG_FILE" << SINGBOX_EOF
 {
     "log": {
@@ -1776,22 +2017,22 @@ write_singbox_config() {
             "listen_port": ${REALITY_PORT},
             "users": [
                 {
-                    "uuid": "${UUID}",
+                    "uuid": ${json_uuid},
                     "flow": "xtls-rprx-vision"
                 }
             ],
             "tls": {
                 "enabled": true,
-                "server_name": "${REALITY_SNI}",
+                "server_name": ${json_reality_sni},
                 "reality": {
                     "enabled": true,
                     "handshake": {
-                        "server": "${REALITY_SNI}",
+                        "server": ${json_reality_sni},
                         "server_port": 443
                     },
-                    "private_key": "${PRIVATE_KEY}",
+                    "private_key": ${json_private_key},
                     "short_id": [
-                        "${SHORT_ID}"
+                        ${json_short_id}
                     ]
                 }
             }
@@ -1803,12 +2044,12 @@ write_singbox_config() {
             "listen_port": ${WS_PORT},
             "users": [
                 {
-                    "uuid": "${UUID}"
+                    "uuid": ${json_uuid}
                 }
             ],
             "transport": {
                 "type": "ws",
-                "path": "${WS_PATH}"
+                "path": ${json_ws_path}
             }
         },
         {
@@ -1820,18 +2061,18 @@ write_singbox_config() {
             "down_mbps": 100,
             "users": [
                 {
-                    "password": "${HY2_PASSWORD}"
+                    "password": ${json_hy2_password}
                 }
             ],
             "tls": {
                 "enabled": true,
-                "server_name": "${HY2_SNI}",
-                "key_path": "${CONFIG_DIR}/server.key",
-                "certificate_path": "${CONFIG_DIR}/server.crt"
+                "server_name": ${json_hy2_sni},
+                "key_path": ${json_key_path},
+                "certificate_path": ${json_cert_path}
             },
             "masquerade": {
                 "type": "proxy",
-                "url": "${HY2_MASQUERADE_URL}",
+                "url": ${json_hy2_masquerade_url},
                 "rewrite_host": true
             }
         }
@@ -1862,19 +2103,33 @@ SINGBOX_EOF
     fi
 }
 
+systemd_hardening_block() {
+    cat <<'EOF'
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+EOF
+}
+
 # ─── Argo 服务 ───────────────────────────────────────────────
 write_argo_service() {
-    local cloudflared_bin exec_cmd argo_origin_url
+    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
 
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         info "使用 Token 模式启动 Argo 隧道 (固定域名)"
         info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
-        exec_cmd="${cloudflared_bin} tunnel --protocol http2 --no-autoupdate run --token ${ARGO_TOKEN}"
+        write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
+        exec_cmd="tunnel --protocol http2 --no-autoupdate run"
     else
         info "使用临时隧道模式 (trycloudflare.com)"
-        exec_cmd="${cloudflared_bin} tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
@@ -1883,11 +2138,25 @@ write_argo_service() {
 name="argo-tunnel"
 description="Cloudflare Argo Tunnel"
 command="${cloudflared_bin}"
-command_args="${exec_cmd#${cloudflared_bin} }"
+command_args="${exec_cmd}"
 command_background=true
 pidfile="/run/argo-tunnel.pid"
 output_log="/var/log/argo-tunnel.log"
 error_log="/var/log/argo-tunnel.log"
+EOF
+        if [[ -n "${ARGO_TOKEN:-}" ]]; then
+            cat >> "$ARGO_OPENRC_SERVICE" << EOF
+env_file="${ARGO_ENV_FILE}"
+start_pre() {
+    if [ -r "\${env_file}" ]; then
+        set -a
+        . "\${env_file}"
+        set +a
+    fi
+}
+EOF
+        fi
+        cat >> "$ARGO_OPENRC_SERVICE" << 'EOF'
 
 depend() {
     need net
@@ -1898,6 +2167,7 @@ EOF
         return
     fi
 
+    systemd_hardening=$(systemd_hardening_block)
     cat > "$ARGO_SERVICE" << EOF
 [Unit]
 Description=Cloudflare Argo Tunnel
@@ -1908,11 +2178,15 @@ Wants=sing-box.service
 Type=simple
 User=nobody
 Group=nogroup
-ExecStart=${exec_cmd}
+EOF
+    [[ -n "${ARGO_TOKEN:-}" ]] && printf 'EnvironmentFile=%s\n' "$ARGO_ENV_FILE" >> "$ARGO_SERVICE"
+    cat >> "$ARGO_SERVICE" << EOF
+ExecStart=${cloudflared_bin} ${exec_cmd}
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+${systemd_hardening}
 
 [Install]
 WantedBy=multi-user.target
@@ -1925,6 +2199,7 @@ write_subscription_server() {
     cat > "$SUBSCRIPTION_SERVER" << 'PYEOF'
 #!/usr/bin/env python3
 import argparse
+import os
 import select
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2019,7 +2294,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen", default="0.0.0.0")
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--token")
+    parser.add_argument("--token-env", default="SUB_TOKEN")
     parser.add_argument("--file", required=True)
     parser.add_argument("--upstream-host", default="127.0.0.1")
     parser.add_argument("--upstream-port", type=int, required=True)
@@ -2036,7 +2312,11 @@ def main():
                     pass
             return super().server_bind()
 
-    server = Server((args.listen, args.port), build_handler(args.token, args.file, args.upstream_host, args.upstream_port))
+    token = args.token or os.environ.get(args.token_env)
+    if not token:
+        raise SystemExit("subscription token is required")
+
+    server = Server((args.listen, args.port), build_handler(token, args.file, args.upstream_host, args.upstream_port))
     server.serve_forever()
 
 
@@ -2051,8 +2331,9 @@ subscription_listen_host() {
 }
 
 write_subscription_service() {
-    local listen_host
+    local listen_host systemd_hardening
     listen_host=$(subscription_listen_host)
+    write_env_file "$SUBSCRIPTION_ENV_FILE" SUB_TOKEN "${SUB_TOKEN:-}"
 
     if [[ "$(service_manager)" == "openrc" ]]; then
         cat > "$SUBSCRIPTION_OPENRC_SERVICE" << EOF
@@ -2060,11 +2341,20 @@ write_subscription_service() {
 name="sbm-subscription"
 description="SBM Subscription Server"
 command="/usr/bin/python3"
-command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}"
+command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}"
 command_background=true
 pidfile="/run/sbm-subscription.pid"
 output_log="/var/log/sbm-subscription.log"
 error_log="/var/log/sbm-subscription.log"
+env_file="${SUBSCRIPTION_ENV_FILE}"
+
+start_pre() {
+    if [ -r "\${env_file}" ]; then
+        set -a
+        . "\${env_file}"
+        set +a
+    fi
+}
 
 depend() {
     need net
@@ -2074,6 +2364,7 @@ EOF
         return
     fi
 
+    systemd_hardening=$(systemd_hardening_block)
     cat > "$SUBSCRIPTION_SERVICE" << EOF
 [Unit]
 Description=SBM Subscription Server
@@ -2081,11 +2372,13 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --token ${SUB_TOKEN} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}
+EnvironmentFile=${SUBSCRIPTION_ENV_FILE}
+ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+${systemd_hardening}
 
 [Install]
 WantedBy=multi-user.target
@@ -2484,8 +2777,6 @@ build_argo_link_for_domain() {
 
 # ─── 链接与订阅生成 ──────────────────────────────────────────
 build_share_links() {
-    get_public_ip
-
     GENERATED_REALITY_LINKS=""
     GENERATED_ARGO_LINKS=""
     GENERATED_HY2_LINKS=""
@@ -2493,12 +2784,23 @@ build_share_links() {
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
 
+    if ! refresh_public_ip_stack; then
+        warn "无法自动获取公网 IP，直连链接未生成。可在修改配置中设置直连公网 IPv4 覆盖。"
+        IP_STACK_MODE="unknown"
+        PUBLIC_IP=""
+        PUBLIC_IPV4=""
+        PUBLIC_IPV4_LIST=""
+        PUBLIC_IPV6=""
+    fi
+
     case "${IP_STACK_MODE:-}" in
         dual-stack)
             build_direct_share_links_for_selected_ipv4s
             ;;
         ipv6-only)
             warn "检测到 IPv6-only VPS，仅生成 Argo 节点链接。"
+            ;;
+        unknown)
             ;;
         *)
             build_direct_share_links_for_selected_ipv4s
@@ -2602,16 +2904,23 @@ generate_and_show_links() {
             echo -e "  公网类型:      ${BOLD}IPv6-only${NC}"
             echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IP}${NC}"
             ;;
+        unknown)
+            echo -e "  公网类型:      ${BOLD}未获取${NC}"
+            echo -e "  服务器 IPv4:   ${BOLD}未获取${NC}"
+            ;;
         *)
             echo -e "  公网类型:      ${BOLD}IPv4-only${NC}"
             echo -e "  服务器 IPv4:   ${BOLD}$(public_ipv4_display)${NC}"
             ;;
     esac
-    if (( $(public_ipv4_candidate_count) > 1 )); then
+    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" || $(public_ipv4_candidate_count) -gt 1 ]]; then
         echo -e "  IPv4 策略:     ${BOLD}$(link_ipv4_selection_label)${NC}"
     fi
+    if [[ "${IP_STACK_MODE:-}" == "unknown" ]]; then
+        echo -e "  ${DIM}提示: 可在 [修改配置] -> [修改直连公网 IPv4 覆盖] 中手动设置正确公网 IP 后重新生成链接。${NC}"
+    fi
     echo -e "  UUID:          ${BOLD}${UUID}${NC}"
-    if [[ "${IP_STACK_MODE:-}" != "ipv6-only" ]]; then
+    if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
         echo -e "  Reality 端口:  ${BOLD}${REALITY_PORT}${NC}"
         echo -e "  Reality SNI:   ${BOLD}${REALITY_SNI}${NC}"
         echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
@@ -2626,7 +2935,7 @@ generate_and_show_links() {
         [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
     fi
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
-    if [[ "${IP_STACK_MODE:-}" != "ipv6-only" ]]; then
+    if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
         echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
         echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
     fi
@@ -2658,6 +2967,10 @@ generate_and_show_links() {
     if [[ -n "${GENERATED_HY2_LINKS}" ]]; then
         echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
         echo -e "${YELLOW}${GENERATED_HY2_LINKS}${NC}"
+        echo ""
+    elif [[ "${IP_STACK_MODE:-}" == "unknown" ]]; then
+        echo -e "${YELLOW}  未生成 Reality/Hysteria2 直连链接：未获取公网 IPv4。${NC}"
+        echo -e "${DIM}  可设置直连公网 IPv4 覆盖后执行 sbm links 重新生成。${NC}"
         echo ""
     elif [[ "${IP_STACK_MODE:-}" != "ipv6-only" ]]; then
         echo -e "${DIM}  Hysteria2: 未启用 (重新安装即可自动启用)${NC}"
@@ -2698,6 +3011,26 @@ generate_and_show_links() {
     chmod 600 "$LINK_FILE"
 
     echo -e "${DIM}链接已保存至: ${LINK_FILE}${NC}"
+}
+
+json_string() {
+    local value="${1-}"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$value"
+        return
+    fi
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '"%s"\n' "$value"
+}
+
+new_relay_script_path() {
+    local template="${RELAY_SCRIPT_TEMPLATE:-${TMPDIR:-/tmp}/sbm-relay-install.XXXXXX.sh}"
+    mktemp "$template"
 }
 
 escape_sed_replacement() {
@@ -2850,6 +3183,21 @@ urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || printf '%s' "$1"
 }
 
+json_string() {
+    local value="${1-}"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$value"
+        return
+    fi
+
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '"%s"\n' "$value"
+}
+
 public_ip() {
     curl -fsS4 https://api.ipify.org 2>/dev/null || curl -fsS6 https://api64.ipify.org 2>/dev/null || printf 'YOUR_RELAY_IP'
 }
@@ -2896,6 +3244,14 @@ Type=simple
 ExecStart=${sing_box_bin} run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
@@ -2919,6 +3275,14 @@ REALITY_SHORT_ID=$(sing-box generate rand 8 --hex 2>/dev/null || openssl rand -h
 [[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" ]] || err "Reality 密钥生成失败"
 
 mkdir -p /etc/sing-box
+json_relay_uuid=$(json_string "$RELAY_UUID")
+json_relay_sni=$(json_string "$RELAY_SNI")
+json_reality_private_key=$(json_string "$REALITY_PRIVATE_KEY")
+json_reality_short_id=$(json_string "$REALITY_SHORT_ID")
+json_upstream_server=$(json_string "$UPSTREAM_SERVER")
+json_upstream_uuid=$(json_string "$UPSTREAM_UUID")
+json_upstream_host=$(json_string "$UPSTREAM_HOST")
+json_upstream_ws_path=$(json_string "$UPSTREAM_WS_PATH")
 cat > /etc/sing-box/config.json <<EOF
 {
   "log": {
@@ -2934,22 +3298,22 @@ cat > /etc/sing-box/config.json <<EOF
       "sniff": true,
       "users": [
         {
-          "uuid": "${RELAY_UUID}",
+          "uuid": ${json_relay_uuid},
           "flow": "xtls-rprx-vision"
         }
       ],
       "tls": {
         "enabled": true,
-        "server_name": "${RELAY_SNI}",
+        "server_name": ${json_relay_sni},
         "reality": {
           "enabled": true,
           "handshake": {
-            "server": "${RELAY_SNI}",
+            "server": ${json_relay_sni},
             "server_port": 443
           },
-          "private_key": "${REALITY_PRIVATE_KEY}",
+          "private_key": ${json_reality_private_key},
           "short_id": [
-            "${REALITY_SHORT_ID}"
+            ${json_reality_short_id}
           ]
         }
       }
@@ -2959,12 +3323,12 @@ cat > /etc/sing-box/config.json <<EOF
     {
       "type": "vless",
       "tag": "main-argo-out",
-      "server": "${UPSTREAM_SERVER}",
+      "server": ${json_upstream_server},
       "server_port": 443,
-      "uuid": "${UPSTREAM_UUID}",
+      "uuid": ${json_upstream_uuid},
       "tls": {
         "enabled": true,
-        "server_name": "${UPSTREAM_HOST}",
+        "server_name": ${json_upstream_host},
         "utls": {
           "enabled": true,
           "fingerprint": "chrome"
@@ -2972,9 +3336,9 @@ cat > /etc/sing-box/config.json <<EOF
       },
       "transport": {
         "type": "ws",
-        "path": "${UPSTREAM_WS_PATH}",
+        "path": ${json_upstream_ws_path},
         "headers": {
-          "Host": "${UPSTREAM_HOST}"
+          "Host": ${json_upstream_host}
         }
       }
     },
@@ -3019,7 +3383,7 @@ RELAY_EOF
     replace_file_token "$relay_script" "__UPSTREAM_UUID__" "$UUID"
     replace_file_token "$relay_script" "__UPSTREAM_WS_PATH__" "$WS_PATH"
     replace_file_token "$relay_script" "__RELAY_NAME__" "$relay_name"
-    chmod +x "$relay_script"
+    chmod 700 "$relay_script"
 }
 
 do_generate_relay_script() {
@@ -3054,18 +3418,26 @@ do_generate_relay_script() {
         return
     fi
 
-    if ! write_relay_install_script "$RELAY_SCRIPT_PATH" "$relay_port" "$relay_sni" "$upstream_server" "$ARGO_DOMAIN" "$relay_name"; then
+    local relay_script_path
+    relay_script_path=$(new_relay_script_path) || {
+        warn "线路机脚本临时文件创建失败"
+        press_enter
+        return
+    }
+
+    if ! write_relay_install_script "$relay_script_path" "$relay_port" "$relay_sni" "$upstream_server" "$ARGO_DOMAIN" "$relay_name"; then
+        rm -f "$relay_script_path"
         warn "线路机脚本生成失败"
         press_enter
         return
     fi
 
     echo ""
-    success "线路机脚本已生成: $RELAY_SCRIPT_PATH"
-    echo -e "  在线路机执行: ${BOLD}sh $RELAY_SCRIPT_PATH${NC}"
+    success "线路机脚本已生成: $relay_script_path"
+    echo -e "  在线路机执行: ${BOLD}sh $relay_script_path${NC}"
     echo ""
     echo "--------------------"
-    cat "$RELAY_SCRIPT_PATH"
+    cat "$relay_script_path"
     echo "--------------------"
     press_enter
 }
@@ -3125,6 +3497,11 @@ do_primary_install() {
     prompt_read input "  节点名称 [${NODE_NAME}]: "
     [[ -n "$input" ]] && NODE_NAME="$input"
     echo ""
+    if ! refresh_public_ip_stack; then
+        warn "未能自动获取公网 IP。"
+        warn "如需生成 Reality/Hysteria2 直连链接，可手动填写公网 IPv4；留空则本次尽量仅生成 Argo 链接。"
+        prompt_public_ipv4_override_optional || true
+    fi
     prompt_ipv4_link_selection_if_multiple || true
 
     # 自动优选伪装域名
@@ -3239,6 +3616,7 @@ do_modify_config() {
         local old_argo_best_cf_domain_ipv4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
         local old_argo_best_cf_domain_ipv6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
         local old_link_ipv4_selection="${LINK_IPV4_SELECTION:-all}"
+        local old_public_ipv4_override="${PUBLIC_IPV4_OVERRIDE:-}"
         clear
         echo -e "${CYAN}${BOLD}"
         echo "  ── 修改配置 ──"
@@ -3256,9 +3634,10 @@ do_modify_config() {
         echo -e "  11) 更新 Argo 订阅链接"
         echo -e "  12) 修改订阅服务端口       ${DIM}(当前: ${SUBSCRIPTION_PORT})${NC}"
         echo -e "  13) 修改 IPv4 链接策略     ${DIM}(当前: $(link_ipv4_selection_label))${NC}"
+        echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        prompt_read choice "  请选择 [0-13]: "
+        prompt_read choice "  请选择 [0-14]: "
 
         local changed=false
         local ports_changed=false
@@ -3398,6 +3777,17 @@ do_modify_config() {
                     continue
                 fi
                 ;;
+            14)
+                if prompt_public_ipv4_override; then
+                    if [[ "${PUBLIC_IPV4_OVERRIDE:-}" != "$old_public_ipv4_override" ]]; then
+                        changed=true
+                        links_only_changed=true
+                    fi
+                else
+                    press_enter
+                    continue
+                fi
+                ;;
             0) return ;;
             *) continue ;;
         esac
@@ -3410,7 +3800,7 @@ do_modify_config() {
                     "$old_hy2_masquerade_url" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection"
+                    "$old_link_ipv4_selection" "$old_public_ipv4_override"
                 warn "端口检查未通过，已保留原配置"
                 press_enter
                 continue
@@ -3422,7 +3812,7 @@ do_modify_config() {
                     "$old_hy2_masquerade_url" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection"
+                    "$old_link_ipv4_selection" "$old_public_ipv4_override"
                 warn "已取消端口修改"
                 press_enter
                 continue
@@ -3434,7 +3824,7 @@ do_modify_config() {
                     "$old_hy2_masquerade_url" \
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection"
+                    "$old_link_ipv4_selection" "$old_public_ipv4_override"
                 warn "端口放行失败，已保留原配置"
                 press_enter
                 continue
@@ -3455,7 +3845,7 @@ do_modify_config() {
                         "$old_hy2_masquerade_url" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection"
+                        "$old_link_ipv4_selection" "$old_public_ipv4_override"
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -3474,7 +3864,7 @@ do_modify_config() {
                         "$old_hy2_masquerade_url" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection"
+                        "$old_link_ipv4_selection" "$old_public_ipv4_override"
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -3496,7 +3886,7 @@ do_modify_config() {
                         "$old_hy2_masquerade_url" \
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection"
+                        "$old_link_ipv4_selection" "$old_public_ipv4_override"
                     save_params
                     write_argo_service
                     service_restart argo-tunnel 2>/dev/null || true
@@ -3641,9 +4031,7 @@ do_upgrade() {
             ;;
         2)
             info "更新 cloudflared..."
-            curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH_CF}" \
-                -o /usr/local/bin/cloudflared
-            chmod +x /usr/local/bin/cloudflared
+            install_cloudflared_binary || error "cloudflared 更新失败。请检查网络、磁盘空间或 GitHub 访问"
             service_restart argo-tunnel 2>/dev/null || true
             success "cloudflared 已更新并重启"
             ;;
