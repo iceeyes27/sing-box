@@ -554,8 +554,12 @@ test_relay_script_requires_argo_upstream() {
 
 test_alpine_package_fallback() {
     local tmp fallback_file
+    local run_low_resource_def package_manager_def install_singbox_from_official_tarball_def
     tmp=$(mktemp -d)
     fallback_file="${tmp}/fallback"
+    run_low_resource_def=$(declare -f run_low_resource)
+    package_manager_def=$(declare -f package_manager)
+    install_singbox_from_official_tarball_def=$(declare -f install_singbox_from_official_tarball)
     make_cmd "${tmp}/apk" '#!/usr/bin/env bash
 exit 1'
     run_low_resource() {
@@ -571,6 +575,10 @@ exit 0'
     }
     PATH="${tmp}:$PATH" install_or_upgrade_singbox_package false
     [[ -f "$fallback_file" ]] || fail "Alpine fallback was not used"
+    unset -f run_low_resource package_manager install_singbox_from_official_tarball
+    eval "$run_low_resource_def"
+    eval "$package_manager_def"
+    eval "$install_singbox_from_official_tarball_def"
     rm -rf "$tmp"
 }
 
@@ -591,6 +599,119 @@ chmod +x "${tmp}/sing-box"
 EOF
     }
     PATH="${tmp}:$PATH" install_or_upgrade_singbox_package false
+    rm -rf "$tmp"
+}
+
+test_low_memory_without_swap_skips_optional_deps() {
+    local install_called=false
+    local get_resource_profile_def is_low_memory_without_swap_def install_packages_low_resource_def
+    get_resource_profile_def=$(declare -f get_resource_profile)
+    is_low_memory_without_swap_def=$(declare -f is_low_memory_without_swap)
+    install_packages_low_resource_def=$(declare -f install_packages_low_resource)
+
+    get_resource_profile() {
+        echo "low-noswap"
+    }
+    is_low_memory_without_swap() {
+        return 0
+    }
+    install_packages_low_resource() {
+        install_called=true
+    }
+
+    install_optional_deps >/dev/null
+    [[ "$install_called" == "false" ]] || fail "low-noswap optional deps should be skipped"
+
+    unset -f get_resource_profile is_low_memory_without_swap install_packages_low_resource
+    eval "$get_resource_profile_def"
+    eval "$is_low_memory_without_swap_def"
+    eval "$install_packages_low_resource_def"
+}
+
+test_low_cpu_uses_low_priority_runner() {
+    local tmp log
+    tmp=$(mktemp -d)
+    log="${tmp}/runner.log"
+
+    make_cmd "${tmp}/ionice" "#!/usr/bin/env bash
+echo \"\$*\" > '${log}'
+exit 0"
+    make_cmd "${tmp}/nice" '#!/usr/bin/env bash
+exit 0'
+    PATH="${tmp}:$PATH" run_low_resource true
+    assert_contains "$(<"$log")" "-c 3 nice -n 19 true" "low priority ionice runner"
+
+    rm -rf "$tmp"
+}
+
+test_alpine_cloudflared_prefers_apk() {
+    local tmp apk_log
+    local package_manager_def run_low_resource_def install_cloudflared_binary_def
+    tmp=$(mktemp -d)
+    apk_log="${tmp}/apk.log"
+    package_manager_def=$(declare -f package_manager)
+    run_low_resource_def=$(declare -f run_low_resource)
+    install_cloudflared_binary_def=$(declare -f install_cloudflared_binary)
+
+    package_manager() {
+        echo "apk"
+    }
+    run_low_resource() {
+        "$@"
+    }
+    apk() {
+        [[ "$*" == "add --no-cache cloudflared" ]] || return 1
+        echo "$*" > "$apk_log"
+        make_cmd "${tmp}/cloudflared" '#!/usr/bin/env bash
+[[ "${1:-}" == "--version" ]] && exit 0
+exit 0'
+    }
+    install_cloudflared_binary() {
+        fail "cloudflared binary fallback was used despite apk success"
+    }
+
+    PATH="${tmp}:$PATH" install_cloudflared >/dev/null
+    [[ -f "$apk_log" ]] || fail "cloudflared apk install was not attempted"
+
+    unset -f package_manager run_low_resource apk install_cloudflared_binary
+    eval "$package_manager_def"
+    eval "$run_low_resource_def"
+    eval "$install_cloudflared_binary_def"
+    rm -rf "$tmp"
+}
+
+test_alpine_cloudflared_falls_back_to_binary() {
+    local tmp fallback_file
+    local package_manager_def run_low_resource_def install_cloudflared_binary_def
+    tmp=$(mktemp -d)
+    fallback_file="${tmp}/fallback"
+    package_manager_def=$(declare -f package_manager)
+    run_low_resource_def=$(declare -f run_low_resource)
+    install_cloudflared_binary_def=$(declare -f install_cloudflared_binary)
+
+    package_manager() {
+        echo "apk"
+    }
+    run_low_resource() {
+        "$@"
+    }
+    apk() {
+        return 1
+    }
+    install_cloudflared_binary() {
+        echo "used" > "$fallback_file"
+        make_cmd "${tmp}/cloudflared" '#!/usr/bin/env bash
+[[ "${1:-}" == "--version" ]] && exit 0
+exit 0'
+    }
+
+    PATH="${tmp}:$PATH" install_cloudflared >/dev/null
+    [[ -f "$fallback_file" ]] || fail "cloudflared binary fallback was not used"
+
+    unset -f package_manager run_low_resource apk install_cloudflared_binary
+    eval "$package_manager_def"
+    eval "$run_low_resource_def"
+    eval "$install_cloudflared_binary_def"
     rm -rf "$tmp"
 }
 
@@ -916,6 +1037,10 @@ test_relay_script_generation_uses_argo_upstream
 test_relay_script_requires_argo_upstream
 test_alpine_package_fallback
 test_non_alpine_package_verifies_binary
+test_low_memory_without_swap_skips_optional_deps
+test_low_cpu_uses_low_priority_runner
+test_alpine_cloudflared_prefers_apk
+test_alpine_cloudflared_falls_back_to_binary
 test_reality_sni_probe_failure_uses_default
 test_manager_command_rejects_empty_source
 test_refresh_argo_runtime_renews_temporary_domain

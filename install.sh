@@ -1417,6 +1417,13 @@ install_singbox() {
     mkdir -p "$CONFIG_DIR"
 }
 
+install_cloudflared_from_apk() {
+    [[ "$(package_manager)" == "apk" ]] || return 1
+    run_low_resource apk add --no-cache cloudflared >/dev/null 2>&1 || return 1
+    command -v cloudflared >/dev/null 2>&1 || return 1
+    cloudflared --version >/dev/null 2>&1
+}
+
 install_cloudflared_binary() {
     local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH_CF}"
     local tmp_file
@@ -1447,7 +1454,11 @@ install_cloudflared() {
         return
     fi
     info "安装 cloudflared..."
-    install_cloudflared_binary || error "cloudflared 安装失败。请检查网络、磁盘空间或 GitHub 访问"
+    if [[ "$(package_manager)" == "apk" ]]; then
+        install_cloudflared_from_apk && { success "cloudflared 安装完成"; return; }
+        warn "Alpine 软件源安装 cloudflared 失败，改用官方二进制"
+    fi
+    install_cloudflared_binary || error "cloudflared 安装失败。请检查网络、磁盘空间、系统架构或 GitHub 访问"
     success "cloudflared 安装完成"
 }
 

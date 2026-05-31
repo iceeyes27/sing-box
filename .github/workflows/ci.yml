@@ -25,3 +25,36 @@ jobs:
 
       - name: Generate checksum
         run: bash scripts/checksum.sh
+
+  compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian-12
+            image: debian:12
+            prepare: apt-get update && apt-get install -y bash curl openssl ca-certificates procps
+          - name: ubuntu-24.04
+            image: ubuntu:24.04
+            prepare: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y bash curl openssl ca-certificates procps
+          - name: fedora-latest
+            image: fedora:latest
+            prepare: dnf install -y bash curl openssl ca-certificates procps-ng hostname
+          - name: alpine-latest
+            image: alpine:latest
+            prepare: apk add --no-cache bash curl openssl ca-certificates procps
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Prepare container
+        run: ${{ matrix.prepare }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run smoke checks
+        run: bash scripts/smoke.sh
+
+      - name: Run syntax checks
+        run: SBM_SKIP_REGRESSION=1 bash scripts/test.sh

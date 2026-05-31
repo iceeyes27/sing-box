@@ -116,7 +116,7 @@ make lint     # 运行 ShellCheck，未安装时跳过
 make check    # build + test + lint + checksum
 ```
 
-兼容性矩阵见 [docs/compatibility.md](docs/compatibility.md)。
+CI 会在 Debian、Ubuntu、Fedora、Alpine 容器中运行 smoke checks；兼容性矩阵见 [docs/compatibility.md](docs/compatibility.md)。
 
 ## 📄 License
 
