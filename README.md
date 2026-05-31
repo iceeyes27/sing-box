@@ -9,15 +9,26 @@
 ## ✨ 说明
 
 - 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box + cloudflared 为系统服务。
-- 🔧 **多协议链路框架** — 预置支持 VLESS 协议，并兼容 TCP、WebSocket 以及 UDP(QUIC) 等多条传输控制路径配置。
+- 🔧 **多协议链路框架** — 预置支持 VLESS Reality、VLESS WebSocket over Argo 以及 Hysteria2，兼容 TCP、WebSocket 与 UDP(QUIC) 等传输路径。
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
 - 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、HTTPS 订阅链接、Argo 订阅链接、重载配置、监控日志与开机自启。
+- 📡 **本地订阅网关** — 生成带 token 的订阅文件，并通过本地监听的订阅服务配合 Argo 暴露 HTTPS 订阅地址。
 
 ## 📦 一键安装配置
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh | sh
 ```
+
+如需先审查脚本再执行，也可以使用：
+
+```bash
+wget -O install.sh https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh
+bash -n install.sh
+sudo bash install.sh
+```
+
+固定版本和 checksum 校验方式见 [发布流程](docs/release.md)。
 
 > 需要 root 权限，支持 Ubuntu / Debian / CentOS / RHEL / Fedora / Alpine。
 > Alpine 初始系统会自动补齐 Bash 和 curl 后继续安装。
@@ -34,7 +45,7 @@ sbm
 **面板概览：**
 ```text
 ╔══════════════════════════════════════════════╗
-║     sing-box 管理面板  v2.6.23             ║
+║     sing-box 管理面板  v2.6.24             ║
 ╚══════════════════════════════════════════════╝
 
  1) 部署目标选择
@@ -70,7 +81,42 @@ sbm uninstall  # 完全卸载本项目及其生成的所有缓存与配置
 
 ## 🧭 部署目标
 
-主菜单的 `部署目标选择` 提供两个入口：`主节点完整部署` 保持原安装流程；`生成线路机部署脚本` 会读取当前主节点的 Argo 参数，生成独立的 Reality 线路机安装脚本 `/tmp/sbm-relay-install.sh`。
+主菜单的 `部署目标选择` 提供两个入口：`主节点完整部署` 保持原安装流程；`生成线路机部署脚本` 会读取当前主节点的 Argo 参数，生成独立的 Reality 线路机安装脚本，路径类似 `/tmp/sbm-relay-install.XXXXXX.sh`，以脚本最终输出为准。
+
+## 📁 生成文件清单
+
+脚本运行后可能创建或更新以下文件：
+
+- `/etc/sing-box/config.json` — sing-box 主配置。
+- `/etc/sing-box/.params` — 安装参数、端口、UUID、Reality key、订阅 token 等本地状态。
+- `/etc/sing-box/share-links.txt` — 最近一次生成的节点分享链接。
+- `/etc/sing-box/subscription.txt` — 订阅服务读取的订阅内容。
+- `/etc/sing-box/sbm-subscription.env` — 订阅服务环境变量，包含订阅 token。
+- `/etc/sing-box/argo-tunnel.env` — Argo Tunnel 运行参数。
+- `/usr/local/bin/sbm`、`/usr/local/bin/sing-box-manager` — 管理面板快捷命令。
+- `/usr/local/bin/sbm-subscription-server.py` — 本地订阅服务脚本。
+- `/etc/systemd/system/sing-box.service`、`/etc/systemd/system/argo-tunnel.service`、`/etc/systemd/system/sbm-subscription.service` — systemd 服务文件。
+- `/etc/init.d/sing-box`、`/etc/init.d/argo-tunnel`、`/etc/init.d/sbm-subscription` — OpenRC 服务文件。
+
+## 🔐 安全与暴露面
+
+- 订阅服务默认只监听 `127.0.0.1`，公网订阅地址通过 Argo HTTPS 入口访问。
+- 订阅地址包含随机 token；如怀疑泄露，建议重新生成 UUID / token / Reality key。
+- 脚本会在确认端口后按系统环境尝试放行 sing-box 入站端口；订阅服务端口不应直接对公网开放。
+- Argo token、订阅 token 和节点密钥均存放在本机配置文件中，请限制文件读取权限并避免公开日志输出。
+
+## 🧩 开发与构建
+
+本仓库保留一键分发用的 [install.sh](install.sh)，同时将开发态源码拆分在 [src/](src/) 中。修改源码后可运行：
+
+```bash
+make build    # 由 src/ 重新生成 install.sh
+make test     # 构建并运行 Bash 语法检查与回归测试
+make lint     # 运行 ShellCheck，未安装时跳过
+make check    # build + test + lint + checksum
+```
+
+兼容性矩阵见 [docs/compatibility.md](docs/compatibility.md)。
 
 ## 📄 License
 

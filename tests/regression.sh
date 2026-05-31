@@ -96,6 +96,7 @@ test_legacy_params_migration() {
     local tmp
     tmp=$(mktemp -d)
     PARAMS_FILE="${tmp}/params"
+    CONFIG_DIR="$tmp"
     openssl() {
         case "$*" in
             "rand -base64 16") echo "legacy-hy2-password" ;;
@@ -288,7 +289,7 @@ test_ip_detection_failure_keeps_argo_link_generation() {
     assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@cf.example.com:443" "Argo link after IP failure"
 }
 
-
+test_ipv6_only_links_are_argo_only() {
     UUID="uuid-1"
     NODE_NAME="node"
     REALITY_PORT="443"
@@ -387,6 +388,12 @@ test_rtc_epoch_uses_timedatectl_without_hwclock() {
     tmp=$(mktemp -d)
     make_cmd "${tmp}/hwclock" '#!/usr/bin/env bash
 exit 1'
+    make_cmd "${tmp}/date" '#!/usr/bin/env bash
+if [[ "$*" == "-u -d 2026-05-27 02:00:03 UTC +%s" ]]; then
+    echo 1779847203
+    exit 0
+fi
+exec /bin/date "$@"'
     make_cmd "${tmp}/timedatectl" '#!/usr/bin/env bash
 cat <<'"'"'EOF'"'"'
                Local time: Wed 2026-05-27 10:00:03 CST
@@ -462,9 +469,15 @@ test_runtime_param_restore_is_complete() {
 }
 
 test_hysteria2_config_uses_masquerade_proxy() {
-    local tmp config
+    local tmp config chown_def
     tmp=$(mktemp -d)
 
+    chown_def=$(declare -f chown 2>/dev/null || true)
+    chown() { return 0; }
+    sing-box() {
+        [[ "${1:-}" == "check" ]] && return 0
+        return 1
+    }
     CONFIG_DIR="$tmp"
     CONFIG_FILE="${tmp}/config.json"
     UUID="uuid-1"
@@ -480,6 +493,8 @@ test_hysteria2_config_uses_masquerade_proxy() {
     HY2_MASQUERADE_URL="https://www.bing.com"
 
     write_singbox_config >/dev/null
+    unset -f chown sing-box
+    [[ -n "$chown_def" ]] && eval "$chown_def"
     config=$(<"$CONFIG_FILE")
     rm -rf "$tmp"
 
@@ -656,6 +671,7 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     sleep_def=$(declare -f sleep || true)
 
     PARAMS_FILE="${tmp}/params"
+    CONFIG_DIR="$tmp"
     UUID="uuid-1"
     SHORT_ID="abcd1234"
     PRIVATE_KEY="private"
@@ -692,7 +708,7 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     refresh_argo_runtime >/dev/null
     assert_eq "new.trycloudflare.com" "$ARGO_DOMAIN" "temporary Argo domain renew"
     assert_eq "" "$ARGO_BEST_CF_DOMAIN" "temporary Argo cache clear"
-    assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN="new.trycloudflare.com"' "temporary Argo params save"
+    assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN=new.trycloudflare.com' "temporary Argo params save"
 
     unset -f write_argo_service service_restart service_logs sleep
     eval "$write_argo_service_def"
@@ -714,8 +730,10 @@ test_subscription_gateway_uses_local_https_origin() {
     SUBSCRIPTION_SERVICE="${tmp}/sbm-subscription.service"
     SUBSCRIPTION_OPENRC_SERVICE="${tmp}/sbm-subscription"
     SUBSCRIPTION_FILE="${tmp}/subscription.txt"
+    SUBSCRIPTION_ENV_FILE="${tmp}/sbm-subscription.env"
     ARGO_SERVICE="${tmp}/argo.service"
     ARGO_OPENRC_SERVICE="${tmp}/argo"
+    ARGO_ENV_FILE="${tmp}/argo.env"
     SUB_TOKEN="sub-token"
     SUBSCRIPTION_PORT="24630"
     WS_PORT="18080"
@@ -776,6 +794,7 @@ test_subscription_service_does_not_open_firewall() {
     SUBSCRIPTION_SERVICE="${tmp}/sbm-subscription.service"
     SUBSCRIPTION_OPENRC_SERVICE="${tmp}/sbm-subscription"
     SUBSCRIPTION_FILE="${tmp}/subscription.txt"
+    SUBSCRIPTION_ENV_FILE="${tmp}/sbm-subscription.env"
     SUB_TOKEN="sub-token"
     SUBSCRIPTION_PORT="24630"
     WS_PORT="18080"

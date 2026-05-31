@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Build installer
+        run: bash scripts/build-install.sh
+
+      - name: Run tests
+        run: bash scripts/test.sh
+
+      - name: Run ShellCheck
+        run: bash scripts/lint.sh
+
+      - name: Generate checksum
+        run: bash scripts/checksum.sh

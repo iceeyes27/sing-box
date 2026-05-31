@@ -1,0 +1,7 @@
+# Generated installer contains embedded Python, JSON, systemd units and relay installer templates.
+# The regression suite validates the generated artifacts with focused mocks.
+source-path=SCRIPTDIR
+external-sources=true
+
+# SC1091: source path is dynamic in generated/split scripts.
+disable=SC1091

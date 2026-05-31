@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.23"
+SCRIPT_VERSION="2.6.24"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -2292,7 +2292,7 @@ def build_handler(token: str, data_file: str, upstream_host: str, upstream_port:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--listen", default="0.0.0.0")
+    parser.add_argument("--listen", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--token")
     parser.add_argument("--token-env", default="SUB_TOKEN")
@@ -3040,10 +3040,17 @@ escape_sed_replacement() {
 replace_file_token() {
     local file="$1"
     local token="$2"
-    local value
+    local value tmp_file
 
     value=$(escape_sed_replacement "$3")
-    sed -i "s|${token}|${value}|g" "$file"
+    tmp_file=$(mktemp "${file}.XXXXXX") || return 1
+    if sed "s|${token}|${value}|g" "$file" > "$tmp_file"; then
+        cat "$tmp_file" > "$file"
+        rm -f "$tmp_file"
+        return 0
+    fi
+    rm -f "$tmp_file"
+    return 1
 }
 
 write_relay_install_script() {
