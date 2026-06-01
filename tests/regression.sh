@@ -410,6 +410,19 @@ EOF'
     assert_eq "1779847203" "$result" "timedatectl RTC epoch fallback"
 }
 
+test_busybox_ntpd_can_step_system_time() {
+    local tmp log
+    tmp=$(mktemp -d)
+    log="${tmp}/ntpd.log"
+    make_cmd "${tmp}/ntpd" '#!/usr/bin/env bash
+printf '\''%s\n'\'' "$*" >> "${NTPD_LOG}"
+[[ "$*" == *"-d -n -q -p time.cloudflare.com"* ]]'
+
+    PATH="${tmp}:/usr/bin:/bin" NTPD_LOG="$log" step_system_time_with_ntp
+    assert_contains "$(<"$log")" "-d -n -q -p time.cloudflare.com" "BusyBox ntpd one-shot step"
+    rm -rf "$tmp"
+}
+
 test_runtime_param_restore_is_complete() {
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
@@ -1031,6 +1044,7 @@ test_ipv6_only_links_are_argo_only
 test_multiple_ipv4_direct_links_follow_selection
 test_single_ipv4_falls_back_without_candidate_list
 test_rtc_epoch_uses_timedatectl_without_hwclock
+test_busybox_ntpd_can_step_system_time
 test_runtime_param_restore_is_complete
 test_hysteria2_config_uses_masquerade_proxy
 test_relay_script_generation_uses_argo_upstream

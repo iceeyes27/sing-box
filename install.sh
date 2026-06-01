@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.25"
+SCRIPT_VERSION="2.6.26"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -71,6 +71,12 @@ HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
 HY2_DEFAULT_MASQUERADE_URL="https://www.bing.com"
 TIME_SKEW_THRESHOLD=30
+NTP_STEP_TIMEOUT=20
+NTP_SYNC_SERVERS=(
+    "time.cloudflare.com"
+    "pool.ntp.org"
+    "time.google.com"
+)
 LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
 LOW_MEMORY_SWAP_CREATED=false
 
@@ -1274,12 +1280,18 @@ get_time_skew_seconds() {
 
 is_time_synchronized() {
     if command -v timedatectl &>/dev/null; then
-        [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]]
-    elif command -v chronyc &>/dev/null; then
-        chronyc tracking 2>/dev/null | grep -Eq 'Leap status[[:space:]]*:[[:space:]]*Normal'
-    else
-        return 1
+        [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]] && return 0
     fi
+    if command -v chronyc &>/dev/null; then
+        chronyc tracking 2>/dev/null | grep -Eq 'Leap status[[:space:]]*:[[:space:]]*Normal' && return 0
+    fi
+    if command -v ntpq &>/dev/null; then
+        ntpq -pn 2>/dev/null | grep -Eq '^[*+]' && return 0
+    fi
+    for svc in ntpd ntp openntpd; do
+        service_exists "$svc" && service_is_active "$svc" && return 0
+    done
+    return 1
 }
 
 existing_time_sync_service() {
@@ -1343,6 +1355,34 @@ install_time_sync_service() {
     return 0
 }
 
+step_system_time_with_ntp() {
+    local server
+
+    for server in "${NTP_SYNC_SERVERS[@]}"; do
+        if command -v chronyd &>/dev/null; then
+            chronyd -q "server ${server} iburst" >/dev/null 2>&1 && return 0
+        fi
+        if command -v ntpd &>/dev/null; then
+            if ntpd -q -p "$server" >/dev/null 2>&1; then
+                return 0
+            fi
+            if command -v timeout &>/dev/null; then
+                timeout "$NTP_STEP_TIMEOUT" ntpd -d -n -q -p "$server" >/dev/null 2>&1 && return 0
+            else
+                ntpd -d -n -q -p "$server" >/dev/null 2>&1 && return 0
+            fi
+        fi
+        if command -v ntpdate &>/dev/null; then
+            ntpdate -u "$server" >/dev/null 2>&1 && return 0
+        fi
+        if command -v sntp &>/dev/null; then
+            sntp -S "$server" >/dev/null 2>&1 && return 0
+        fi
+    done
+
+    return 1
+}
+
 attempt_time_sync() {
     if command -v timedatectl &>/dev/null; then
         timedatectl set-ntp true 2>/dev/null || true
@@ -1350,9 +1390,11 @@ attempt_time_sync() {
     start_time_sync_service
     sleep 2
     if command -v chronyc &>/dev/null; then
+        chronyc -a 'burst 4/4' >/dev/null 2>&1 || true
         chronyc -a makestep >/dev/null 2>&1 || true
         sleep 2
     fi
+    step_system_time_with_ntp || true
 }
 
 ensure_time_sync() {
@@ -1387,8 +1429,12 @@ ensure_time_sync() {
     fi
 
     if skew=$(get_time_skew_seconds 2>/dev/null); then
-        if is_time_synchronized && (( skew <= TIME_SKEW_THRESHOLD )); then
-            success "系统时间已同步，当前与 RTC 误差 ${skew}s"
+        if is_time_synchronized; then
+            if (( skew > TIME_SKEW_THRESHOLD )); then
+                warn "系统时间已启用 NTP，但 RTC 仍相差 ${skew}s；通常是宿主机/虚拟化平台 RTC 不准，继续安装"
+            else
+                success "系统时间已同步，当前与 RTC 误差 ${skew}s"
+            fi
             return 0
         fi
         warn "时间同步后系统时间与 RTC 仍相差 ${skew}s，请检查宿主机/虚拟化平台时间源"
