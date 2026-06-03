@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.26"
+SCRIPT_VERSION="2.6.27"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -71,12 +71,6 @@ HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
 HY2_DEFAULT_MASQUERADE_URL="https://www.bing.com"
 TIME_SKEW_THRESHOLD=30
-NTP_STEP_TIMEOUT=20
-NTP_SYNC_SERVERS=(
-    "time.cloudflare.com"
-    "pool.ntp.org"
-    "time.google.com"
-)
 LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
 LOW_MEMORY_SWAP_CREATED=false
 
@@ -1280,18 +1274,12 @@ get_time_skew_seconds() {
 
 is_time_synchronized() {
     if command -v timedatectl &>/dev/null; then
-        [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]] && return 0
+        [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]]
+    elif command -v chronyc &>/dev/null; then
+        chronyc tracking 2>/dev/null | grep -Eq 'Leap status[[:space:]]*:[[:space:]]*Normal'
+    else
+        return 1
     fi
-    if command -v chronyc &>/dev/null; then
-        chronyc tracking 2>/dev/null | grep -Eq 'Leap status[[:space:]]*:[[:space:]]*Normal' && return 0
-    fi
-    if command -v ntpq &>/dev/null; then
-        ntpq -pn 2>/dev/null | grep -Eq '^[*+]' && return 0
-    fi
-    for svc in ntpd ntp openntpd; do
-        service_exists "$svc" && service_is_active "$svc" && return 0
-    done
-    return 1
 }
 
 existing_time_sync_service() {
@@ -1355,34 +1343,6 @@ install_time_sync_service() {
     return 0
 }
 
-step_system_time_with_ntp() {
-    local server
-
-    for server in "${NTP_SYNC_SERVERS[@]}"; do
-        if command -v chronyd &>/dev/null; then
-            chronyd -q "server ${server} iburst" >/dev/null 2>&1 && return 0
-        fi
-        if command -v ntpd &>/dev/null; then
-            if ntpd -q -p "$server" >/dev/null 2>&1; then
-                return 0
-            fi
-            if command -v timeout &>/dev/null; then
-                timeout "$NTP_STEP_TIMEOUT" ntpd -d -n -q -p "$server" >/dev/null 2>&1 && return 0
-            else
-                ntpd -d -n -q -p "$server" >/dev/null 2>&1 && return 0
-            fi
-        fi
-        if command -v ntpdate &>/dev/null; then
-            ntpdate -u "$server" >/dev/null 2>&1 && return 0
-        fi
-        if command -v sntp &>/dev/null; then
-            sntp -S "$server" >/dev/null 2>&1 && return 0
-        fi
-    done
-
-    return 1
-}
-
 attempt_time_sync() {
     if command -v timedatectl &>/dev/null; then
         timedatectl set-ntp true 2>/dev/null || true
@@ -1390,11 +1350,9 @@ attempt_time_sync() {
     start_time_sync_service
     sleep 2
     if command -v chronyc &>/dev/null; then
-        chronyc -a 'burst 4/4' >/dev/null 2>&1 || true
         chronyc -a makestep >/dev/null 2>&1 || true
         sleep 2
     fi
-    step_system_time_with_ntp || true
 }
 
 ensure_time_sync() {
@@ -1429,12 +1387,8 @@ ensure_time_sync() {
     fi
 
     if skew=$(get_time_skew_seconds 2>/dev/null); then
-        if is_time_synchronized; then
-            if (( skew > TIME_SKEW_THRESHOLD )); then
-                warn "系统时间已启用 NTP，但 RTC 仍相差 ${skew}s；通常是宿主机/虚拟化平台 RTC 不准，继续安装"
-            else
-                success "系统时间已同步，当前与 RTC 误差 ${skew}s"
-            fi
+        if is_time_synchronized && (( skew <= TIME_SKEW_THRESHOLD )); then
+            success "系统时间已同步，当前与 RTC 误差 ${skew}s"
             return 0
         fi
         warn "时间同步后系统时间与 RTC 仍相差 ${skew}s，请检查宿主机/虚拟化平台时间源"
@@ -2752,10 +2706,38 @@ append_hy2_link() {
     append_subscription_link "$link"
 }
 
+get_hy2_cert_pin_sha256() {
+    local cert_file="${CONFIG_DIR}/server.crt"
+    local pin
+
+    if [[ -n "${HY2_CERT_PIN_SHA256:-}" ]]; then
+        printf '%s' "$HY2_CERT_PIN_SHA256"
+        return 0
+    fi
+
+    if [[ ! -f "$cert_file" ]]; then
+        HY2_SHARE_LINK_WARNING="Hysteria2 证书文件缺失，已跳过 HY2 分享链接生成。"
+        return 1
+    fi
+
+    pin=$(openssl x509 -in "$cert_file" -outform der 2>/dev/null \
+        | openssl dgst -sha256 -r 2>/dev/null \
+        | awk '{print tolower($1)}') || true
+
+    if [[ ! "$pin" =~ ^[0-9a-f]{64}$ ]]; then
+        HY2_SHARE_LINK_WARNING="无法计算 Hysteria2 证书固定指纹，已跳过 HY2 分享链接生成。请检查证书文件或 openssl。"
+        return 1
+    fi
+
+    HY2_CERT_PIN_SHA256="$pin"
+    printf '%s' "$HY2_CERT_PIN_SHA256"
+}
+
 hy2_share_link_available() {
     [[ -f "${CONFIG_DIR}/server.crt" && -n "${HY2_PORT:-}" ]] || return 1
     [[ -f "$CONFIG_FILE" ]] || return 1
-    grep -q '"type"[[:space:]]*:[[:space:]]*"hysteria2"' "$CONFIG_FILE"
+    grep -q '"type"[[:space:]]*:[[:space:]]*"hysteria2"' "$CONFIG_FILE" || return 1
+    get_hy2_cert_pin_sha256 >/dev/null
 }
 
 build_direct_share_links_for_ip() {
@@ -2776,7 +2758,7 @@ build_direct_share_links_for_ip() {
     append_reality_link "vless://${UUID}@${host}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
 
     if hy2_share_link_available; then
-        local hy2_remark hy2_pass_enc hy2_name
+        local hy2_remark hy2_pass_enc hy2_name hy2_pin_sha hy2_pin_enc
         if [[ -n "$family_label" ]]; then
             hy2_name="${NODE_NAME}-${family_label}-Hysteria2"
         else
@@ -2784,7 +2766,9 @@ build_direct_share_links_for_ip() {
         fi
         hy2_remark=$(urlencode "$hy2_name")
         hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
-        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?insecure=1&sni=${HY2_SNI}#${hy2_remark}"
+        hy2_pin_sha=$(get_hy2_cert_pin_sha256) || return 0
+        hy2_pin_enc=$(urlencode "${hy2_pin_sha}")
+        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?sni=${HY2_SNI}&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
     fi
 }
 
@@ -2840,6 +2824,8 @@ build_share_links() {
     GENERATED_SUBSCRIPTION_RAW=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
+    HY2_SHARE_LINK_WARNING=""
+    HY2_CERT_PIN_SHA256=""
 
     if ! refresh_public_ip_stack; then
         warn "无法自动获取公网 IP，直连链接未生成。可在修改配置中设置直连公网 IPv4 覆盖。"
@@ -3024,6 +3010,10 @@ generate_and_show_links() {
     if [[ -n "${GENERATED_HY2_LINKS}" ]]; then
         echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
         echo -e "${YELLOW}${GENERATED_HY2_LINKS}${NC}"
+        echo -e "  ${DIM}提示: 当前 Hysteria2 链接已使用证书固定指纹 pinSHA256，无需再开启跳过证书验证。${NC}"
+        echo ""
+    elif [[ -n "${HY2_SHARE_LINK_WARNING:-}" ]]; then
+        echo -e "${YELLOW}  ${HY2_SHARE_LINK_WARNING}${NC}"
         echo ""
     elif [[ "${IP_STACK_MODE:-}" == "unknown" ]]; then
         echo -e "${YELLOW}  未生成 Reality/Hysteria2 直连链接：未获取公网 IPv4。${NC}"
