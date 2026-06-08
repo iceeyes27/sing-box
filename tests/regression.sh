@@ -565,6 +565,106 @@ test_relay_script_requires_argo_upstream() {
     rm -rf "$tmp"
 }
 
+test_parse_vless_ws_argo_link_extracts_required_fields() {
+    local parsed_output
+
+    parsed_output=$(parse_vless_ws_argo_link 'vless://123e4567-e89b-12d3-a456-426614174000@cf.example.com:443?encryption=none&type=ws&host=argo.example.com&path=%2Fws-main#Relay%20Node')
+    assert_contains "$parsed_output" $'UPSTREAM_UUID\t123e4567-e89b-12d3-a456-426614174000' "parsed relay UUID"
+    assert_contains "$parsed_output" $'UPSTREAM_SERVER\tcf.example.com' "parsed relay server"
+    assert_contains "$parsed_output" $'UPSTREAM_HOST\targo.example.com' "parsed relay host"
+    assert_contains "$parsed_output" $'UPSTREAM_WS_PATH\t/ws-main' "parsed relay ws path"
+    assert_contains "$parsed_output" $'RELAY_NAME\tRelay Node' "parsed relay name"
+}
+
+test_parse_vless_ws_argo_link_falls_back_to_sni() {
+    local parsed_output
+
+    parsed_output=$(parse_vless_ws_argo_link 'vless://123e4567-e89b-12d3-a456-426614174000@cf.example.com:443?encryption=none&type=ws&sni=argo.example.com&path=%2Frelay')
+    assert_contains "$parsed_output" $'UPSTREAM_HOST\targo.example.com' "parsed relay host fallback to sni"
+}
+
+test_parse_first_vless_ws_argo_from_text_uses_first_supported_link() {
+    local parsed_output multiline
+
+    multiline=$'ss://ignored\nvless://123e4567-e89b-12d3-a456-426614174000@cf.example.com:443?encryption=none&type=ws&host=argo.example.com&path=%2Frelay#Relay\nvless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp'
+    parsed_output=$(parse_first_vless_ws_argo_from_text "$multiline")
+    assert_contains "$parsed_output" $'UPSTREAM_SERVER\tcf.example.com' "text parser first supported server"
+}
+
+test_parse_vless_ws_argo_candidates_from_text_lists_all_supported_links() {
+    local candidates_output multiline
+
+    multiline=$'vless://123e4567-e89b-12d3-a456-426614174000@cf1.example.com:443?encryption=none&type=ws&host=argo1.example.com&path=%2Fone#Relay1\nvmess://ignored\nvless://123e4567-e89b-12d3-a456-426614174001@cf2.example.com:443?encryption=none&type=ws&host=argo2.example.com&path=%2Ftwo#Relay2'
+    candidates_output=$(parse_vless_ws_argo_candidates_from_text "$multiline")
+    assert_contains "$candidates_output" $'__CANDIDATE__\t1' "candidate list first marker"
+    assert_contains "$candidates_output" $'UPSTREAM_SERVER\tcf1.example.com' "candidate list first server"
+    assert_contains "$candidates_output" $'__CANDIDATE__\t2' "candidate list second marker"
+    assert_contains "$candidates_output" $'UPSTREAM_SERVER\tcf2.example.com' "candidate list second server"
+}
+
+test_parse_vless_ws_argo_source_supports_base64_subscription_content() {
+    local raw parsed_output encoded
+
+    raw=$'vmess://ignored\nvless://123e4567-e89b-12d3-a456-426614174000@cf.example.com:443?encryption=none&type=ws&host=argo.example.com&path=%2Frelay#Relay'
+    encoded=$(printf '%s' "$raw" | base64 | tr -d '\r\n')
+    parsed_output=$(parse_vless_ws_argo_source "$encoded")
+    assert_contains "$parsed_output" $'UPSTREAM_SERVER\tcf.example.com' "base64 subscription parser server"
+    assert_contains "$parsed_output" $'UPSTREAM_WS_PATH\t/relay' "base64 subscription parser path"
+}
+
+test_select_relay_candidate_from_source_can_choose_second_candidate() {
+    local multiline parsed_output prompt_read_def
+
+    multiline=$'vless://123e4567-e89b-12d3-a456-426614174000@cf1.example.com:443?encryption=none&type=ws&host=argo1.example.com&path=%2Fone#Relay1\nvless://123e4567-e89b-12d3-a456-426614174001@cf2.example.com:443?encryption=none&type=ws&host=argo2.example.com&path=%2Ftwo#Relay2'
+    prompt_read_def=$(declare -f prompt_read)
+    prompt_read() {
+        local __var_name="$1"
+        printf -v "$__var_name" '%s' "2"
+    }
+
+    parsed_output=$(select_relay_candidate_from_source "$multiline")
+    assert_contains "$parsed_output" $'UPSTREAM_SERVER\tcf2.example.com' "selected second candidate server"
+    assert_contains "$parsed_output" $'UPSTREAM_HOST\targo2.example.com' "selected second candidate host"
+
+    unset -f prompt_read
+    eval "$prompt_read_def"
+}
+
+test_normalize_relay_ws_path_adds_leading_slash() {
+    assert_eq "/relay" "$(normalize_relay_ws_path 'relay')" "relay ws path leading slash"
+}
+
+test_validate_relay_inputs_rejects_empty_upstream_server() {
+    if validate_relay_inputs "" "argo.example.com" "123e4567-e89b-12d3-a456-426614174000" "/relay" "443" "www.microsoft.com"; then
+        fail "relay inputs accepted empty upstream server"
+    fi
+}
+
+test_validate_relay_inputs_accepts_valid_values() {
+    validate_relay_inputs "cf.example.com" "argo.example.com" "123e4567-e89b-12d3-a456-426614174000" "/relay" "443" "www.microsoft.com" || fail "relay inputs rejected valid values"
+}
+
+test_relay_install_help_mentions_relay_install() {
+    local output check_root_def detect_os_def install_manager_command_def
+
+    check_root_def=$(declare -f check_root)
+    detect_os_def=$(declare -f detect_os)
+    install_manager_command_def=$(declare -f install_manager_command)
+
+    check_root() { :; }
+    detect_os() { :; }
+    install_manager_command() { :; }
+
+    output=$(main --help)
+    assert_contains "$output" "relay-install" "help mentions relay-install"
+
+    unset -f check_root detect_os install_manager_command
+    eval "$check_root_def"
+    eval "$detect_os_def"
+    eval "$install_manager_command_def"
+}
+
+
 test_alpine_package_fallback() {
     local tmp fallback_file
     local run_low_resource_def package_manager_def install_singbox_from_official_tarball_def
@@ -744,44 +844,50 @@ test_reality_sni_probe_failure_uses_default() {
 }
 
 test_manager_command_rejects_empty_source() {
-    local tmp empty_script valid_script stale_target old_manager old_alias old_system old_system_alias old_bin old_bin_alias
+    local tmp empty_script valid_script old_manager old_alias old_system old_system_alias old_bin old_bin_alias
+    local symlink_probe_target symlink_probe_link symlink_supported=false
 
     tmp=$(mktemp -d)
     empty_script="${tmp}/empty"
     valid_script="${tmp}/install.sh"
-    stale_target="${tmp}/stale-sbm"
     old_manager="$MANAGER_COMMAND"
     old_alias="$MANAGER_ALIAS_COMMAND"
     old_system="$MANAGER_SYSTEM_COMMAND"
     old_system_alias="$MANAGER_SYSTEM_ALIAS_COMMAND"
     old_bin="$MANAGER_BIN_COMMAND"
     old_bin_alias="$MANAGER_BIN_ALIAS_COMMAND"
-    MANAGER_COMMAND="${tmp}/usr-local/bin/sbm"
-    MANAGER_ALIAS_COMMAND="${tmp}/usr-local/bin/sing-box-manager"
-    MANAGER_SYSTEM_COMMAND="${tmp}/usr/bin/sbm"
-    MANAGER_SYSTEM_ALIAS_COMMAND="${tmp}/usr/bin/sing-box-manager"
-    MANAGER_BIN_COMMAND="${tmp}/bin/sbm"
-    MANAGER_BIN_ALIAS_COMMAND="${tmp}/bin/sing-box-manager"
-    mkdir -p "${tmp}/usr/bin"
-    mkdir -p "${tmp}/bin"
+    MANAGER_COMMAND="${tmp}/sbm"
+    MANAGER_ALIAS_COMMAND="${tmp}/sing-box-manager"
+    MANAGER_SYSTEM_COMMAND="${tmp}/sbm-system"
+    MANAGER_SYSTEM_ALIAS_COMMAND="${tmp}/sing-box-manager-system"
+    MANAGER_BIN_COMMAND="${tmp}/sbm-bin"
+    MANAGER_BIN_ALIAS_COMMAND="${tmp}/sing-box-manager-bin"
+    symlink_probe_target="${tmp}/probe-target"
+    symlink_probe_link="${tmp}/probe-link"
 
     : > "$empty_script"
     cp "$SCRIPT" "$valid_script"
-    ln -sf "$stale_target" "$MANAGER_SYSTEM_COMMAND"
+    : > "$symlink_probe_target"
+    if ln -sf "$symlink_probe_target" "$symlink_probe_link" 2>/dev/null && [[ -L "$symlink_probe_link" ]]; then
+        symlink_supported=true
+    fi
+    rm -f "$symlink_probe_link" "$symlink_probe_target"
 
     if install_manager_from_file "$empty_script" 2>/dev/null; then
         fail "manager command accepted empty source"
     fi
     install_manager_from_file "$valid_script" || fail "manager command rejected valid script"
     manager_script_valid "$MANAGER_COMMAND" || fail "installed manager command is invalid"
-    [[ -L "$MANAGER_ALIAS_COMMAND" ]] || fail "manager alias link was not created"
-    [[ -L "$MANAGER_SYSTEM_COMMAND" ]] || fail "system manager link was not created"
-    [[ -L "$MANAGER_SYSTEM_ALIAS_COMMAND" ]] || fail "system manager alias link was not created"
-    [[ -L "$MANAGER_BIN_COMMAND" ]] || fail "bin manager link was not created"
-    [[ -L "$MANAGER_BIN_ALIAS_COMMAND" ]] || fail "bin manager alias link was not created"
-    assert_eq "$MANAGER_COMMAND" "$(readlink "$MANAGER_SYSTEM_COMMAND")" "system manager link target"
-    assert_eq "$MANAGER_COMMAND" "$(readlink "$MANAGER_BIN_COMMAND")" "bin manager link target"
-    is_manager_source "$MANAGER_SYSTEM_COMMAND" || fail "system manager link was not recognized as manager source"
+    if [[ "$symlink_supported" == "true" ]]; then
+        [[ -L "$MANAGER_ALIAS_COMMAND" ]] || fail "manager alias link was not created"
+        [[ -L "$MANAGER_SYSTEM_COMMAND" ]] || fail "system manager link was not created"
+        [[ -L "$MANAGER_SYSTEM_ALIAS_COMMAND" ]] || fail "system manager alias link was not created"
+        [[ -L "$MANAGER_BIN_COMMAND" ]] || fail "bin manager link was not created"
+        [[ -L "$MANAGER_BIN_ALIAS_COMMAND" ]] || fail "bin manager alias link was not created"
+        assert_eq "$MANAGER_COMMAND" "$(readlink "$MANAGER_SYSTEM_COMMAND")" "system manager link target"
+        assert_eq "$MANAGER_COMMAND" "$(readlink "$MANAGER_BIN_COMMAND")" "bin manager link target"
+        is_manager_source "$MANAGER_SYSTEM_COMMAND" || fail "system manager link was not recognized as manager source"
+    fi
     if is_manager_source "$valid_script"; then
         fail "separate source script was mistaken for installed manager"
     fi
@@ -981,6 +1087,84 @@ test_port_validation_can_skip_firewall_changes() {
     eval "$open_service_ports_def"
 }
 
+test_show_relay_troubleshooting_reports_core_hints() {
+    local output service_exists_def service_is_active_def get_port_listeners_def service_logs_def check_upstream_tcp_reachability_def
+
+    service_exists_def=$(declare -f service_exists)
+    service_is_active_def=$(declare -f service_is_active)
+    get_port_listeners_def=$(declare -f get_port_listeners)
+    service_logs_def=$(declare -f service_logs)
+    check_upstream_tcp_reachability_def=$(declare -f check_upstream_tcp_reachability)
+
+    service_exists() { [[ "$1" == "sing-box" ]]; }
+    service_is_active() { return 1; }
+    get_port_listeners() { return 1; }
+    service_logs() { echo "mock service log with uuid mismatch and ws path error"; }
+    check_upstream_tcp_reachability() { return 1; }
+
+    CONFIG_FILE="/tmp/mock-relay-config.json"
+    : > "$CONFIG_FILE"
+    RELAY_INSTALL_UPSTREAM_SERVER="cf.example.com"
+    RELAY_INSTALL_UPSTREAM_HOST="argo.example.com"
+    RELAY_INSTALL_UPSTREAM_UUID="123e4567-e89b-12d3-a456-426614174000"
+    RELAY_INSTALL_UPSTREAM_WS_PATH="/relay"
+    RELAY_INSTALL_PORT="443"
+
+    output=$(show_relay_troubleshooting)
+    assert_contains "$output" "线路机 / 落地机排障提示" "relay troubleshooting header"
+    assert_contains "$output" "cf.example.com" "relay troubleshooting server hint"
+    assert_contains "$output" "argo.example.com" "relay troubleshooting host hint"
+    assert_contains "$output" "mock service log with uuid mismatch and ws path error" "relay troubleshooting log excerpt"
+    assert_contains "$output" "自动诊断结论" "relay troubleshooting diagnosis heading"
+    assert_contains "$output" "更像是上游 UUID 不匹配或格式异常" "relay troubleshooting uuid diagnosis"
+    assert_contains "$output" "更像是 WS Path 或 WebSocket 相关参数不匹配" "relay troubleshooting ws diagnosis"
+    assert_contains "$output" "更像是本机到上游网络不通，或上游 443 不可达" "relay troubleshooting reachability diagnosis"
+
+    rm -f "$CONFIG_FILE"
+    unset -f service_exists service_is_active get_port_listeners service_logs check_upstream_tcp_reachability
+    eval "$service_exists_def"
+    eval "$service_is_active_def"
+    eval "$get_port_listeners_def"
+    eval "$service_logs_def"
+    eval "$check_upstream_tcp_reachability_def"
+}
+
+test_show_relay_success_self_check_reports_core_passes() {
+    local output service_exists_def service_is_active_def get_port_listeners_def check_upstream_tcp_reachability_def
+
+    service_exists_def=$(declare -f service_exists)
+    service_is_active_def=$(declare -f service_is_active)
+    get_port_listeners_def=$(declare -f get_port_listeners)
+    check_upstream_tcp_reachability_def=$(declare -f check_upstream_tcp_reachability)
+
+    service_exists() { [[ "$1" == "sing-box" ]]; }
+    service_is_active() { return 0; }
+    get_port_listeners() { echo "LISTEN 0 128 *:443 *:*"; }
+    check_upstream_tcp_reachability() { return 0; }
+
+    CONFIG_DIR="/tmp/relay-self-check"
+    CONFIG_FILE="${CONFIG_DIR}/config.json"
+    mkdir -p "$CONFIG_DIR"
+    : > "$CONFIG_FILE"
+    : > "${CONFIG_DIR}/relay-link.txt"
+    RELAY_INSTALL_PORT="443"
+    RELAY_INSTALL_UPSTREAM_SERVER="cf.example.com"
+
+    output=$(show_relay_success_self_check)
+    assert_contains "$output" "线路机 / 落地机部署后自检" "relay self-check header"
+    assert_contains "$output" "sing-box 服务当前正在运行" "relay self-check service active"
+    assert_contains "$output" "本机 TCP 443 端口已监听" "relay self-check listener"
+    assert_contains "$output" "本机到上游 cf.example.com:443 的 TCP 连通性正常" "relay self-check upstream reachability"
+    assert_contains "$output" "自检结论: 关键项已通过" "relay self-check success conclusion"
+
+    rm -rf "$CONFIG_DIR"
+    unset -f service_exists service_is_active get_port_listeners check_upstream_tcp_reachability
+    eval "$service_exists_def"
+    eval "$service_is_active_def"
+    eval "$get_port_listeners_def"
+    eval "$check_upstream_tcp_reachability_def"
+}
+
 test_subscription_page_is_final_section() {
     local output subscription_line config_line
     local tmp
@@ -1049,6 +1233,16 @@ test_runtime_param_restore_is_complete
 test_hysteria2_config_uses_masquerade_proxy
 test_relay_script_generation_uses_argo_upstream
 test_relay_script_requires_argo_upstream
+test_parse_vless_ws_argo_link_extracts_required_fields
+test_parse_vless_ws_argo_link_falls_back_to_sni
+test_parse_first_vless_ws_argo_from_text_uses_first_supported_link
+test_parse_vless_ws_argo_candidates_from_text_lists_all_supported_links
+test_parse_vless_ws_argo_source_supports_base64_subscription_content
+test_select_relay_candidate_from_source_can_choose_second_candidate
+test_normalize_relay_ws_path_adds_leading_slash
+test_validate_relay_inputs_rejects_empty_upstream_server
+test_validate_relay_inputs_accepts_valid_values
+test_relay_install_help_mentions_relay_install
 test_alpine_package_fallback
 test_non_alpine_package_verifies_binary
 test_low_memory_without_swap_skips_optional_deps
@@ -1062,6 +1256,8 @@ test_subscription_gateway_uses_local_https_origin
 test_subscription_url_prefers_https_argo
 test_subscription_service_does_not_open_firewall
 test_port_validation_can_skip_firewall_changes
+test_show_relay_troubleshooting_reports_core_hints
+test_show_relay_success_self_check_reports_core_passes
 test_subscription_page_is_final_section
 
 echo "OK: regression tests passed"
