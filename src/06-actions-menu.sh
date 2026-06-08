@@ -134,14 +134,16 @@ do_install() {
     echo ""
     echo -e "${CYAN}${BOLD}── 部署目标 ──${NC}"
     echo -e "  1) 主节点完整部署 ${GREEN}推荐${NC}"
-    echo -e "  2) 生成线路机部署脚本"
+    echo -e "  2) 只搭建线路机 / 落地机"
+    echo -e "  3) 生成线路机部署脚本"
     echo -e "  0) 返回"
     prompt_read target "  请选择 [1]: "
     target=${target:-1}
 
     case "$target" in
         1) do_primary_install ;;
-        2) do_generate_relay_script ;;
+        2) do_relay_install ;;
+        3) do_generate_relay_script ;;
         0) return ;;
         *) warn "无效选项"; sleep 0.5 ;;
     esac
@@ -756,8 +758,9 @@ main() {
     fi
 
     case "${1:-}" in
-        install)     do_primary_install ;;
-        relay)       do_generate_relay_script ;;
+        install)       do_primary_install ;;
+        relay-install) do_relay_install ;;
+        relay)         do_generate_relay_script ;;
         links|sub)   load_params && { ensure_time_sync || true; refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service || warn "订阅服务未成功启动"; show_subscription_url; } || warn "未安装" ;;
         start)       do_start ;;
         stop)        do_stop ;;
@@ -768,16 +771,17 @@ main() {
             echo "用法: bash $0 [命令]"
             echo ""
             echo "命令:"
-            echo "  (无参数)   交互式管理菜单"
-            echo "  install    直接安装"
-            echo "  relay      生成线路机部署脚本"
-            echo "  links      显示分享链接与订阅地址"
-            echo "  sub        同 links"
-            echo "  start      启动服务"
-            echo "  stop       停止服务"
-            echo "  restart    重启服务"
-            echo "  status     查看状态"
-            echo "  uninstall  卸载"
+            echo "  (无参数)        交互式管理菜单"
+            echo "  install         直接安装主节点"
+            echo "  relay-install   直接部署当前机器为线路机 / 落地机"
+            echo "  relay           生成线路机部署脚本"
+            echo "  links           显示分享链接与订阅地址"
+            echo "  sub             同 links"
+            echo "  start           启动服务"
+            echo "  stop            停止服务"
+            echo "  restart         重启服务"
+            echo "  status          查看状态"
+            echo "  uninstall       卸载"
             exit 0
             ;;
         *)  main_menu ;;

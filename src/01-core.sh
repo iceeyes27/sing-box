@@ -100,6 +100,36 @@ prompt_read() {
     return 1
 }
 
+prompt_multiline() {
+    local __var_name="$1"
+    local __prompt="$2"
+    local __end_hint="${3:-  输入空行结束}"
+    local __line
+    local __content=""
+
+    echo -e "$__prompt"
+    echo -e "${DIM}${__end_hint}${NC}"
+
+    while true; do
+        if [[ -t 0 ]]; then
+            IFS= read -r __line
+        elif [[ -r /dev/tty ]]; then
+            IFS= read -r __line </dev/tty
+        else
+            break
+        fi
+
+        [[ -n "$__line" ]] || break
+        if [[ -z "$__content" ]]; then
+            __content="$__line"
+        else
+            __content+=$'\n'"$__line"
+        fi
+    done
+
+    printf -v "$__var_name" '%s' "$__content"
+}
+
 # ─── 权限 / 系统检测 ─────────────────────────────────────────
 check_root() {
     [[ $EUID -eq 0 ]] || error "请使用 root 权限运行: sudo bash $0"

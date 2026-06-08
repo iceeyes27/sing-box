@@ -454,6 +454,11 @@ start_time_sync_service() {
     done
 }
 
+step_system_time_with_ntp() {
+    command -v ntpd &>/dev/null || return 1
+    ntpd -d -n -q -p time.cloudflare.com >/dev/null 2>&1
+}
+
 install_time_sync_service() {
     local existing_svc
 
@@ -496,6 +501,9 @@ attempt_time_sync() {
     sleep 2
     if command -v chronyc &>/dev/null; then
         chronyc -a makestep >/dev/null 2>&1 || true
+        sleep 2
+    elif command -v ntpd &>/dev/null; then
+        step_system_time_with_ntp || true
         sleep 2
     fi
 }
