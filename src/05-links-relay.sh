@@ -325,7 +325,9 @@ build_argo_link_for_domain() {
         argo_name="${NODE_NAME}-Argo"
     fi
     argo_remark=$(urlencode "$argo_name")
-    append_argo_link "vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
+    # alpn=http/1.1 固定 ALPN，避免客户端与 Cloudflare 边缘协商到 HTTP/2 导致 WS 升级不稳定；
+    # path 追加 ?ed=2048 启用 WebSocket 0-RTT 早期数据，减少一次握手往返，提升弱网下的连通稳定性。
+    append_argo_link "vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}%3Fed%3D2048&alpn=http%2F1.1&fp=chrome#${argo_remark}"
 }
 
 # ─── 链接与订阅生成 ──────────────────────────────────────────

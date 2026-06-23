@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.28"
+SCRIPT_VERSION="2.6.29"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -2098,7 +2098,9 @@ write_singbox_config() {
             ],
             "transport": {
                 "type": "ws",
-                "path": ${json_ws_path}
+                "path": ${json_ws_path},
+                "max_early_data": 2048,
+                "early_data_header_name": "Sec-WebSocket-Protocol"
             }
         },
         {
@@ -2851,7 +2853,9 @@ build_argo_link_for_domain() {
         argo_name="${NODE_NAME}-Argo"
     fi
     argo_remark=$(urlencode "$argo_name")
-    append_argo_link "vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
+    # alpn=http/1.1 固定 ALPN，避免客户端与 Cloudflare 边缘协商到 HTTP/2 导致 WS 升级不稳定；
+    # path 追加 ?ed=2048 启用 WebSocket 0-RTT 早期数据，减少一次握手往返，提升弱网下的连通稳定性。
+    append_argo_link "vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}%3Fed%3D2048&alpn=http%2F1.1&fp=chrome#${argo_remark}"
 }
 
 # ─── 链接与订阅生成 ──────────────────────────────────────────
@@ -4718,6 +4722,102 @@ do_restart() {
     press_enter
 }
 
+# ─── 重新优选 Reality 伪装域名 ───────────────────────────────
+do_reoptimize_reality_sni() {
+    if ! load_params; then
+        warn "未安装，无法重新优选 Reality 伪装域名"
+        return 1
+    fi
+
+    local old_sni="${REALITY_SNI:-}"
+    info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选..."
+
+    # 清空后触发实测筛选；select_reality_sni 会按兼容性 + 握手延迟重新挑选
+    REALITY_SNI=""
+    select_reality_sni
+
+    if [[ -z "${REALITY_SNI:-}" ]]; then
+        REALITY_SNI="$old_sni"
+        warn "未能优选到可用域名，已保留原伪装域名: ${old_sni:-未设置}"
+        return 1
+    fi
+
+    if [[ "$REALITY_SNI" == "$old_sni" ]]; then
+        success "实测结果仍为最优域名: ${REALITY_SNI}，无需变更，跳过重启"
+        return 0
+    fi
+
+    info "新伪装域名: ${REALITY_SNI}，正在写入配置并重启 sing-box..."
+    generate_tls_cert
+    write_singbox_config
+    write_singbox_service
+    save_params
+    ensure_time_sync || true
+
+    if ! service_restart sing-box; then
+        warn "sing-box 重启失败，正在回滚到原伪装域名: ${old_sni}"
+        REALITY_SNI="$old_sni"
+        write_singbox_config
+        save_params
+        service_restart sing-box 2>/dev/null || true
+        return 1
+    fi
+
+    sleep 2
+    if ! service_is_active sing-box; then
+        warn "sing-box 未成功启动，正在回滚到原伪装域名: ${old_sni}"
+        REALITY_SNI="$old_sni"
+        write_singbox_config
+        save_params
+        service_restart sing-box 2>/dev/null || true
+        return 1
+    fi
+
+    success "Reality 伪装域名已更新为: ${REALITY_SNI}"
+    refresh_argo_domain_if_needed
+    generate_and_show_links
+    ensure_subscription_service || warn "订阅服务启动失败"
+    show_subscription_url
+    return 0
+}
+
+# ─── 应用当前版本配置 (一键同步) ─────────────────────────────
+# 用当前已保存的凭证 (UUID / 端口 / 域名 / 密钥均不变) 按新版本模板
+# 重写服务端配置并重启，再按新格式重新生成链接。适用于升级脚本后
+# 让服务端新特性 (如 WS 早期数据) 与新链接格式同步生效。
+do_apply_latest() {
+    if ! load_params; then
+        warn "未安装，无法应用配置更新"
+        return 1
+    fi
+
+    info "正在按 v${SCRIPT_VERSION} 模板重写配置 (UUID / 端口 / 域名 / 密钥保持不变)..."
+    ensure_time_sync || true
+    generate_tls_cert
+    write_singbox_config
+    write_singbox_service
+    save_params
+
+    info "重启 sing-box 以使新配置生效..."
+    if ! service_restart sing-box; then
+        warn "sing-box 重启失败，请执行 sbm status 或查看日志排查"
+        return 1
+    fi
+    sleep 2
+    if ! service_is_active sing-box; then
+        warn "sing-box 未成功启动，请查看日志排查"
+        return 1
+    fi
+
+    success "配置已按 v${SCRIPT_VERSION} 同步并重启"
+    refresh_argo_domain_if_needed
+    generate_and_show_links
+    ensure_subscription_service || warn "订阅服务启动失败"
+    show_subscription_url
+    info "请在客户端重新导入上方订阅 / 链接以获得最新格式 (alpn + 早期数据)。"
+    return 0
+}
+
 # ─── 查看状态 ────────────────────────────────────────────────
 do_status() {
     echo ""
@@ -4803,7 +4903,7 @@ do_upgrade() {
                 success "脚本已更新: v${SCRIPT_VERSION} → v${new_ver}"
                 echo ""
                 info "当前配置和服务未受影响，不会重写配置或重启服务。"
-                info "如需启用 Hysteria2 等新功能，请使用 [1) 重新安装] 或 [2) 修改配置]。"
+                info "如需让服务端新特性生效 (如 WS 早期数据)，升级后执行: sbm apply"
                 # 仅刷新链接显示 (不重写配置、不重启)
                 if load_params; then
                     refresh_argo_domain_if_needed
@@ -4866,11 +4966,9 @@ do_uninstall() {
 # ─── Banner ──────────────────────────────────────────────────
 show_banner() {
     clear
-    echo -e "${CYAN}${BOLD}"
-    echo "  ╔══════════════════════════════════════════════╗"
-    echo "  ║     sing-box 管理面板  v${SCRIPT_VERSION}              ║"
-    echo "  ╚══════════════════════════════════════════════╝"
-    echo -e "${NC}"
+    echo ""
+    echo -e "  ${CYAN}${BOLD}sing-box 管理面板${NC}  ${DIM}v${SCRIPT_VERSION}${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
 
     # 状态摘要
     local sb_status ar_status
@@ -4892,23 +4990,17 @@ show_banner() {
 
 # ─── 主菜单 ──────────────────────────────────────────────────
 show_menu() {
-    local installed=false
-    [[ -f "$CONFIG_FILE" ]] && installed=true
-
-    echo -e "  ${BOLD} 1)${NC} 部署目标选择"
-    echo -e "  ${BOLD} 2)${NC} 修改配置 ${DIM}(端口/域名/UUID)${NC}"
-    echo -e "  ${BOLD} 3)${NC} 查看节点链接"
-    separator
-    echo -e "  ${BOLD} 4)${NC} 启动服务"
-    echo -e "  ${BOLD} 5)${NC} 停止服务"
-    echo -e "  ${BOLD} 6)${NC} 重启服务"
-    echo -e "  ${BOLD} 7)${NC} 查看运行状态"
-    echo -e "  ${BOLD} 8)${NC} 查看日志"
-    echo -e "  ${BOLD} 9)${NC} 开机自启设置"
-    separator
-    echo -e "  ${BOLD}10)${NC} 更新 (sing-box/cloudflared/脚本)"
-    echo -e "  ${BOLD}11)${NC} 卸载"
-    echo -e "  ${BOLD} 0)${NC} 退出"
+    echo -e "  ${CYAN}部署 & 配置${NC}"
+    echo -e "   ${BOLD}1)${NC} 部署 / 安装节点"
+    echo -e "   ${BOLD}2)${NC} 修改配置 ${DIM}(端口 / 域名 / UUID / SNI)${NC}"
+    echo -e "   ${BOLD}3)${NC} 节点链接与订阅"
+    echo ""
+    echo -e "  ${CYAN}服务管理${NC}"
+    echo -e "   ${BOLD}4)${NC} 启动     ${BOLD}5)${NC} 停止     ${BOLD}6)${NC} 重启"
+    echo -e "   ${BOLD}7)${NC} 状态     ${BOLD}8)${NC} 日志     ${BOLD}9)${NC} 自启"
+    echo ""
+    echo -e "  ${CYAN}系统维护${NC}"
+    echo -e "  ${BOLD}10)${NC} 更新     ${BOLD}11)${NC} 卸载     ${BOLD}0)${NC} 退出"
     echo ""
 }
 
@@ -4966,6 +5058,8 @@ main() {
         start)       do_start ;;
         stop)        do_stop ;;
         restart)     do_restart ;;
+        resni|reality-sni) do_reoptimize_reality_sni || warn "Reality 伪装域名优选未完成" ;;
+        apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
         status)      do_status ;;
         uninstall)   do_uninstall ;;
         --help|-h)
@@ -4981,6 +5075,8 @@ main() {
             echo "  start           启动服务"
             echo "  stop            停止服务"
             echo "  restart         重启服务"
+            echo "  resni           重新优选 Reality 伪装域名(SNI)并重启生效"
+            echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
             echo "  status          查看状态"
             echo "  uninstall       卸载"
             exit 0

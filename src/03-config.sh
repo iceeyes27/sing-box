@@ -572,7 +572,9 @@ write_singbox_config() {
             ],
             "transport": {
                 "type": "ws",
-                "path": ${json_ws_path}
+                "path": ${json_ws_path},
+                "max_early_data": 2048,
+                "early_data_header_name": "Sec-WebSocket-Protocol"
             }
         },
         {
