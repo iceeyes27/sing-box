@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.29"
+SCRIPT_VERSION="2.6.30"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -359,7 +359,7 @@ collect_public_ipv4_candidates() {
     fi
 
     [[ -n "$PUBLIC_IPV4_LIST" ]] || return 1
-    PUBLIC_IPV4=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | head -n 1)
+    PUBLIC_IPV4=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | head -n 1) || true
     return 0
 }
 

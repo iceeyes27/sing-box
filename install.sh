@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.29"
+SCRIPT_VERSION="2.6.30"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -404,7 +404,7 @@ collect_public_ipv4_candidates() {
     fi
 
     [[ -n "$PUBLIC_IPV4_LIST" ]] || return 1
-    PUBLIC_IPV4=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | head -n 1)
+    PUBLIC_IPV4=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | head -n 1) || true
     return 0
 }
 
@@ -2576,18 +2576,30 @@ select_reality_sni() {
         return 0
     fi
 
+    # 探测过程允许个别命令失败：在低内存/无 swap 机器上，后台任务 fork 失败、
+    # wait 返回非零或管道 SIGPIPE 都会在 set -euo pipefail 下误终止整个脚本。
+    # 本函数已有「全部失败回退到列表首项」的兜底，这里临时关闭 errexit 即可。
+    local errexit_was_set=0
+    [[ $- == *e* ]] && errexit_was_set=1
+    set +e
+
     # Reality 目标站优先保证兼容性和稳定性，其次才是连接时间。
+    # 并发数为 1 时直接前台串行探测，避免在受限机器上 fork 后台任务。
     local active_jobs=0
     for idx in "${!REALITY_SNI_LIST[@]}"; do
         local sni="${REALITY_SNI_LIST[$idx]}"
-        probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" &
-        active_jobs=$((active_jobs + 1))
-        if (( active_jobs >= probe_parallelism )); then
-            wait || true
-            active_jobs=0
+        if (( probe_parallelism <= 1 )); then
+            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt"
+        else
+            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" &
+            active_jobs=$((active_jobs + 1))
+            if (( active_jobs >= probe_parallelism )); then
+                wait
+                active_jobs=0
+            fi
         fi
     done
-    wait || true
+    wait 2>/dev/null
 
     local best_sni="" best_time=9999
     if [[ -f "${tmp_dir}/results.txt" ]]; then
@@ -2596,6 +2608,8 @@ select_reality_sni() {
         best_time=$(echo "$best" | awk '{print $2}')
         best_sni=$(echo "$best" | awk '{print $3}')
     fi
+
+    (( errexit_was_set )) && set -e
 
     rm -rf "$tmp_dir"
 
@@ -3639,7 +3653,7 @@ install_singbox_from_musl_tarball() {
 
     curl -fL "$url" -o "$archive"
     tar -xzf "$archive" -C "$tmp"
-    bin_path=$(find "$tmp" -type f -name sing-box | head -n 1)
+    bin_path=$(find "$tmp" -type f -name sing-box | head -n 1) || true
     [[ -n "$bin_path" ]] || err "未找到 sing-box 二进制"
     cp "$bin_path" /usr/local/bin/sing-box
     chmod +x /usr/local/bin/sing-box
