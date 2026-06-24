@@ -3,6 +3,10 @@ SCRIPT_VERSION="2.6.33"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
+# 用户侧覆盖的 CF 优选域名列表(由 `sbm cfopt` 刷新生成；删除即恢复内置默认)
+CF_DOMAINS_FILE="${CONFIG_DIR}/cf_domains.txt"
+# BestCF 优选域名数据源(三网分流，侧重电信/移动)
+BESTCF_DOMAINS_URL="https://github.com/DustinWin/BestCF/releases/download/bestcf/bestcf-domain.txt"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 SUBSCRIPTION_FILE="${CONFIG_DIR}/subscription.txt"
 SUBSCRIPTION_ENV_FILE="${CONFIG_DIR}/sbm-subscription.env"
@@ -685,6 +689,7 @@ load_params() {
             SUBSCRIPTION_PORT=24630
             need_save=true
         fi
+        apply_cf_domains_override
         [[ "$need_save" == "true" ]] && save_params
         return 0
     fi
@@ -828,6 +833,21 @@ clear_argo_best_cf_cache() {
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
+}
+
+# 若存在用户侧覆盖文件(由 `sbm cfopt` 生成)，用其内容替换内置 CF_DOMAINS。
+apply_cf_domains_override() {
+    [[ -f "$CF_DOMAINS_FILE" ]] || return 0
+    local -a loaded=()
+    local line host
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        host="${line%%[[:space:]]*}"
+        host="${host%$'\r'}"
+        [[ -n "$host" && "$host" != \#* ]] || continue
+        loaded+=("$host")
+    done < "$CF_DOMAINS_FILE"
+    [[ ${#loaded[@]} -gt 0 ]] && CF_DOMAINS=("${loaded[@]}")
+    return 0
 }
 
 restore_runtime_params() {

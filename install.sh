@@ -48,6 +48,10 @@ SCRIPT_VERSION="2.6.33"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
+# 用户侧覆盖的 CF 优选域名列表(由 `sbm cfopt` 刷新生成；删除即恢复内置默认)
+CF_DOMAINS_FILE="${CONFIG_DIR}/cf_domains.txt"
+# BestCF 优选域名数据源(三网分流，侧重电信/移动)
+BESTCF_DOMAINS_URL="https://github.com/DustinWin/BestCF/releases/download/bestcf/bestcf-domain.txt"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 SUBSCRIPTION_FILE="${CONFIG_DIR}/subscription.txt"
 SUBSCRIPTION_ENV_FILE="${CONFIG_DIR}/sbm-subscription.env"
@@ -730,6 +734,7 @@ load_params() {
             SUBSCRIPTION_PORT=24630
             need_save=true
         fi
+        apply_cf_domains_override
         [[ "$need_save" == "true" ]] && save_params
         return 0
     fi
@@ -873,6 +878,21 @@ clear_argo_best_cf_cache() {
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
+}
+
+# 若存在用户侧覆盖文件(由 `sbm cfopt` 生成)，用其内容替换内置 CF_DOMAINS。
+apply_cf_domains_override() {
+    [[ -f "$CF_DOMAINS_FILE" ]] || return 0
+    local -a loaded=()
+    local line host
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        host="${line%%[[:space:]]*}"
+        host="${host%$'\r'}"
+        [[ -n "$host" && "$host" != \#* ]] || continue
+        loaded+=("$host")
+    done < "$CF_DOMAINS_FILE"
+    [[ ${#loaded[@]} -gt 0 ]] && CF_DOMAINS=("${loaded[@]}")
+    return 0
 }
 
 restore_runtime_params() {
@@ -4899,6 +4919,81 @@ do_apply_latest() {
     return 0
 }
 
+# ─── 刷新 CF 优选域名 ────────────────────────────────────────
+# 从 BestCF 拉取最新优选域名，过滤出三网分流型(侧重电信/移动)并校验为存活
+# 的 Cloudflare 边缘，写入用户覆盖文件，随后让 Argo 从新池重选并刷新链接。
+do_refresh_cf_domains() {
+    if ! load_params; then
+        warn "未安装，无法刷新优选域名"
+        return 1
+    fi
+
+    info "正在从 BestCF 拉取最新优选域名列表..."
+    local tmp
+    if ! tmp=$(mktemp); then
+        warn "创建临时文件失败"
+        return 1
+    fi
+    if ! curl -fsSL --max-time 20 "$BESTCF_DOMAINS_URL" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        warn "下载失败，请检查网络或稍后重试；已保留当前优选域名列表"
+        return 1
+    fi
+
+    # 仅保留三网分流优选型域名(cf./cdn./cfip./bestcf./youxuan 开头)，
+    # 过滤掉列表里仅 CF 托管的品牌域名(time.is / visa.cn / ubi.com 等)。
+    local -a candidates=()
+    local line host
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        host="${line%%[[:space:]]*}"
+        host="${host%$'\r'}"
+        host="${host,,}"
+        [[ -n "$host" && "$host" != \#* ]] || continue
+        [[ "$host" =~ (^|\.)(cf|cdn|cfip|bestcf|youxuan)[0-9a-z.-]*\. ]] || continue
+        candidates+=("$host")
+    done < "$tmp"
+    rm -f "$tmp"
+
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        warn "未从列表中解析到优选型域名，已保留当前列表"
+        return 1
+    fi
+
+    info "正在校验 ${#candidates[@]} 个候选是否为存活的 Cloudflare 边缘..."
+    local -a valid=()
+    local d srv
+    for d in "${candidates[@]}"; do
+        srv=$(curl -sI --max-time 4 "https://$d" 2>/dev/null | grep -i '^server:' | tr -d '\r' | awk '{print tolower($2)}')
+        [[ "$srv" == "cloudflare" ]] && valid+=("$d")
+    done
+
+    if [[ ${#valid[@]} -lt 3 ]]; then
+        warn "通过校验的优选域名不足(${#valid[@]} 个)，为避免可用性下降，已保留当前列表"
+        return 1
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+    {
+        echo "# CF 优选域名(来源 BestCF，由 sbm cfopt 自动刷新于 $(date '+%Y-%m-%d %H:%M:%S'))"
+        echo "# 删除本文件即可恢复脚本内置默认列表。"
+        printf '%s\n' "${valid[@]}"
+    } > "$CF_DOMAINS_FILE"
+    chmod 600 "$CF_DOMAINS_FILE" 2>/dev/null || true
+
+    apply_cf_domains_override
+    success "已刷新优选域名(${#valid[@]} 个): ${valid[*]}"
+
+    # 清掉已缓存的优选域名，让 Argo 从新池重新挑选并刷新链接
+    clear_argo_best_cf_cache
+    resolve_argo_best_cf_domain || true
+    save_params
+    generate_and_show_links
+    ensure_subscription_service || warn "订阅服务启动失败"
+    show_subscription_url
+    info "提示: 优选最终以电信网络实测为准；删除 ${CF_DOMAINS_FILE} 可恢复内置列表。"
+    return 0
+}
+
 # ─── 查看状态 ────────────────────────────────────────────────
 do_status() {
     echo ""
@@ -5141,6 +5236,7 @@ main() {
         restart)     do_restart ;;
         resni|reality-sni) do_reoptimize_reality_sni || warn "Reality 伪装域名优选未完成" ;;
         apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
+        cfopt|refresh-cf) do_refresh_cf_domains || warn "优选域名刷新未完成" ;;
         status)      do_status ;;
         uninstall)   do_uninstall ;;
         --help|-h)
@@ -5158,6 +5254,7 @@ main() {
             echo "  restart         重启服务"
             echo "  resni           重新优选 Reality 伪装域名(SNI)并重启生效"
             echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
+            echo "  cfopt           从 BestCF 刷新 CF 优选域名(电信/移动)并更新链接"
             echo "  status          查看状态"
             echo "  uninstall       卸载"
             exit 0
