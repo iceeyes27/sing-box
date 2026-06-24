@@ -100,13 +100,23 @@ REALITY_SNI_LIST=(
 )
 
 # ================== CF 优选域名列表 ==================
+# 这些是「三网分流」智能 DNS 优选域名:客户端解析时会按其所在运营商自动
+# 返回对应的最优 Cloudflare 边缘 IP(电信用户拿到电信最优 IP，移动拿到移动
+# 最优 IP)。因此优选发生在「客户端侧」,链接里对所有人是同一个域名。
+#
+# 选取侧重「电信」、其次「移动」(不针对联通),全部为三网分流优选域名,
+# 任意命中都对电信/移动有优化;来源 DustinWin/BestCF 优选域名聚合
+# (CMLiussss / VPS789 / CFYes / 微测网),已校验为存活的 Cloudflare 边缘。
+#
+# ⚠ 社区优选域名会随时间失效,建议定期对照下列来源更新,并最好用电信网络
+#   实测后再定:https://github.com/DustinWin/BestCF (release: bestcf-domain.txt)
 CF_DOMAINS=(
-    "cf.090227.xyz"
-    "cf.877774.xyz"
-    "cf.130519.xyz"
-    "cf.008500.xyz"
-    "store.ubi.com"
-    "saas.sin.fan"
+    "cf.090227.xyz"      # CMLiussss 三网分流，电信/移动口碑最佳
+    "cf.877774.xyz"      # 三网分流优选
+    "cf.008500.xyz"      # 三网分流优选
+    "bestcf.030101.xyz"  # BestCF 聚合（电信/移动）
+    "cdn.2020111.xyz"    # BestCF 聚合（电信/移动）
+    "cf.0sm.com"         # 三网分流优选
 )
 
 # ─── 颜色 ─────────────────────────────────────────────────────
