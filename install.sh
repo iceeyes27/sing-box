@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.34"
+SCRIPT_VERSION="2.6.35"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -84,28 +84,34 @@ LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
 LOW_MEMORY_SWAP_CREATED=false
 
 # Reality 伪装域名候选列表
-# Reality 更看重目标站点兼容性，不是单纯 HTTPS 连通或延迟最低即可。
-# 这里保留相对稳定、证书和 TLS 表现更保守的候选，避免自动选到兼容性差的站点。
-# Reality 伪装域名候选池。挑选标准:
-#   1) 在受审查地区「未被封锁」(否则伪装目标本身被墙，反而暴露);
-#   2) 稳定支持 TLS 1.3 + HTTP/2(Reality 转发所需，运行时还会再实测校验);
-#   3) 境外高信誉站点，封锁代价高，借用其 TLS 身份更可信;
-#   4) 避免国内可解析 / 国内 CDN 落地的站点(如 lenovo/asus)。
-# 运行时 select_reality_sni 会对每个域名实测 TLS1.3+h2 能力并按握手延迟择优，
-# 不合规的会被自动剔除，因此这里只需提供「方向正确」的候选。
+# Reality 客户端在「国内→VPS」这条连接上，线路里声称访问的就是这个 SNI。
+# 一旦该域名被 GFW 按 SNI 封锁 / 限速 / 偶发重置(即「半被墙」，如 amazon.com)，
+# 你的 Reality 隧道会一并继承同样的命运。挑选标准(第 1 条是硬性底线):
+#   1) 「国内一定能通」——GFW 不按 SNI 封锁/限速，国内可稳定握手;
+#   2) 稳定支持 TLS 1.3 + HTTP/2(Reality 转发所需);
+#   3) 境外高信誉大厂站点，封锁代价高，借用其 TLS 身份更可信。
+# 注意:select_reality_sni 的实测跑在「境外 VPS」上，只能验证 TLS1.3+h2 与握手
+# 延迟，无法发现「国内是否被墙」。因此本列表必须人工保证全部「国内可达」，
+# 不要把半被墙站点(amazon / mozilla / swift 等)放进来——服务端测不出来。
+# 国内 CDN 落地反而是优点(说明 GFW 不会封)，无需刻意回避。
 REALITY_SNI_LIST=(
-    "www.microsoft.com"
-    "www.apple.com"
-    "gateway.icloud.com"
-    "itunes.apple.com"
-    "www.amazon.com"
-    "www.swift.com"
-    "www.tesla.com"
-    "addons.mozilla.org"
-    "www.intel.com"
-    "www.nvidia.com"
-    "www.amd.com"
-    "www.ibm.com"
+    "www.microsoft.com"  # Azure/Akamai 中国 CDN，国内稳定可达
+    "www.apple.com"      # Apple 中国 CDN，国内稳定可达
+    "gateway.icloud.com" # iCloud 国内正常使用
+    "itunes.apple.com"   # Apple，国内可达
+    "www.tesla.com"      # 特斯拉在华运营，国内可达
+    "www.intel.com"      # Intel，国内可达
+    "www.nvidia.com"     # NVIDIA，国内可达
+    "www.amd.com"        # AMD，国内可达
+    "www.ibm.com"        # IBM，国内可达
+    "www.cisco.com"      # Cisco，在华运营，国内可达
+    "www.dell.com"       # Dell，在华运营，国内可达
+    "www.hp.com"         # HP/惠普，在华运营，国内可达
+    "www.qualcomm.com"   # 高通，在华运营，国内可达
+    "www.samsung.com"    # 三星，在华运营，国内可达
+    "www.sony.com"       # 索尼，在华运营，国内可达
+    "www.oracle.com"     # Oracle，在华运营，国内可达
+    "www.vmware.com"     # VMware，企业级站点，国内可达
 )
 
 # ================== CF 优选域名列表 ==================
