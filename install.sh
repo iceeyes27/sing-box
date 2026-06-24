@@ -4427,7 +4427,29 @@ do_primary_install() {
     # 显示链接
     generate_and_show_links
     show_subscription_url
+
+    # 部署完成后，询问是否开启每周自动刷新 CF 优选域名(默认否)
+    prompt_cfopt_auto_optin
+
     press_enter
+}
+
+# 安装完成后的可选项:开启 CF 优选域名每周自动刷新。
+# 无交互终端(管道安装)时自动跳过，不打断流程。
+prompt_cfopt_auto_optin() {
+    echo ""
+    echo -e "  ${DIM}CF 优选域名会随时间变化；开启后每周自动从 BestCF 刷新并更新链接，${NC}"
+    echo -e "  ${DIM}有助于保持电信/移动连通性最优(每周仅一次，可随时关闭)。${NC}"
+    local choice
+    if prompt_read choice "  是否开启每周自动刷新 CF 优选域名? (y/N): " && [[ "$choice" =~ ^[Yy]$ ]]; then
+        if enable_cfopt_auto; then
+            success "已开启每周自动刷新 (关闭: sbm cfopt-auto off)"
+        else
+            warn "开启失败，可稍后手动执行: sbm cfopt-auto on"
+        fi
+    else
+        info "未开启；需要时执行 sbm cfopt 手动刷新，或 sbm cfopt-auto on 开启自动"
+    fi
 }
 
 do_install() {
