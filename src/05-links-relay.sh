@@ -73,10 +73,15 @@ select_reality_sni() {
     done
     wait 2>/dev/null
 
+    # 需要排除的域名（重新优选时排除当前/上一次，确保结果不同）；
+    # 两端补空格便于按整词匹配。常规安装时该变量为空，不影响行为。
+    local exclude=" ${REALITY_SNI_EXCLUDE:-} "
+
     local best_sni="" best_time=9999
     if [[ -f "${tmp_dir}/results.txt" ]]; then
         local best
-        best=$(sort -k1,1n -k2,2n "${tmp_dir}/results.txt" | head -1)
+        best=$(awk -v ex="$exclude" 'index(ex, " " $3 " ") == 0' "${tmp_dir}/results.txt" \
+            | sort -k1,1n -k2,2n | head -1)
         best_time=$(echo "$best" | awk '{print $2}')
         best_sni=$(echo "$best" | awk '{print $3}')
     fi
@@ -89,7 +94,15 @@ select_reality_sni() {
         REALITY_SNI="$best_sni"
         success "已选择稳定优先的 Reality 域名: ${REALITY_SNI} (握手延迟: ${best_time}ms)"
     else
-        REALITY_SNI="${REALITY_SNI_LIST[0]}"
+        # 测速均失败时回退到候选列表中第一个未被排除的域名
+        local fallback=""
+        local cand
+        for cand in "${REALITY_SNI_LIST[@]}"; do
+            [[ "$exclude" == *" $cand "* ]] && continue
+            fallback="$cand"
+            break
+        done
+        REALITY_SNI="${fallback:-${REALITY_SNI_LIST[0]}}"
         warn "所有域名测速均失败，使用默认伪装域名: ${REALITY_SNI}"
     fi
 }

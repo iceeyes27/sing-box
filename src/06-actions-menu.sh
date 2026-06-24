@@ -246,10 +246,11 @@ do_modify_config() {
                 fi
                 ;;
             6)
-                REALITY_SNI=""
-                select_reality_sni
-                changed=true
-                restart_singbox=true
+                # 复用 sbm resni 流程：自动避开当前/上一次域名并自行写配置、
+                # 重启、展示链接，因此处理完直接返回菜单。
+                do_reoptimize_reality_sni || true
+                press_enter
+                continue
                 ;;
             7)
                 local new_hy2_port
@@ -525,11 +526,15 @@ do_reoptimize_reality_sni() {
     fi
 
     local old_sni="${REALITY_SNI:-}"
-    info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选..."
+    local prev_sni="${REALITY_SNI_PREV:-}"
+    info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选（自动避开当前与上一次域名）..."
 
-    # 清空后触发实测筛选；select_reality_sni 会按兼容性 + 握手延迟重新挑选
+    # 清空后触发实测筛选；通过 REALITY_SNI_EXCLUDE 排除当前与上一次域名，
+    # 确保重新优选的结果一定不同，否则就失去了重新优选的意义。
     REALITY_SNI=""
+    REALITY_SNI_EXCLUDE="${old_sni} ${prev_sni}"
     select_reality_sni
+    REALITY_SNI_EXCLUDE=""
 
     if [[ -z "${REALITY_SNI:-}" ]]; then
         REALITY_SNI="$old_sni"
@@ -538,9 +543,13 @@ do_reoptimize_reality_sni() {
     fi
 
     if [[ "$REALITY_SNI" == "$old_sni" ]]; then
-        success "实测结果仍为最优域名: ${REALITY_SNI}，无需变更，跳过重启"
+        # 兜底：候选已被排除，理论上不会命中；仅当可用候选过少时才可能
+        success "未找到与当前不同的可用域名: ${REALITY_SNI}，保持不变，跳过重启"
         return 0
     fi
+
+    # 记录上一次域名，下次重新优选时一并避开，避免 A→B→A 往返
+    REALITY_SNI_PREV="$old_sni"
 
     info "新伪装域名: ${REALITY_SNI}，正在写入配置并重启 sing-box..."
     generate_tls_cert
@@ -552,6 +561,7 @@ do_reoptimize_reality_sni() {
     if ! service_restart sing-box; then
         warn "sing-box 重启失败，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
+        REALITY_SNI_PREV="$prev_sni"
         write_singbox_config
         save_params
         service_restart sing-box 2>/dev/null || true
@@ -562,6 +572,7 @@ do_reoptimize_reality_sni() {
     if ! service_is_active sing-box; then
         warn "sing-box 未成功启动，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
+        REALITY_SNI_PREV="$prev_sni"
         write_singbox_config
         save_params
         service_restart sing-box 2>/dev/null || true
