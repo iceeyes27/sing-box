@@ -15,20 +15,38 @@ get_reality_probe_parallelism() {
     fi
 }
 
+# 本机 curl 是否支持 HTTP/2(Schannel / 无 nghttp2 的精简版不支持)。
+reality_curl_supports_h2() {
+    curl --version 2>/dev/null | grep -qiw HTTP2
+}
+
 probe_reality_sni_candidate() {
-    local idx="$1" sni="$2" result_file="$3"
-    local time_s ms
+    local idx="$1" sni="$2" result_file="$3" require_h2="${4:-1}"
+    local out http_ver appconnect ms
+    # 用 HEAD(-I) 探测：仅取响应头即可拿到协议版本与握手耗时，不下载正文，
+    # 对低带宽 / 低配 VPS 更省流量和时间(h2/ALPN 是连接级，与请求方法无关)。
+    local curl_opts=(-I --tlsv1.3 --connect-timeout 2 --max-time 4)
+    # 仅当本机 curl 支持 h2 时才协商 h2，否则该 flag 会让 curl 直接报错。
+    (( require_h2 )) && curl_opts+=(--http2)
 
-    time_s=$(curl -o /dev/null -s -w '%{time_connect}' --connect-timeout 2 --tlsv1.3 "https://${sni}" 2>/dev/null || true)
-    if [[ "$time_s" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        ms=$(awk -v t="$time_s" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo "9999")
-    else
-        ms=9999
-    fi
+    # 一次请求同时拿到 HTTP 协议版本与 TLS 握手耗时:
+    #   --tlsv1.3 强制最低 TLS 1.3(连上即满足 Reality 的 1.3 要求)
+    #   %{http_version}==2 表示目标支持 h2
+    #   %{time_appconnect} 是「TCP+TLS 握手完成」时间，正是 Reality 关心的握手延迟
+    out=$(curl -o /dev/null -s -w '%{http_version} %{time_appconnect}' \
+        "${curl_opts[@]}" "https://${sni}" 2>/dev/null || true)
+    http_ver="${out%% *}"
+    appconnect="${out##* }"
 
-    if [[ "$ms" =~ ^[0-9]+$ && "$ms" -gt 0 && "$ms" -lt 9999 ]]; then
-        echo "$idx $ms $sni" >> "$result_file"
+    # 能力门槛:支持 h2 的机器要求目标协商出 HTTP/2；并需有效 TLS 握手时间。
+    if (( require_h2 )); then
+        [[ "$http_ver" == "2" ]] || return 0
     fi
+    [[ "$appconnect" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 0
+    ms=$(awk -v t="$appconnect" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo 0)
+    [[ "$ms" =~ ^[0-9]+$ && "$ms" -gt 0 && "$ms" -lt 9999 ]] || return 0
+
+    echo "$idx $ms $sni" >> "$result_file"
     return 0
 }
 
@@ -39,7 +57,14 @@ select_reality_sni() {
     fi
     local probe_parallelism
     probe_parallelism=$(get_reality_probe_parallelism)
-    info "正在按兼容性优先顺序探测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名，并发数: ${probe_parallelism}"
+
+    # 本机 curl 支持 h2 时把 HTTP/2 作为硬门槛；不支持则降级为仅 TLS1.3。
+    local require_h2=0 gate_desc="TLS1.3"
+    if reality_curl_supports_h2; then
+        require_h2=1
+        gate_desc="TLS1.3 + HTTP/2"
+    fi
+    info "正在实测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名 (要求 ${gate_desc}，按握手延迟择优)，并发数: ${probe_parallelism}"
 
     local tmp_dir
     if ! tmp_dir=$(mktemp -d); then
@@ -55,15 +80,15 @@ select_reality_sni() {
     [[ $- == *e* ]] && errexit_was_set=1
     set +e
 
-    # Reality 目标站优先保证兼容性和稳定性，其次才是连接时间。
+    # 仅保留通过 TLS1.3 + h2 能力门槛的域名，再按握手延迟择优。
     # 并发数为 1 时直接前台串行探测，避免在受限机器上 fork 后台任务。
     local active_jobs=0
     for idx in "${!REALITY_SNI_LIST[@]}"; do
         local sni="${REALITY_SNI_LIST[$idx]}"
         if (( probe_parallelism <= 1 )); then
-            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt"
+            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" "$require_h2"
         else
-            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" &
+            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" "$require_h2" &
             active_jobs=$((active_jobs + 1))
             if (( active_jobs >= probe_parallelism )); then
                 wait
@@ -80,8 +105,9 @@ select_reality_sni() {
     local best_sni="" best_time=9999
     if [[ -f "${tmp_dir}/results.txt" ]]; then
         local best
+        # 按握手延迟(第 2 列)升序为主，列表顺序(第 1 列)仅作并列时的稳定排序。
         best=$(awk -v ex="$exclude" 'index(ex, " " $3 " ") == 0' "${tmp_dir}/results.txt" \
-            | sort -k1,1n -k2,2n | head -1)
+            | sort -k2,2n -k1,1n | head -1)
         best_time=$(echo "$best" | awk '{print $2}')
         best_sni=$(echo "$best" | awk '{print $3}')
     fi
@@ -92,9 +118,9 @@ select_reality_sni() {
 
     if [[ -n "$best_sni" ]]; then
         REALITY_SNI="$best_sni"
-        success "已选择稳定优先的 Reality 域名: ${REALITY_SNI} (握手延迟: ${best_time}ms)"
+        success "已选择握手最快的合规 Reality 域名: ${REALITY_SNI} (TLS 握手延迟: ${best_time}ms)"
     else
-        # 测速均失败时回退到候选列表中第一个未被排除的域名
+        # 无域名通过 TLS1.3+h2 实测时，回退到候选列表中第一个未被排除的域名
         local fallback=""
         local cand
         for cand in "${REALITY_SNI_LIST[@]}"; do
@@ -103,7 +129,7 @@ select_reality_sni() {
             break
         done
         REALITY_SNI="${fallback:-${REALITY_SNI_LIST[0]}}"
-        warn "所有域名测速均失败，使用默认伪装域名: ${REALITY_SNI}"
+        warn "无域名通过 TLS1.3 + HTTP/2 实测，使用默认伪装域名: ${REALITY_SNI}"
     fi
 }
 

@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.31"
+SCRIPT_VERSION="2.6.32"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -32,19 +32,26 @@ LOW_MEMORY_SWAP_CREATED=false
 # Reality 伪装域名候选列表
 # Reality 更看重目标站点兼容性，不是单纯 HTTPS 连通或延迟最低即可。
 # 这里保留相对稳定、证书和 TLS 表现更保守的候选，避免自动选到兼容性差的站点。
+# Reality 伪装域名候选池。挑选标准:
+#   1) 在受审查地区「未被封锁」(否则伪装目标本身被墙，反而暴露);
+#   2) 稳定支持 TLS 1.3 + HTTP/2(Reality 转发所需，运行时还会再实测校验);
+#   3) 境外高信誉站点，封锁代价高，借用其 TLS 身份更可信;
+#   4) 避免国内可解析 / 国内 CDN 落地的站点(如 lenovo/asus)。
+# 运行时 select_reality_sni 会对每个域名实测 TLS1.3+h2 能力并按握手延迟择优，
+# 不合规的会被自动剔除，因此这里只需提供「方向正确」的候选。
 REALITY_SNI_LIST=(
     "www.microsoft.com"
     "www.apple.com"
+    "gateway.icloud.com"
+    "itunes.apple.com"
     "www.amazon.com"
+    "www.swift.com"
+    "www.tesla.com"
+    "addons.mozilla.org"
     "www.intel.com"
-    "www.ibm.com"
-    "www.oracle.com"
     "www.nvidia.com"
     "www.amd.com"
-    "www.hp.com"
-    "www.dell.com"
-    "www.lenovo.com"
-    "www.asus.com"
+    "www.ibm.com"
 )
 
 # ================== CF 优选域名列表 ==================
