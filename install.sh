@@ -70,6 +70,11 @@ MANAGER_BIN_ALIAS_COMMAND="/bin/sing-box-manager"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 ARGO_ENV_FILE="${CONFIG_DIR}/argo-tunnel.env"
+# CF 优选域名「每周自动刷新」(可选，默认关闭)
+CFOPT_SERVICE="/etc/systemd/system/sbm-cfopt.service"
+CFOPT_TIMER="/etc/systemd/system/sbm-cfopt.timer"
+CFOPT_CRON_PERIODIC="/etc/periodic/weekly/sbm-cfopt"
+CFOPT_CRON_D="/etc/cron.d/sbm-cfopt"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
@@ -4994,6 +4999,103 @@ do_refresh_cf_domains() {
     return 0
 }
 
+# ─── CF 优选域名「每周自动刷新」(可选) ───────────────────────
+enable_cfopt_auto() {
+    if [[ "$(service_manager)" == "systemd" ]]; then
+        cat > "$CFOPT_SERVICE" << EOF
+[Unit]
+Description=Refresh Cloudflare 优选域名 (sbm cfopt)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${MANAGER_COMMAND} cfopt
+EOF
+        cat > "$CFOPT_TIMER" << 'EOF'
+[Unit]
+Description=Weekly refresh of Cloudflare 优选域名
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable --now sbm-cfopt.timer 2>/dev/null || return 1
+        return 0
+    fi
+
+    # 非 systemd:走 cron。Alpine(busybox crond)优先用 /etc/periodic/weekly。
+    if [[ -d /etc/periodic/weekly ]]; then
+        cat > "$CFOPT_CRON_PERIODIC" << EOF
+#!/bin/sh
+${MANAGER_COMMAND} cfopt >/var/log/sbm-cfopt.log 2>&1
+EOF
+        chmod 755 "$CFOPT_CRON_PERIODIC"
+        command -v rc-update >/dev/null 2>&1 && rc-update add crond default 2>/dev/null || true
+        command -v rc-service >/dev/null 2>&1 && rc-service crond start 2>/dev/null || true
+        return 0
+    fi
+    if [[ -d /etc/cron.d ]]; then
+        # 每周一 04:30 刷新
+        printf '30 4 * * 1 root %s cfopt >/var/log/sbm-cfopt.log 2>&1\n' "$MANAGER_COMMAND" > "$CFOPT_CRON_D"
+        chmod 644 "$CFOPT_CRON_D"
+        return 0
+    fi
+    return 1
+}
+
+disable_cfopt_auto() {
+    if [[ "$(service_manager)" == "systemd" ]]; then
+        systemctl disable --now sbm-cfopt.timer 2>/dev/null || true
+        rm -f "$CFOPT_TIMER" "$CFOPT_SERVICE"
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$CFOPT_CRON_PERIODIC" "$CFOPT_CRON_D"
+    return 0
+}
+
+cfopt_auto_is_enabled() {
+    if [[ "$(service_manager)" == "systemd" ]]; then
+        systemctl is-enabled sbm-cfopt.timer >/dev/null 2>&1 && return 0
+    fi
+    [[ -f "$CFOPT_CRON_PERIODIC" || -f "$CFOPT_CRON_D" ]]
+}
+
+do_cfopt_auto() {
+    case "${1:-status}" in
+        on|enable)
+            if enable_cfopt_auto; then
+                success "已开启 CF 优选域名每周自动刷新"
+                info "首次将在下个周期运行；可随时执行 sbm cfopt 手动刷新。"
+            else
+                warn "开启失败(未检测到 systemd/cron)，请改用手动 sbm cfopt"
+                return 1
+            fi
+            ;;
+        off|disable)
+            disable_cfopt_auto
+            success "已关闭 CF 优选域名自动刷新"
+            ;;
+        status)
+            if cfopt_auto_is_enabled; then
+                info "CF 优选域名自动刷新: ${GREEN}已开启${NC} (每周)"
+            else
+                info "CF 优选域名自动刷新: 未开启 (默认)"
+            fi
+            ;;
+        *)
+            warn "用法: sbm cfopt-auto <on|off|status>"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 # ─── 查看状态 ────────────────────────────────────────────────
 do_status() {
     echo ""
@@ -5111,6 +5213,7 @@ do_uninstall() {
     service_disable argo-tunnel 2>/dev/null || true
     service_stop sbm-subscription 2>/dev/null || true
     service_disable sbm-subscription 2>/dev/null || true
+    disable_cfopt_auto 2>/dev/null || true
     rm -f "$ARGO_SERVICE"
     rm -f "$ARGO_OPENRC_SERVICE"
     rm -f "$SUBSCRIPTION_SERVICE"
@@ -5237,6 +5340,7 @@ main() {
         resni|reality-sni) do_reoptimize_reality_sni || warn "Reality 伪装域名优选未完成" ;;
         apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
         cfopt|refresh-cf) do_refresh_cf_domains || warn "优选域名刷新未完成" ;;
+        cfopt-auto)  do_cfopt_auto "${2:-status}" || true ;;
         status)      do_status ;;
         uninstall)   do_uninstall ;;
         --help|-h)
@@ -5255,6 +5359,7 @@ main() {
             echo "  resni           重新优选 Reality 伪装域名(SNI)并重启生效"
             echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
             echo "  cfopt           从 BestCF 刷新 CF 优选域名(电信/移动)并更新链接"
+            echo "  cfopt-auto on   开启每周自动刷新优选域名 (off 关闭, status 查看; 默认关闭)"
             echo "  status          查看状态"
             echo "  uninstall       卸载"
             exit 0

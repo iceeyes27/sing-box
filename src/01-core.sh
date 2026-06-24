@@ -25,6 +25,11 @@ MANAGER_BIN_ALIAS_COMMAND="/bin/sing-box-manager"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 ARGO_ENV_FILE="${CONFIG_DIR}/argo-tunnel.env"
+# CF 优选域名「每周自动刷新」(可选，默认关闭)
+CFOPT_SERVICE="/etc/systemd/system/sbm-cfopt.service"
+CFOPT_TIMER="/etc/systemd/system/sbm-cfopt.timer"
+CFOPT_CRON_PERIODIC="/etc/periodic/weekly/sbm-cfopt"
+CFOPT_CRON_D="/etc/cron.d/sbm-cfopt"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"

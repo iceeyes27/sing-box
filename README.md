@@ -74,6 +74,7 @@ sbm links           # 重新计算并查看服务连接参数与凭证
 sbm resni           # 重新优选 Reality 伪装域名 (SNI) 并自动重启生效
 sbm apply           # 升级脚本后一键同步：按新版本模板重写配置并重启、刷新链接
 sbm cfopt           # 从 BestCF 刷新 CF 优选域名(三网分流，侧重电信/移动)并更新链接
+sbm cfopt-auto on   # 开启每周自动刷新优选域名(off 关闭 / status 查看；默认关闭)
 sbm restart         # 重启系统后台的所有相关运行服务
 sbm status          # 查看当前各个核心组件的系统运行状态
 sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
