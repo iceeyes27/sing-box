@@ -8,10 +8,12 @@ write_argo_service() {
         info "使用 Token 模式启动 Argo 隧道 (固定域名)"
         info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
         write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
-        exec_cmd="tunnel --protocol http2 --no-autoupdate run"
+        # --protocol auto: 优先 QUIC(抗丢包/抖动更强)，出站 UDP 7844 被封时自动回退 http2。
+        # --retries 8: 边缘连接出错时多重试几次，尽量让进程存活而不是退出。
+        exec_cmd="tunnel --protocol auto --retries 8 --no-autoupdate run"
     else
         info "使用临时隧道模式 (trycloudflare.com)"
-        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol auto --retries 8"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
@@ -21,7 +23,10 @@ name="argo-tunnel"
 description="Cloudflare Argo Tunnel"
 command="${cloudflared_bin}"
 command_args="${exec_cmd}"
-command_background=true
+# supervise-daemon 会在 cloudflared 崩溃退出后自动重启，等价于 systemd 的 Restart=always。
+supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=0
 pidfile="/run/argo-tunnel.pid"
 output_log="/var/log/argo-tunnel.log"
 error_log="/var/log/argo-tunnel.log"
@@ -55,6 +60,7 @@ EOF
 Description=Cloudflare Argo Tunnel
 After=network.target sing-box.service
 Wants=sing-box.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -64,8 +70,8 @@ EOF
     [[ -n "${ARGO_TOKEN:-}" ]] && printf 'EnvironmentFile=%s\n' "$ARGO_ENV_FILE" >> "$ARGO_SERVICE"
     cat >> "$ARGO_SERVICE" << EOF
 ExecStart=${cloudflared_bin} ${exec_cmd}
-Restart=on-failure
-RestartSec=10
+Restart=always
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
 ${systemd_hardening}
@@ -297,7 +303,7 @@ fetch_argo_domain() {
     local previous_domain="${ARGO_DOMAIN:-}"
     ARGO_DOMAIN=""
     while [[ $i -lt $max ]]; do
-        ARGO_DOMAIN=$(service_logs argo-tunnel 300 2>/dev/null | \
+        ARGO_DOMAIN=$(service_logs argo-tunnel 1000 2>/dev/null | \
                       grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' | \
                       tail -1 | sed 's|https://||')
         if [[ -n "$ARGO_DOMAIN" ]]; then
@@ -314,9 +320,23 @@ fetch_argo_domain() {
 }
 
 refresh_argo_domain_if_needed() {
-    if [[ -z "${ARGO_DOMAIN:-}" ]] && service_is_active argo-tunnel; then
-        fetch_argo_domain 2>/dev/null || true
-        [[ -n "${ARGO_DOMAIN:-}" ]] && save_params
+    service_is_active argo-tunnel || return
+
+    if [[ -n "${ARGO_TOKEN:-}" ]]; then
+        # 固定域名模式域名由用户配置，进程重启也不变，无需从日志重新抓取。
+        return
+    fi
+
+    # 临时隧道每次重启都会分配新的随机域名，缓存里的旧域名会变成死链。
+    # 因此这里总是以 cloudflared 当前进程日志中的域名为准，抓到新域名就刷新缓存，
+    # 保证 `sbm links` 输出的永远是当前实际可用的临时域名。
+    local cached_domain="${ARGO_DOMAIN:-}"
+    if fetch_argo_domain 2>/dev/null; then
+        [[ "${ARGO_DOMAIN:-}" != "$cached_domain" ]] && save_params
+    else
+        # 抓取失败(如日志已滚动或进程刚起还没打印域名)时回退到缓存域名，
+        # 避免 Argo 链接直接消失。
+        ARGO_DOMAIN="$cached_domain"
     fi
 }
 

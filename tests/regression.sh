@@ -958,6 +958,44 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     rm -rf "$tmp"
 }
 
+test_refresh_argo_domain_if_needed_tracks_temp_restart() {
+    local service_is_active_def fetch_argo_domain_def save_params_def saved
+
+    service_is_active_def=$(declare -f service_is_active || true)
+    fetch_argo_domain_def=$(declare -f fetch_argo_domain || true)
+    save_params_def=$(declare -f save_params || true)
+
+    service_is_active() { [[ "$1" == "argo-tunnel" ]]; }
+
+    # 临时隧道重启后域名变化：应抓取新域名并持久化
+    ARGO_TOKEN=""
+    ARGO_DOMAIN="old.trycloudflare.com"
+    saved=false
+    fetch_argo_domain() { ARGO_DOMAIN="new.trycloudflare.com"; return 0; }
+    save_params() { saved=true; }
+    refresh_argo_domain_if_needed
+    assert_eq "new.trycloudflare.com" "$ARGO_DOMAIN" "temp domain refreshed after restart"
+    [[ "$saved" == "true" ]] || fail "refresh did not persist new temp domain"
+
+    # 抓取失败时回退到缓存域名，避免链接消失
+    ARGO_DOMAIN="cached.trycloudflare.com"
+    fetch_argo_domain() { ARGO_DOMAIN=""; return 1; }
+    refresh_argo_domain_if_needed
+    assert_eq "cached.trycloudflare.com" "$ARGO_DOMAIN" "temp domain falls back to cache on fetch failure"
+
+    # 固定域名(Token)模式不从日志抓取
+    ARGO_TOKEN="token"
+    ARGO_DOMAIN="fixed.example.com"
+    fetch_argo_domain() { fail "token mode must not fetch temp domain from logs"; }
+    refresh_argo_domain_if_needed
+    assert_eq "fixed.example.com" "$ARGO_DOMAIN" "token mode keeps fixed domain"
+
+    unset -f service_is_active fetch_argo_domain save_params
+    [[ -n "$service_is_active_def" ]] && eval "$service_is_active_def"
+    [[ -n "$fetch_argo_domain_def" ]] && eval "$fetch_argo_domain_def"
+    [[ -n "$save_params_def" ]] && eval "$save_params_def"
+}
+
 test_subscription_gateway_uses_local_https_origin() {
     local tmp service_body argo_body server_body
     local service_manager_def service_daemon_reload_def
@@ -1259,5 +1297,6 @@ test_port_validation_can_skip_firewall_changes
 test_show_relay_troubleshooting_reports_core_hints
 test_show_relay_success_self_check_reports_core_passes
 test_subscription_page_is_final_section
+test_refresh_argo_domain_if_needed_tracks_temp_restart
 
 echo "OK: regression tests passed"
