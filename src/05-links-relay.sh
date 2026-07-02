@@ -134,16 +134,75 @@ select_reality_sni() {
 }
 
 # ================== CF 优选：随机选择可用域名 ==================
-select_random_cf_domain() {
-    local available=()
+cf_domain_reachable() {
+    local domain="$1"
+    local family="${2:-}"
     local curl_ip_arg=()
-    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && curl_ip_arg=(-6)
+
+    case "$family" in
+        ipv4) curl_ip_arg=(-4) ;;
+        ipv6) curl_ip_arg=(-6) ;;
+    esac
+    # ${arr[@]+...} 写法兼容 bash 4.4 之前 set -u 下空数组展开报 unbound 的问题
+    curl ${curl_ip_arg[@]+"${curl_ip_arg[@]}"} -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+}
+
+# 并行探测 CF_DOMAINS 可用性，输出可用域名(每行一个，保持列表原顺序)。
+# 并发度沿用 Reality 探测的资源自适应策略:低配(单核 / 低内存无 swap)
+# 自动退回串行；临时目录创建失败时同样退回串行。
+probe_available_cf_domains() {
+    local family="${1:-}"
+    local parallelism tmp_dir idx domain
+    parallelism=$(get_reality_probe_parallelism)
+
+    if (( parallelism > 1 )) && tmp_dir=$(mktemp -d 2>/dev/null); then
+        # 后台任务在低配机器上可能 fork 失败或让 wait 返回非零，
+        # 与 select_reality_sni 相同，探测期间临时关闭 errexit。
+        local errexit_was_set=0 active=0
+        [[ $- == *e* ]] && errexit_was_set=1
+        set +e
+        for idx in "${!CF_DOMAINS[@]}"; do
+            domain="${CF_DOMAINS[$idx]}"
+            {
+                if cf_domain_reachable "$domain" "$family"; then
+                    : > "${tmp_dir}/${idx}"
+                fi
+            } &
+            active=$((active + 1))
+            if (( active >= parallelism )); then
+                wait
+                active=0
+            fi
+        done
+        wait 2>/dev/null
+        (( errexit_was_set )) && set -e
+
+        for idx in "${!CF_DOMAINS[@]}"; do
+            if [[ -e "${tmp_dir}/${idx}" ]]; then
+                printf '%s\n' "${CF_DOMAINS[$idx]}"
+            fi
+        done
+        rm -rf "$tmp_dir"
+        return 0
+    fi
 
     for domain in "${CF_DOMAINS[@]}"; do
-        if curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null; then
-            available+=("$domain")
+        if cf_domain_reachable "$domain" "$family"; then
+            printf '%s\n' "$domain"
         fi
     done
+    return 0
+}
+
+select_random_cf_domain() {
+    local family=""
+    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && family="ipv6"
+
+    local available=() domain
+    while IFS= read -r domain; do
+        [[ -n "$domain" ]] && available+=("$domain")
+    done < <(probe_available_cf_domains "$family")
+
     if [[ ${#available[@]} -gt 0 ]]; then
         echo "${available[$((RANDOM % ${#available[@]}))]}"
     fi
@@ -152,19 +211,12 @@ select_random_cf_domain() {
 
 select_random_cf_domain_by_family() {
     local family="$1"
-    local available=()
-    local curl_ip_arg=()
+    local available=() domain
 
-    case "$family" in
-        ipv4) curl_ip_arg=(-4) ;;
-        ipv6) curl_ip_arg=(-6) ;;
-    esac
+    while IFS= read -r domain; do
+        [[ -n "$domain" ]] && available+=("$domain")
+    done < <(probe_available_cf_domains "$family")
 
-    for domain in "${CF_DOMAINS[@]}"; do
-        if curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null; then
-            available+=("$domain")
-        fi
-    done
     if [[ ${#available[@]} -gt 0 ]]; then
         echo "${available[$((RANDOM % ${#available[@]}))]}"
     fi
@@ -174,22 +226,17 @@ select_random_cf_domain_by_family() {
 check_cf_domain_available_by_family() {
     local domain="$1"
     local family="$2"
-    local curl_ip_arg=()
 
     [[ -n "$domain" ]] || return 1
-    case "$family" in
-        ipv4) curl_ip_arg=(-4) ;;
-        ipv6) curl_ip_arg=(-6) ;;
-    esac
-    curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+    cf_domain_reachable "$domain" "$family"
 }
 
 check_cf_domain_available() {
     local domain="$1"
-    local curl_ip_arg=()
+    local family=""
     [[ -n "$domain" ]] || return 1
-    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && curl_ip_arg=(-6)
-    curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && family="ipv6"
+    cf_domain_reachable "$domain" "$family"
 }
 
 resolve_argo_best_cf_domain() {
@@ -458,6 +505,8 @@ write_subscription_assets() {
     subscription_base64=$(printf '%s' "${GENERATED_SUBSCRIPTION_RAW}" | base64 | tr -d '\r\n')
     printf '%s' "${subscription_base64}" > "$SUBSCRIPTION_FILE"
     chmod 600 "$SUBSCRIPTION_FILE"
+    # 订阅服务已降权为 nobody 运行，数据文件归属 nobody 才能被读取
+    chown nobody "$SUBSCRIPTION_FILE" 2>/dev/null || true
 }
 
 subscription_https_url() {

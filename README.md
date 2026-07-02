@@ -35,6 +35,17 @@ sudo bash install.sh
 > Alpine 初始系统会自动补齐 Bash 和 curl 后继续安装。
 > 脚本会按实际 CPU、内存和 swap 状态选择安装策略：低内存且无 swap 时仅安装关键依赖，低内存有 swap 时分批补齐缺失依赖，标准/高内存会正常安装缺失依赖；单核 CPU 会降低探测并发并使用低优先级安装；VPS 已存在的命令和时间同步服务会直接复用，不重复安装。
 
+### 无人值守安装（cloud-init / 批量部署）
+
+没有交互终端时（如 cloud-init、CI、批量脚本），`install` 会自动进入无人值守模式：默认单端口 443 + Argo 临时域名，可用 `SBM_*` 环境变量覆盖默认值：
+
+```bash
+SBM_NODE_NAME=hk-01 SBM_ARGO_TOKEN='eyJ...' SBM_ARGO_DOMAIN=v2.example.com \
+  bash install.sh install
+```
+
+支持的变量：`SBM_REALITY_PORT`、`SBM_HY2_PORT`、`SBM_SUBSCRIPTION_PORT`、`SBM_REALITY_SNI`、`SBM_NODE_NAME`、`SBM_PUBLIC_IPV4`（直连链接公网 IPv4 覆盖）、`SBM_ARGO_TOKEN` + `SBM_ARGO_DOMAIN`（固定域名模式，需成对提供）、`SBM_HY2_UP_MBPS` + `SBM_HY2_DOWN_MBPS`（Hysteria2 Brutal 限速，需成对提供，缺省不限速走 BBR）、`SBM_CFOPT_AUTO=1`（开启每周 CF 优选自动刷新）。交互模式下这些变量同样生效，作为各提示的默认值。
+
 ## 🎛️ 管理面板使用指南
 
 安装完成后，可随时在服务器终端输入系统快捷命令运行管理面板：
@@ -45,7 +56,7 @@ sbm
 
 **面板概览：**
 ```text
-  sing-box 管理面板  v2.6.36
+  sing-box 管理面板  v2.7.0
   ────────────────────────────────────────
   sing-box: ● 运行中    argo-tunnel: ● 运行中
 

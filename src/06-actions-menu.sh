@@ -3,17 +3,52 @@
 # ════════════════════════════════════════════════════════════
 
 # ─── 完整安装 ────────────────────────────────────────────────
-do_primary_install() {
-    echo ""
-    info "开始完整安装..."
-    separator
+# 环境变量覆盖(无人值守安装的主要入口；交互模式下同样生效，作为各提示的默认值):
+#   SBM_REALITY_PORT / SBM_HY2_PORT / SBM_SUBSCRIPTION_PORT  端口
+#   SBM_REALITY_SNI     跳过测速直接指定 Reality 伪装域名
+#   SBM_NODE_NAME       节点名称
+#   SBM_PUBLIC_IPV4     直连链接使用的公网 IPv4 覆盖
+#   SBM_ARGO_TOKEN + SBM_ARGO_DOMAIN  两者同时提供则用固定域名模式
+#   SBM_HY2_UP_MBPS + SBM_HY2_DOWN_MBPS  Hysteria2 带宽(Brutal)，需成对提供，缺省不限速(BBR)
+#   SBM_CFOPT_AUTO=1    开启 CF 优选域名每周自动刷新
+apply_install_env_overrides() {
+    [[ -n "${SBM_REALITY_PORT:-}" ]] && REALITY_PORT="$SBM_REALITY_PORT"
+    [[ -n "${SBM_HY2_PORT:-}" ]] && HY2_PORT="$SBM_HY2_PORT"
+    [[ -n "${SBM_SUBSCRIPTION_PORT:-}" ]] && SUBSCRIPTION_PORT="$SBM_SUBSCRIPTION_PORT"
+    [[ -n "${SBM_REALITY_SNI:-}" ]] && REALITY_SNI="$SBM_REALITY_SNI"
+    [[ -n "${SBM_NODE_NAME:-}" ]] && NODE_NAME="$SBM_NODE_NAME"
 
-    install_deps
-    ensure_time_sync || true
-    install_singbox
-    install_cloudflared
-    generate_params
+    if [[ -n "${SBM_PUBLIC_IPV4:-}" ]]; then
+        if is_valid_public_ipv4_for_link "$SBM_PUBLIC_IPV4"; then
+            PUBLIC_IPV4_OVERRIDE="$SBM_PUBLIC_IPV4"
+            reset_public_ip_cache
+        else
+            warn "SBM_PUBLIC_IPV4 不是有效公网 IPv4，已忽略: ${SBM_PUBLIC_IPV4}"
+        fi
+    fi
 
+    if [[ -n "${SBM_HY2_UP_MBPS:-}" || -n "${SBM_HY2_DOWN_MBPS:-}" ]]; then
+        if is_positive_int "${SBM_HY2_UP_MBPS:-}" && is_positive_int "${SBM_HY2_DOWN_MBPS:-}"; then
+            HY2_UP_MBPS="$SBM_HY2_UP_MBPS"
+            HY2_DOWN_MBPS="$SBM_HY2_DOWN_MBPS"
+        else
+            warn "SBM_HY2_UP_MBPS 与 SBM_HY2_DOWN_MBPS 需同时为正整数，已忽略，保持不限速"
+        fi
+    fi
+
+    if [[ -n "${SBM_ARGO_TOKEN:-}" && -n "${SBM_ARGO_DOMAIN:-}" ]]; then
+        ARGO_TOKEN="$SBM_ARGO_TOKEN"
+        ARGO_DOMAIN="${SBM_ARGO_DOMAIN#http://}"
+        ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
+        ARGO_DOMAIN="${ARGO_DOMAIN%/}"
+    elif [[ -n "${SBM_ARGO_TOKEN:-}${SBM_ARGO_DOMAIN:-}" ]]; then
+        warn "SBM_ARGO_TOKEN 与 SBM_ARGO_DOMAIN 需同时提供，已忽略，使用临时域名模式"
+    fi
+    return 0
+}
+
+# 交互式安装的端口 / 伪装域名 / 节点名称问询流程
+prompt_install_settings_interactive() {
     while true; do
         # 询问端口模式
         echo ""
@@ -52,13 +87,55 @@ do_primary_install() {
 
     prompt_read input "  节点名称 [${NODE_NAME}]: "
     [[ -n "$input" ]] && NODE_NAME="$input"
+    return 0
+}
+
+do_primary_install() {
+    local unattended=false
+    sbm_can_prompt || unattended=true
+
+    echo ""
+    if [[ "$unattended" == "true" ]]; then
+        info "未检测到交互终端，进入无人值守安装 (可用 SBM_* 环境变量覆盖默认值)"
+    else
+        info "开始完整安装..."
+    fi
+    separator
+
+    install_deps
+    ensure_time_sync || true
+    install_singbox
+    install_cloudflared
+    generate_params
+    apply_install_env_overrides
+
+    if [[ "$unattended" == "true" ]]; then
+        # 无人值守默认极简单端口模式(与交互推荐一致)，仅在显式指定时用自定义端口
+        [[ -n "${SBM_REALITY_PORT:-}" ]] || REALITY_PORT=443
+        [[ -n "${SBM_HY2_PORT:-}" ]] || HY2_PORT=443
+        if ! validate_service_ports "" "" "" false; then
+            error "端口检查失败。可用 SBM_REALITY_PORT / SBM_HY2_PORT / SBM_SUBSCRIPTION_PORT 指定可用端口后重试"
+        fi
+        show_port_confirmation
+        if ! open_service_ports; then
+            warn "端口放行失败，请安装完成后手动放行: ${REALITY_PORT}/TCP, ${HY2_PORT}/UDP"
+        fi
+    else
+        prompt_install_settings_interactive
+    fi
     echo ""
     if ! refresh_public_ip_stack; then
         warn "未能自动获取公网 IP。"
-        warn "如需生成 Reality/Hysteria2 直连链接，可手动填写公网 IPv4；留空则本次尽量仅生成 Argo 链接。"
-        prompt_public_ipv4_override_optional || true
+        if [[ "$unattended" == "true" ]]; then
+            warn "如需直连链接，可通过 SBM_PUBLIC_IPV4 指定公网 IPv4；本次尽量仅生成 Argo 链接。"
+        else
+            warn "如需生成 Reality/Hysteria2 直连链接，可手动填写公网 IPv4；留空则本次尽量仅生成 Argo 链接。"
+            prompt_public_ipv4_override_optional || true
+        fi
     fi
-    prompt_ipv4_link_selection_if_multiple || true
+    if [[ "$unattended" != "true" ]]; then
+        prompt_ipv4_link_selection_if_multiple || true
+    fi
 
     # 自动优选伪装域名
     select_reality_sni
@@ -66,28 +143,36 @@ do_primary_install() {
     # 生成 TLS 自签证书 (Hysteria2 需要)
     generate_tls_cert
 
-    # 询问 Argo 模式
-    echo ""
-    echo -e "${CYAN}${BOLD}── Argo 隧道配置 ──${NC}"
-    echo -e "  1) 临时域名模式 (无需自定义域名，域名随机且会变)"
-    echo -e "  2) 固定域名模式 (需提供 Cloudflare Tunnel Token) ${GREEN}推荐${NC}"
-    prompt_read argo_choice "  请选择 [1]: "
-    argo_choice=${argo_choice:-1}
-    if [[ "$argo_choice" == "2" ]]; then
-        echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
-        echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${SUBSCRIPTION_PORT}${NC}"
-        echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
-        echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
-        prompt_read ARGO_TOKEN "  请输入 Tunnel Token: "
-        prompt_read ARGO_DOMAIN "  请输入该隧道绑定的域名 (如 v2.example.com): "
-        # 清除用户可能误输入的 http://, https:// 以及结尾的 /
-        ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
-        ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
-        ARGO_DOMAIN="${ARGO_DOMAIN%/}"
-        [[ -z "$ARGO_TOKEN" || -z "$ARGO_DOMAIN" ]] && warn "Token 或域名为空，将降级为临时域名模式" && ARGO_TOKEN="" && ARGO_DOMAIN=""
+    # 询问 Argo 模式(无人值守时由 SBM_ARGO_TOKEN/SBM_ARGO_DOMAIN 决定)
+    if [[ "$unattended" == "true" ]]; then
+        if [[ -n "${ARGO_TOKEN:-}" ]]; then
+            info "Argo: 固定域名模式 (${ARGO_DOMAIN})"
+        else
+            info "Argo: 临时域名模式 (trycloudflare.com)"
+        fi
     else
-        ARGO_TOKEN=""
-        ARGO_DOMAIN=""
+        echo ""
+        echo -e "${CYAN}${BOLD}── Argo 隧道配置 ──${NC}"
+        echo -e "  1) 临时域名模式 (无需自定义域名，域名随机且会变)"
+        echo -e "  2) 固定域名模式 (需提供 Cloudflare Tunnel Token) ${GREEN}推荐${NC}"
+        prompt_read argo_choice "  请选择 [1]: "
+        argo_choice=${argo_choice:-1}
+        if [[ "$argo_choice" == "2" ]]; then
+            echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
+            echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${SUBSCRIPTION_PORT}${NC}"
+            echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
+            echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
+            prompt_read ARGO_TOKEN "  请输入 Tunnel Token: "
+            prompt_read ARGO_DOMAIN "  请输入该隧道绑定的域名 (如 v2.example.com): "
+            # 清除用户可能误输入的 http://, https:// 以及结尾的 /
+            ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
+            ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
+            ARGO_DOMAIN="${ARGO_DOMAIN%/}"
+            [[ -z "$ARGO_TOKEN" || -z "$ARGO_DOMAIN" ]] && warn "Token 或域名为空，将降级为临时域名模式" && ARGO_TOKEN="" && ARGO_DOMAIN=""
+        else
+            ARGO_TOKEN=""
+            ARGO_DOMAIN=""
+        fi
     fi
 
     write_singbox_config
@@ -97,8 +182,7 @@ do_primary_install() {
     # 启动 sing-box
     info "启动 sing-box..."
     service_enable_now sing-box
-    sleep 2
-    if service_is_active sing-box; then
+    if wait_for_service_active sing-box 5; then
         success "sing-box 已启动"
     else
         error "sing-box 启动失败，请查看服务日志"
@@ -110,7 +194,6 @@ do_primary_install() {
     info "启动 Argo 隧道..."
     service_enable_now argo-tunnel
     info "等待 Argo 隧道分配域名..."
-    sleep 5
 
     if fetch_argo_domain; then
         success "Argo 域名: $ARGO_DOMAIN"
@@ -135,8 +218,16 @@ do_primary_install() {
 }
 
 # 安装完成后的可选项:开启 CF 优选域名每周自动刷新。
-# 无交互终端(管道安装)时自动跳过，不打断流程。
+# 无交互终端(管道安装)时自动跳过，不打断流程；SBM_CFOPT_AUTO=1 可直接开启。
 prompt_cfopt_auto_optin() {
+    if [[ "${SBM_CFOPT_AUTO:-}" =~ ^(1|[Yy]|[Oo][Nn]|[Yy][Ee][Ss])$ ]]; then
+        if enable_cfopt_auto; then
+            success "已按 SBM_CFOPT_AUTO 开启每周自动刷新 (关闭: sbm cfopt-auto off)"
+        else
+            warn "开启失败，可稍后手动执行: sbm cfopt-auto on"
+        fi
+        return 0
+    fi
     echo ""
     echo -e "  ${DIM}CF 优选域名会随时间变化；开启后每周自动从 BestCF 刷新并更新链接，${NC}"
     echo -e "  ${DIM}有助于保持电信/移动连通性最优(每周仅一次，可随时关闭)。${NC}"
@@ -176,25 +267,11 @@ do_modify_config() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
     while true; do
-        local old_uuid="${UUID}"
-        local old_short_id="${SHORT_ID}"
-        local old_private_key="${PRIVATE_KEY}"
-        local old_public_key="${PUBLIC_KEY}"
+        # 全量快照，任一分支校验/重启失败时用 restore_runtime_params 一键回滚
+        snapshot_runtime_params
         local old_reality_port="${REALITY_PORT}"
-        local old_reality_sni="${REALITY_SNI}"
-        local old_ws_port="${WS_PORT}"
-        local old_ws_path="${WS_PATH}"
-        local old_node_name="${NODE_NAME}"
         local old_hy2_port="${HY2_PORT}"
-        local old_hy2_password="${HY2_PASSWORD}"
-        local old_hy2_sni="${HY2_SNI}"
-        local old_hy2_masquerade_url="${HY2_MASQUERADE_URL:-${HY2_DEFAULT_MASQUERADE_URL}}"
         local old_subscription_port="${SUBSCRIPTION_PORT}"
-        local old_argo_domain="${ARGO_DOMAIN:-}"
-        local old_argo_token="${ARGO_TOKEN:-}"
-        local old_argo_best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
-        local old_argo_best_cf_domain_ipv4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
-        local old_argo_best_cf_domain_ipv6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
         local old_link_ipv4_selection="${LINK_IPV4_SELECTION:-all}"
         local old_public_ipv4_override="${PUBLIC_IPV4_OVERRIDE:-}"
         clear
@@ -215,9 +292,10 @@ do_modify_config() {
         echo -e "  12) 修改订阅服务端口       ${DIM}(当前: ${SUBSCRIPTION_PORT})${NC}"
         echo -e "  13) 修改 IPv4 链接策略     ${DIM}(当前: $(link_ipv4_selection_label))${NC}"
         echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
+        echo -e "  15) 修改 Hysteria2 带宽限速 ${DIM}(当前: $(hy2_bandwidth_label))${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        prompt_read choice "  请选择 [0-14]: "
+        prompt_read choice "  请选择 [0-15]: "
 
         local changed=false
         local ports_changed=false
@@ -358,6 +436,15 @@ do_modify_config() {
                     continue
                 fi
                 ;;
+            15)
+                if prompt_hy2_bandwidth; then
+                    changed=true
+                    restart_singbox=true
+                else
+                    press_enter
+                    continue
+                fi
+                ;;
             14)
                 if prompt_public_ipv4_override; then
                     if [[ "${PUBLIC_IPV4_OVERRIDE:-}" != "$old_public_ipv4_override" ]]; then
@@ -375,37 +462,19 @@ do_modify_config() {
 
         if [[ "$changed" == "true" ]]; then
             if [[ "$links_only_changed" != "true" ]] && ! validate_service_ports "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false; then
-                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                    "$old_hy2_masquerade_url" \
-                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection" "$old_public_ipv4_override"
+                restore_runtime_params
                 warn "端口检查未通过，已保留原配置"
                 press_enter
                 continue
             fi
             if [[ "$ports_changed" == "true" ]] && ! confirm_port_selection; then
-                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                    "$old_hy2_masquerade_url" \
-                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection" "$old_public_ipv4_override"
+                restore_runtime_params
                 warn "已取消端口修改"
                 press_enter
                 continue
             fi
             if [[ "$links_only_changed" != "true" ]] && ! open_service_ports; then
-                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                    "$old_hy2_masquerade_url" \
-                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection" "$old_public_ipv4_override"
+                restore_runtime_params
                 warn "端口放行失败，已保留原配置"
                 press_enter
                 continue
@@ -420,13 +489,7 @@ do_modify_config() {
                 ensure_time_sync || true
                 info "重启 sing-box..."
                 if ! service_restart sing-box; then
-                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                        "$old_hy2_masquerade_url" \
-                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection" "$old_public_ipv4_override"
+                    restore_runtime_params
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -435,17 +498,10 @@ do_modify_config() {
                     press_enter
                     continue
                 fi
-                sleep 2
-                if service_is_active sing-box; then
+                if wait_for_service_active sing-box 5; then
                     success "配置已更新并重启"
                 else
-                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                        "$old_hy2_masquerade_url" \
-                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection" "$old_public_ipv4_override"
+                    restore_runtime_params
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -461,13 +517,7 @@ do_modify_config() {
 
             if [[ "$restart_argo" == "true" ]]; then
                 if ! refresh_argo_runtime; then
-                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                        "$old_hy2_masquerade_url" \
-                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection" "$old_public_ipv4_override"
+                    restore_runtime_params
                     save_params
                     write_argo_service
                     service_restart argo-tunnel 2>/dev/null || true
@@ -504,7 +554,6 @@ do_start() {
     service_start sing-box && success "sing-box 已启动" || warn "sing-box 启动失败"
     service_start argo-tunnel && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
     if load_params; then
-        sleep 3
         fetch_argo_domain 2>/dev/null || true
         save_params
         build_share_links
@@ -528,7 +577,6 @@ do_restart() {
     service_restart sing-box && success "sing-box 已重启" || warn "sing-box 重启失败"
     service_restart argo-tunnel && success "argo-tunnel 已重启" || warn "argo-tunnel 重启失败"
 
-    sleep 5
     if load_params; then
         fetch_argo_domain 2>/dev/null || true
         save_params
@@ -590,8 +638,7 @@ do_reoptimize_reality_sni() {
         return 1
     fi
 
-    sleep 2
-    if ! service_is_active sing-box; then
+    if ! wait_for_service_active sing-box 5; then
         warn "sing-box 未成功启动，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
         REALITY_SNI_PREV="$prev_sni"
@@ -631,8 +678,7 @@ do_apply_latest() {
         warn "sing-box 重启失败，请执行 sbm status 或查看日志排查"
         return 1
     fi
-    sleep 2
-    if ! service_is_active sing-box; then
+    if ! wait_for_service_active sing-box 5; then
         warn "sing-box 未成功启动，请查看日志排查"
         return 1
     fi
@@ -647,6 +693,12 @@ do_apply_latest() {
 }
 
 # ─── 刷新 CF 优选域名 ────────────────────────────────────────
+is_cloudflare_edge() {
+    local domain="$1" srv
+    srv=$(curl -sI --max-time 4 "https://$domain" 2>/dev/null | grep -i '^server:' | tr -d '\r' | awk '{print tolower($2)}')
+    [[ "$srv" == "cloudflare" ]]
+}
+
 # 从 BestCF 拉取最新优选域名，过滤出三网分流型(侧重电信/移动)并校验为存活
 # 的 Cloudflare 边缘，写入用户覆盖文件，随后让 Argo 从新池重选并刷新链接。
 do_refresh_cf_domains() {
@@ -686,13 +738,44 @@ do_refresh_cf_domains() {
         return 1
     fi
 
-    info "正在校验 ${#candidates[@]} 个候选是否为存活的 Cloudflare 边缘..."
+    local parallelism
+    parallelism=$(get_reality_probe_parallelism)
+    info "正在校验 ${#candidates[@]} 个候选是否为存活的 Cloudflare 边缘 (并发数: ${parallelism})..."
     local -a valid=()
-    local d srv
-    for d in "${candidates[@]}"; do
-        srv=$(curl -sI --max-time 4 "https://$d" 2>/dev/null | grep -i '^server:' | tr -d '\r' | awk '{print tolower($2)}')
-        [[ "$srv" == "cloudflare" ]] && valid+=("$d")
-    done
+    local d idx tmp_dir
+    if (( parallelism > 1 )) && tmp_dir=$(mktemp -d 2>/dev/null); then
+        # 与 select_reality_sni 相同:低配机器上后台任务可能 fork 失败，
+        # 探测期间临时关闭 errexit，结果按原顺序回收。
+        local errexit_was_set=0 active=0
+        [[ $- == *e* ]] && errexit_was_set=1
+        set +e
+        for idx in "${!candidates[@]}"; do
+            {
+                if is_cloudflare_edge "${candidates[$idx]}"; then
+                    : > "${tmp_dir}/${idx}"
+                fi
+            } &
+            active=$((active + 1))
+            if (( active >= parallelism )); then
+                wait
+                active=0
+            fi
+        done
+        wait 2>/dev/null
+        (( errexit_was_set )) && set -e
+        for idx in "${!candidates[@]}"; do
+            if [[ -e "${tmp_dir}/${idx}" ]]; then
+                valid+=("${candidates[$idx]}")
+            fi
+        done
+        rm -rf "$tmp_dir"
+    else
+        for d in "${candidates[@]}"; do
+            if is_cloudflare_edge "$d"; then
+                valid+=("$d")
+            fi
+        done
+    fi
 
     if [[ ${#valid[@]} -lt 3 ]]; then
         warn "通过校验的优选域名不足(${#valid[@]} 个)，为避免可用性下降，已保留当前列表"
@@ -883,16 +966,23 @@ do_upgrade() {
     case "$choice" in
         1)
             info "更新 sing-box..."
-            install_or_upgrade_singbox_package true || error "sing-box 更新失败。请检查网络、磁盘空间或 GitHub 访问"
-            write_singbox_service
-            service_restart sing-box 2>/dev/null || true
-            success "sing-box 已更新并重启"
+            # 更新失败仅提示并返回菜单，不要用 error 退出整个面板
+            if install_or_upgrade_singbox_package true; then
+                write_singbox_service
+                service_restart sing-box 2>/dev/null || true
+                success "sing-box 已更新并重启"
+            else
+                warn "sing-box 更新失败。请检查网络、磁盘空间或 GitHub 访问；当前已安装版本不受影响"
+            fi
             ;;
         2)
             info "更新 cloudflared..."
-            install_cloudflared_binary || error "cloudflared 更新失败。请检查网络、磁盘空间或 GitHub 访问"
-            service_restart argo-tunnel 2>/dev/null || true
-            success "cloudflared 已更新并重启"
+            if install_cloudflared_binary; then
+                service_restart argo-tunnel 2>/dev/null || true
+                success "cloudflared 已更新并重启"
+            else
+                warn "cloudflared 更新失败。请检查网络、磁盘空间或 GitHub 访问；当前已安装版本不受影响"
+            fi
             ;;
         3)
             info "更新管理脚本..."
@@ -1006,7 +1096,9 @@ show_menu() {
 }
 
 main_menu() {
-    get_public_ip 2>/dev/null || true
+    # 注意不要用 get_public_ip:它失败时经 error 直接 exit，|| true 拦不住，
+    # 会导致无外网出口的机器一打开面板就退出。
+    refresh_public_ip_stack >/dev/null 2>&1 || true
 
     while true; do
         show_banner
@@ -1084,6 +1176,13 @@ main() {
             echo "  cfopt-auto on   开启每周自动刷新优选域名 (off 关闭, status 查看; 默认关闭)"
             echo "  status          查看状态"
             echo "  uninstall       卸载"
+            echo ""
+            echo "无人值守安装 (无交互终端时自动启用，默认单端口 443 + Argo 临时域名):"
+            echo "  可用环境变量覆盖默认值，例如:"
+            echo "    SBM_NODE_NAME=hk-01 SBM_REALITY_PORT=8443 bash $0 install"
+            echo "  支持: SBM_REALITY_PORT SBM_HY2_PORT SBM_SUBSCRIPTION_PORT SBM_REALITY_SNI"
+            echo "        SBM_NODE_NAME SBM_PUBLIC_IPV4 SBM_ARGO_TOKEN SBM_ARGO_DOMAIN"
+            echo "        SBM_HY2_UP_MBPS SBM_HY2_DOWN_MBPS SBM_CFOPT_AUTO"
             exit 0
             ;;
         *)  main_menu ;;

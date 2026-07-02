@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.36"
+SCRIPT_VERSION="2.7.0"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -101,10 +101,13 @@ DIM='\033[2m'
 NC='\033[0m'
 
 # ─── 辅助函数 ────────────────────────────────────────────────
-info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
-success() { echo -e "${GREEN}${BOLD}[OK]${NC} $*"; }
+# 日志一律写 stderr:多数工具函数的 stdout 会被 $(...) 捕获为数据
+# (IP 列表、端口监听等)，日志混进 stdout 会污染数据流(如警告文本被
+# 当作 IP 生成链接、被当作端口监听导致误报占用)。
+info()    { echo -e "${GREEN}[INFO]${NC} $*" >&2; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+success() { echo -e "${GREEN}${BOLD}[OK]${NC} $*" >&2; }
 
 separator() {
     echo -e "${DIM}─────────────────────────────────────────────${NC}"
@@ -113,6 +116,13 @@ separator() {
 press_enter() {
     echo ""
     prompt_read _ "按 Enter 返回主菜单..." || true
+}
+
+# 是否存在可交互的终端(stdin 是 tty，或 /dev/tty 可实际打开)。
+# 为假时安装流程进入无人值守模式，使用默认值/SBM_* 环境变量而非静默退出。
+sbm_can_prompt() {
+    [[ -t 0 ]] && return 0
+    { : < /dev/tty; } 2>/dev/null
 }
 
 prompt_read() {
@@ -275,6 +285,21 @@ service_is_active() {
     esac
 }
 
+# 轮询等待服务进入运行状态(最长 timeout 秒，1s 步长)。
+# 替代固定 sleep:服务起得快就立即返回，慢也比固定等待多几秒余量。
+wait_for_service_active() {
+    local svc="$1"
+    local timeout="${2:-5}"
+    local waited=0
+
+    while (( waited < timeout )); do
+        service_is_active "$svc" && return 0
+        sleep 1
+        waited=$((waited + 1))
+    done
+    service_is_active "$svc"
+}
+
 service_status() {
     local svc=$1
     case "$(service_manager)" in
@@ -335,34 +360,66 @@ is_valid_public_ipv4_for_link() {
     return 0
 }
 
-fetch_public_ipv4() {
-    local endpoint ip
-    for endpoint in \
-        "https://ifconfig.me" \
-        "https://api.ipify.org" \
-        "https://icanhazip.com"; do
-        ip=$(curl -4 -s --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)
-        if is_valid_public_ipv4_for_link "$ip"; then
-            printf '%s' "$ip"
-            return 0
+is_plausible_public_ipv6() {
+    local ip="${1-}"
+    [[ "$ip" == *:* && "$ip" != *"<"* ]]
+}
+
+# 并行探测多个公网 IP 端点，按端点列表顺序取第一个通过校验的结果。
+# 串行逐个探测最坏 3×4s，面板启动/生成链接会明显卡顿；并行后最坏 ~4s。
+# 临时目录创建失败(极端受限环境)时回退为原有串行探测。
+fetch_public_ip_from_endpoints() {
+    local curl_flag="$1" validator="$2"
+    shift 2
+    local endpoints=("$@")
+    local tmp_dir endpoint ip result="" idx=0
+
+    if ! tmp_dir=$(mktemp -d 2>/dev/null); then
+        for endpoint in "${endpoints[@]}"; do
+            ip=$(curl "$curl_flag" -s --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)
+            if "$validator" "$ip"; then
+                printf '%s' "$ip"
+                return 0
+            fi
+        done
+        return 1
+    fi
+
+    for endpoint in "${endpoints[@]}"; do
+        {
+            ip=$(curl "$curl_flag" -s --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)
+            if "$validator" "$ip"; then
+                printf '%s' "$ip" > "${tmp_dir}/${idx}"
+            fi
+        } &
+        idx=$((idx + 1))
+    done
+    wait 2>/dev/null || true
+
+    for (( idx = 0; idx < ${#endpoints[@]}; idx++ )); do
+        if [[ -s "${tmp_dir}/${idx}" ]]; then
+            result=$(<"${tmp_dir}/${idx}")
+            break
         fi
     done
-    return 1
+    rm -rf "$tmp_dir"
+
+    [[ -n "$result" ]] || return 1
+    printf '%s' "$result"
+}
+
+fetch_public_ipv4() {
+    fetch_public_ip_from_endpoints -4 is_valid_public_ipv4_for_link \
+        "https://ifconfig.me" \
+        "https://api.ipify.org" \
+        "https://icanhazip.com"
 }
 
 fetch_public_ipv6() {
-    local endpoint ip
-    for endpoint in \
+    fetch_public_ip_from_endpoints -6 is_plausible_public_ipv6 \
         "https://api6.ipify.org" \
         "https://ifconfig.me" \
-        "https://icanhazip.com"; do
-        ip=$(curl -6 -s --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)
-        if [[ "$ip" == *:* && "$ip" != *"<"* ]]; then
-            printf '%s' "$ip"
-            return 0
-        fi
-    done
-    return 1
+        "https://icanhazip.com"
 }
 
 append_public_ipv4_candidate() {
@@ -560,7 +617,7 @@ PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV WS_PORT WS_PATH NODE_NAME
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
-    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL
+    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_UP_MBPS HY2_DOWN_MBPS
 )
 
 is_param_key() {
@@ -573,6 +630,59 @@ is_param_key() {
 
 shell_quote() {
     printf '%q' "${1:-}"
+}
+
+# 参数文件(.params)专用编码:统一写成 "..."，只转义反斜杠、双引号和
+# 少量控制字符，与 parse_param_value 严格互逆。不能用 printf %q——它会把
+# 非 ASCII 值(如中文节点名)编码成 $'\346...' ANSI-C 形式，解析端还原不了。
+param_quote() {
+    local value="${1-}"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '"%s"' "$value"
+}
+
+# 解码参数值中的反斜杠转义。同时兼容两种来源:
+#   1) param_quote 写入的 "..." 形式(\\ \" \n \r \t)
+#   2) 旧版本 printf %q 写入的 $'...' 形式(\' 与 \NNN 八进制，
+#      中文等非 ASCII 值靠八进制序列还原)
+decode_param_escapes() {
+    local s="${1-}" out="" i=0 c n oct
+    local len=${#s}
+    while (( i < len )); do
+        c="${s:i:1}"
+        if [[ "$c" != "\\" ]] || (( i + 1 >= len )); then
+            out+="$c"
+            i=$((i + 1))
+            continue
+        fi
+        n="${s:i+1:1}"
+        i=$((i + 2))
+        case "$n" in
+            n) out+=$'\n' ;;
+            r) out+=$'\r' ;;
+            t) out+=$'\t' ;;
+            a) out+=$'\a' ;;
+            b) out+=$'\b' ;;
+            f) out+=$'\f' ;;
+            v) out+=$'\v' ;;
+            e|E) out+=$'\e' ;;
+            [0-7])
+                oct="$n"
+                while (( ${#oct} < 3 && i < len )) && [[ "${s:i:1}" == [0-7] ]]; do
+                    oct+="${s:i:1}"
+                    i=$((i + 1))
+                done
+                printf -v c '%b' "\\0${oct}"
+                out+="$c"
+                ;;
+            *) out+="$n" ;;
+        esac
+    done
+    printf '%s' "$out"
 }
 
 write_env_file() {
@@ -594,17 +704,21 @@ write_env_file() {
 write_param() {
     local key="$1"
     local value="${!key-}"
-    printf '%s=%s\n' "$key" "$(shell_quote "$value")"
+    printf '%s=%s\n' "$key" "$(param_quote "$value")"
 }
 
 parse_param_value() {
     local raw="$1"
 
     if [[ "$raw" == \"*\" && "$raw" == *\" && ${#raw} -ge 2 ]]; then
-        raw="${raw:1:${#raw}-2}"
-        raw="${raw//\\\"/\"}"
-        raw="${raw//\\\\/\\}"
-    elif [[ "$raw" == \'*\' && "$raw" == *\' && ${#raw} -ge 2 ]]; then
+        decode_param_escapes "${raw:1:${#raw}-2}"
+        return
+    fi
+    if [[ "$raw" == \$\'*\' && "$raw" == *\' && ${#raw} -ge 3 ]]; then
+        decode_param_escapes "${raw:2:${#raw}-3}"
+        return
+    fi
+    if [[ "$raw" == \'*\' && "$raw" == *\' && ${#raw} -ge 2 ]]; then
         raw="${raw:1:${#raw}-2}"
     fi
 
@@ -655,6 +769,16 @@ load_params() {
         fi
         if [[ -z "${HY2_MASQUERADE_URL:-}" ]]; then
             HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
+            need_save=true
+        fi
+        # 旧版本硬编码 up/down_mbps=100(Brutal 限速 100Mbps)；迁移为默认
+        # 不限速(BBR)。值仅在下次重写配置(sbm apply / 修改配置)时生效。
+        if [[ ! ${HY2_UP_MBPS+x} ]]; then
+            HY2_UP_MBPS=""
+            need_save=true
+        fi
+        if [[ ! ${HY2_DOWN_MBPS+x} ]]; then
+            HY2_DOWN_MBPS=""
             need_save=true
         fi
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
@@ -861,28 +985,21 @@ apply_cf_domains_override() {
     return 0
 }
 
+# 运行时参数快照/恢复:按 PARAM_KEYS 全量保存与回滚。
+# 新增参数只需加入 PARAM_KEYS，无需再同步任何位置参数列表。
+snapshot_runtime_params() {
+    local key
+    for key in "${PARAM_KEYS[@]}"; do
+        printf -v "SBM_PARAM_SNAPSHOT_${key}" '%s' "${!key-}"
+    done
+}
+
 restore_runtime_params() {
-    UUID="$1"
-    SHORT_ID="$2"
-    PRIVATE_KEY="$3"
-    PUBLIC_KEY="$4"
-    REALITY_PORT="$5"
-    REALITY_SNI="$6"
-    WS_PORT="$7"
-    WS_PATH="$8"
-    NODE_NAME="$9"
-    HY2_PORT="${10}"
-    HY2_PASSWORD="${11}"
-    HY2_SNI="${12}"
-    HY2_MASQUERADE_URL="${13:-${HY2_DEFAULT_MASQUERADE_URL}}"
-    SUBSCRIPTION_PORT="${14}"
-    ARGO_DOMAIN="${15}"
-    ARGO_TOKEN="${16}"
-    ARGO_BEST_CF_DOMAIN="${17}"
-    ARGO_BEST_CF_DOMAIN_IPV4="${18}"
-    ARGO_BEST_CF_DOMAIN_IPV6="${19}"
-    LINK_IPV4_SELECTION="${20:-all}"
-    PUBLIC_IPV4_OVERRIDE="${21:-}"
+    local key snap_var
+    for key in "${PARAM_KEYS[@]}"; do
+        snap_var="SBM_PARAM_SNAPSHOT_${key}"
+        printf -v "$key" '%s' "${!snap_var-}"
+    done
     reset_public_ip_cache
 }
 

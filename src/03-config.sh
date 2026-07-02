@@ -29,6 +29,9 @@ generate_params() {
     HY2_PASSWORD=$(openssl rand -base64 16)
     HY2_SNI="${HY2_DEFAULT_SNI}"
     HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
+    # 默认不限速(BBR)；设置数值会启用 Brutal 并按该带宽收发
+    HY2_UP_MBPS=""
+    HY2_DOWN_MBPS=""
 
     success "参数生成完成"
 }
@@ -182,6 +185,41 @@ firewall_port_open() {
     esac
 }
 
+# iptables 直接插入的规则重启即失效，按发行版方案尽力持久化:
+#   Debian/Ubuntu: netfilter-persistent(iptables-persistent 包)
+#   Alpine/OpenRC: /etc/init.d/iptables save + 开机自启
+#   RHEL 系:      iptables-services(写 /etc/sysconfig/iptables)
+#   兜底:         已存在 /etc/iptables 目录时写 rules.v4
+# 全部不可用时返回 1，由调用方提示用户。不主动安装持久化软件包。
+persist_iptables_rules() {
+    command -v iptables-save >/dev/null 2>&1 || return 1
+
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save >/dev/null 2>&1 && return 0
+    fi
+
+    if [[ -x /etc/init.d/iptables ]] && command -v rc-service >/dev/null 2>&1; then
+        if rc-service iptables save >/dev/null 2>&1; then
+            rc-update add iptables default >/dev/null 2>&1 || true
+            return 0
+        fi
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && \
+        systemctl list-unit-files iptables.service 2>/dev/null | grep -q '^iptables\.service'; then
+        if iptables-save > /etc/sysconfig/iptables 2>/dev/null; then
+            systemctl enable iptables >/dev/null 2>&1 || true
+            return 0
+        fi
+    fi
+
+    if [[ -d /etc/iptables ]]; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null && return 0
+    fi
+
+    return 1
+}
+
 # ─── 防火墙放行 ──────────────────────────────────────────────
 open_firewall() {
     local port=$1
@@ -205,6 +243,7 @@ open_firewall() {
 
     info "检测到防火墙方案: $(firewall_backend_label "$backend")，检查端口 ${port} 放行状态"
 
+    local iptables_rule_added=false
     for protocol in "${protocols[@]}"; do
         if firewall_port_open "$backend" "$port" "$protocol"; then
             info "端口 ${port}/${protocol} 已放行"
@@ -223,6 +262,7 @@ open_firewall() {
             iptables)
                 iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null || \
                     iptables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1
+                iptables_rule_added=true
                 ;;
         esac
 
@@ -233,6 +273,14 @@ open_firewall() {
             return 1
         fi
     done
+
+    if [[ "$backend" == "iptables" && "$iptables_rule_added" == "true" ]]; then
+        if persist_iptables_rules; then
+            info "iptables 放行规则已持久化"
+        else
+            warn "iptables 规则暂未持久化，重启后可能失效；建议安装 iptables-persistent (Debian/Ubuntu) / iptables-services (RHEL 系)，或改用 ufw / firewalld"
+        fi
+    fi
 
     return 0
 }
@@ -344,6 +392,51 @@ public_ipv4_override_label() {
     else
         printf '自动检测'
     fi
+}
+
+is_positive_int() {
+    [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+hy2_bandwidth_label() {
+    if is_positive_int "${HY2_UP_MBPS:-}" && is_positive_int "${HY2_DOWN_MBPS:-}"; then
+        printf '上行 %s / 下行 %s Mbps (Brutal)' "$HY2_UP_MBPS" "$HY2_DOWN_MBPS"
+    else
+        printf '不限速 (BBR)'
+    fi
+}
+
+# 交互修改 Hysteria2 带宽限速；有实际变化返回 0，取消/无变化返回 1
+prompt_hy2_bandwidth() {
+    local new_up new_down
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── Hysteria2 带宽限速 ──${NC}"
+    echo -e "  当前: ${BOLD}$(hy2_bandwidth_label)${NC}"
+    echo -e "  ${DIM}两项都填正整数则启用 Brutal 并按该带宽收发(按实际带宽的 90%~95% 填写);${NC}"
+    echo -e "  ${DIM}任一留空则不限速(BBR，带宽未知时推荐)。${NC}"
+    prompt_read new_up "  上行 Mbps (留空不限速): " || return 1
+    prompt_read new_down "  下行 Mbps (留空不限速): " || return 1
+
+    if [[ -n "$new_up" || -n "$new_down" ]]; then
+        if ! is_positive_int "$new_up" || ! is_positive_int "$new_down"; then
+            warn "上下行需同时为正整数，或同时留空恢复不限速"
+            return 1
+        fi
+    else
+        new_up=""
+        new_down=""
+    fi
+
+    if [[ "$new_up" == "${HY2_UP_MBPS:-}" && "$new_down" == "${HY2_DOWN_MBPS:-}" ]]; then
+        info "带宽设置未变化"
+        return 1
+    fi
+
+    HY2_UP_MBPS="$new_up"
+    HY2_DOWN_MBPS="$new_down"
+    success "Hysteria2 带宽已设置为: $(hy2_bandwidth_label)"
+    return 0
 }
 
 prompt_public_ipv4_override_optional() {
@@ -526,6 +619,15 @@ write_singbox_config() {
     json_cert_path=$(json_string "${CONFIG_DIR}/server.crt")
     json_hy2_masquerade_url=$(json_string "$HY2_MASQUERADE_URL")
 
+    # Hysteria2 带宽:两项均为正整数时启用 Brutal 并按该带宽限速；
+    # 否则不写入(sing-box 使用 BBR，不限速)。旧版硬编码 100/100 会把
+    # 大带宽 VPS 白白限在 100Mbps。
+    local hy2_bandwidth_lines=""
+    if [[ "${HY2_UP_MBPS:-}" =~ ^[1-9][0-9]*$ && "${HY2_DOWN_MBPS:-}" =~ ^[1-9][0-9]*$ ]]; then
+        hy2_bandwidth_lines="            \"up_mbps\": ${HY2_UP_MBPS},
+            \"down_mbps\": ${HY2_DOWN_MBPS},"
+    fi
+
     cat > "$CONFIG_FILE" << SINGBOX_EOF
 {
     "log": {
@@ -582,8 +684,7 @@ write_singbox_config() {
             "tag": "hysteria2-in",
             "listen": "::",
             "listen_port": ${HY2_PORT},
-            "up_mbps": 100,
-            "down_mbps": 100,
+${hy2_bandwidth_lines}
             "users": [
                 {
                     "password": ${json_hy2_password}

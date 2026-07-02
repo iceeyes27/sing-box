@@ -187,7 +187,7 @@ EOF
 
     load_params
     assert_eq 'uuid "quoted"' "$UUID" "params UUID round trip"
-    assert_eq 'sid\\backslash' "$SHORT_ID" "params short id round trip"
+    assert_eq 'sid\backslash' "$SHORT_ID" "params short id round trip"
     assert_eq '/path with spaces' "$WS_PATH" "params WS path round trip"
     assert_eq 'node # one' "$NODE_NAME" "params node name round trip"
     assert_eq 'sub token $value' "$SUB_TOKEN" "params token round trip"
@@ -196,6 +196,245 @@ EOF
     assert_eq 'hy2 pass "quoted"' "$HY2_PASSWORD" "params HY2 password round trip"
 
     rm -rf "$tmp"
+}
+
+test_params_cjk_and_legacy_ansi_c_round_trip() {
+    local tmp
+    tmp=$(mktemp -d)
+    PARAMS_FILE="${tmp}/params"
+    CONFIG_DIR="$tmp"
+
+    # 旧版本 printf %q 会把非 ASCII 值写成 $'...' 八进制形式，
+    # 解析端必须能还原(否则升级后中文节点名变成字面 $'\346...' 乱码)。
+    cat > "$PARAMS_FILE" <<'EOF'
+UUID=plain-uuid
+NODE_NAME=$'\346\210\221\347\232\204 \350\212\202\347\202\271'
+REALITY_SNI=www.microsoft.com
+EOF
+    NODE_NAME=""
+    load_params
+    assert_eq '我的 节点' "$NODE_NAME" "legacy ANSI-C quoted CJK node name decodes"
+
+    # 中文 + 空格节点名 save/load 必须逐字还原
+    UUID="uuid"; SHORT_ID="sid"; PRIVATE_KEY="pk"; PUBLIC_KEY="pub"
+    REALITY_PORT="443"; REALITY_SNI="www.microsoft.com"; REALITY_SNI_PREV=""
+    WS_PORT="18080"; WS_PATH="/p"; NODE_NAME="香港 VPS-01 节点"
+    SUB_TOKEN="tok"; SUBSCRIPTION_PORT="24630"
+    ARGO_DOMAIN=""; ARGO_TOKEN=""; ARGO_BEST_CF_DOMAIN=""
+    ARGO_BEST_CF_DOMAIN_IPV4=""; ARGO_BEST_CF_DOMAIN_IPV6=""
+    LINK_IPV4_SELECTION="all"; PUBLIC_IPV4_OVERRIDE=""
+    HY2_PORT="8443"; HY2_PASSWORD="pw"; HY2_SNI="bing.com"
+    HY2_MASQUERADE_URL="https://www.bing.com"
+    save_params
+    NODE_NAME=""
+    load_params
+    assert_eq '香港 VPS-01 节点' "$NODE_NAME" "CJK node name round trip"
+
+    rm -rf "$tmp"
+}
+
+test_probe_available_cf_domains_keeps_order() {
+    local result parallelism_def
+    local -a cf_domains_backup=("${CF_DOMAINS[@]}")
+
+    CF_DOMAINS=("cf1.example.com" "cf2.example.com" "cf3.example.com")
+    curl() {
+        local url
+        for url in "$@"; do :; done
+        case "$url" in
+            *cf1*|*cf3*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    result=$(probe_available_cf_domains "")
+    assert_eq $'cf1.example.com\ncf3.example.com' "$result" "parallel CF probe filters and keeps order"
+
+    # 低配路径:并发度 1 时走串行探测，结果必须一致
+    parallelism_def=$(declare -f get_reality_probe_parallelism)
+    get_reality_probe_parallelism() { echo 1; }
+    result=$(probe_available_cf_domains "")
+    assert_eq $'cf1.example.com\ncf3.example.com' "$result" "serial CF probe filters and keeps order"
+
+    unset -f curl get_reality_probe_parallelism
+    eval "$parallelism_def"
+    CF_DOMAINS=("${cf_domains_backup[@]}")
+}
+
+test_wait_for_service_active_polls_until_ready() {
+    local tmp active_def
+    tmp=$(mktemp -d)
+    active_def=$(declare -f service_is_active)
+
+    SBM_TEST_ACTIVE_COUNT_FILE="${tmp}/count"
+    service_is_active() {
+        local count=0
+        [[ -f "$SBM_TEST_ACTIVE_COUNT_FILE" ]] && count=$(<"$SBM_TEST_ACTIVE_COUNT_FILE")
+        count=$((count + 1))
+        printf '%s' "$count" > "$SBM_TEST_ACTIVE_COUNT_FILE"
+        (( count >= 3 ))
+    }
+    wait_for_service_active dummy 5 || fail "wait_for_service_active should succeed once service becomes active"
+    assert_eq "3" "$(<"$SBM_TEST_ACTIVE_COUNT_FILE")" "service polled until active"
+
+    service_is_active() { return 1; }
+    if wait_for_service_active dummy 1; then
+        fail "wait_for_service_active should fail when service never activates"
+    fi
+
+    unset -f service_is_active
+    eval "$active_def"
+    unset SBM_TEST_ACTIVE_COUNT_FILE
+    rm -rf "$tmp"
+}
+
+test_hysteria2_bandwidth_is_optional() {
+    local tmp config chown_def
+    tmp=$(mktemp -d)
+
+    chown_def=$(declare -f chown 2>/dev/null || true)
+    chown() { return 0; }
+    sing-box() {
+        [[ "${1:-}" == "check" ]] && return 0
+        return 1
+    }
+    CONFIG_DIR="$tmp"
+    CONFIG_FILE="${tmp}/config.json"
+    UUID="uuid-1"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    PRIVATE_KEY="private"
+    SHORT_ID="abcd1234"
+    WS_PORT="18080"
+    WS_PATH="/abcd1234"
+    HY2_PORT="443"
+    HY2_PASSWORD="hy2-password"
+    HY2_SNI="bing.com"
+    HY2_MASQUERADE_URL="https://www.bing.com"
+
+    HY2_UP_MBPS=""
+    HY2_DOWN_MBPS=""
+    write_singbox_config >/dev/null
+    config=$(<"$CONFIG_FILE")
+    assert_not_contains "$config" '"up_mbps"' "HY2 defaults to no bandwidth cap (BBR)"
+    assert_not_contains "$config" '"down_mbps"' "HY2 defaults to no down cap"
+
+    HY2_UP_MBPS="50"
+    HY2_DOWN_MBPS="200"
+    write_singbox_config >/dev/null
+    config=$(<"$CONFIG_FILE")
+    assert_contains "$config" '"up_mbps": 50,' "HY2 up_mbps applied"
+    assert_contains "$config" '"down_mbps": 200,' "HY2 down_mbps applied"
+
+    HY2_UP_MBPS=""
+    HY2_DOWN_MBPS=""
+    unset -f chown sing-box
+    [[ -n "$chown_def" ]] && eval "$chown_def"
+    rm -rf "$tmp"
+}
+
+test_persist_iptables_rules_uses_netfilter_persistent() {
+    local tmp
+    tmp=$(mktemp -d)
+    make_cmd "${tmp}/iptables-save" '#!/usr/bin/env bash
+exit 0'
+    make_cmd "${tmp}/netfilter-persistent" '#!/usr/bin/env bash
+[[ "${1:-}" == "save" ]] && exit 0
+exit 1'
+    PATH="${tmp}:$PATH" persist_iptables_rules || fail "netfilter-persistent save should persist rules"
+
+    if PATH="${tmp}-missing" persist_iptables_rules 2>/dev/null; then
+        fail "persist_iptables_rules should fail without iptables-save"
+    fi
+    rm -rf "$tmp"
+}
+
+test_apply_install_env_overrides_sets_values() {
+    REALITY_PORT="443"; HY2_PORT="8443"; SUBSCRIPTION_PORT="24630"
+    REALITY_SNI=""; NODE_NAME="sing-box-vps"
+    ARGO_TOKEN=""; ARGO_DOMAIN=""; PUBLIC_IPV4_OVERRIDE=""
+
+    SBM_REALITY_PORT="9443"
+    SBM_HY2_PORT="9444"
+    SBM_SUBSCRIPTION_PORT="24631"
+    SBM_REALITY_SNI="www.apple.com"
+    SBM_NODE_NAME="hk-01"
+    SBM_PUBLIC_IPV4="198.51.100.10"
+    SBM_ARGO_TOKEN="eyJtoken"
+    SBM_ARGO_DOMAIN="https://v2.example.com/"
+    SBM_HY2_UP_MBPS="30"
+    SBM_HY2_DOWN_MBPS="300"
+    HY2_UP_MBPS=""; HY2_DOWN_MBPS=""
+    apply_install_env_overrides
+
+    assert_eq "9443" "$REALITY_PORT" "env override Reality port"
+    assert_eq "9444" "$HY2_PORT" "env override HY2 port"
+    assert_eq "24631" "$SUBSCRIPTION_PORT" "env override subscription port"
+    assert_eq "www.apple.com" "$REALITY_SNI" "env override Reality SNI"
+    assert_eq "hk-01" "$NODE_NAME" "env override node name"
+    assert_eq "198.51.100.10" "$PUBLIC_IPV4_OVERRIDE" "env override public IPv4"
+    assert_eq "eyJtoken" "$ARGO_TOKEN" "env override Argo token"
+    assert_eq "v2.example.com" "$ARGO_DOMAIN" "env override Argo domain normalized"
+    assert_eq "30" "$HY2_UP_MBPS" "env override HY2 up mbps"
+    assert_eq "300" "$HY2_DOWN_MBPS" "env override HY2 down mbps"
+
+    unset SBM_REALITY_PORT SBM_HY2_PORT SBM_SUBSCRIPTION_PORT SBM_REALITY_SNI
+    unset SBM_NODE_NAME SBM_PUBLIC_IPV4 SBM_ARGO_TOKEN SBM_ARGO_DOMAIN
+    unset SBM_HY2_UP_MBPS SBM_HY2_DOWN_MBPS
+    HY2_UP_MBPS=""; HY2_DOWN_MBPS=""
+}
+
+test_apply_install_env_overrides_rejects_invalid_values() {
+    PUBLIC_IPV4_OVERRIDE=""; ARGO_TOKEN=""; ARGO_DOMAIN=""
+
+    SBM_PUBLIC_IPV4="192.168.1.5"
+    SBM_ARGO_TOKEN="eyJonly"
+    SBM_HY2_UP_MBPS="abc"
+    SBM_HY2_DOWN_MBPS="100"
+    HY2_UP_MBPS=""; HY2_DOWN_MBPS=""
+    apply_install_env_overrides
+
+    assert_eq "" "$PUBLIC_IPV4_OVERRIDE" "private IPv4 env override ignored"
+    assert_eq "" "$ARGO_TOKEN" "Argo token without domain ignored"
+    assert_eq "" "$ARGO_DOMAIN" "Argo domain stays empty without pair"
+    assert_eq "" "$HY2_UP_MBPS" "non-numeric HY2 bandwidth ignored"
+    assert_eq "" "$HY2_DOWN_MBPS" "paired HY2 bandwidth ignored when invalid"
+
+    unset SBM_PUBLIC_IPV4 SBM_ARGO_TOKEN SBM_HY2_UP_MBPS SBM_HY2_DOWN_MBPS
+}
+
+test_fetch_public_ip_parallel_prefers_endpoint_order() {
+    local result
+
+    curl() {
+        local url
+        for url in "$@"; do :; done
+        case "$url" in
+            *ifconfig.me*) printf '198.51.100.10' ;;
+            *api.ipify.org*) printf '203.0.113.20' ;;
+            *) return 1 ;;
+        esac
+    }
+    result=$(fetch_public_ipv4)
+    assert_eq "198.51.100.10" "$result" "parallel IPv4 fetch prefers first endpoint"
+
+    curl() {
+        local url
+        for url in "$@"; do :; done
+        case "$url" in
+            *api6.ipify.org*) printf '2001:db8::1' ;;
+            *) printf 'not-an-ip' ;;
+        esac
+    }
+    result=$(fetch_public_ipv6)
+    assert_eq "2001:db8::1" "$result" "parallel IPv6 fetch validates result"
+
+    curl() { return 1; }
+    if fetch_public_ipv4 >/dev/null; then
+        fail "IPv4 fetch should fail when all endpoints fail"
+    fi
+
+    unset -f curl
 }
 
 test_ipv4_public_link_validation() {
@@ -229,6 +468,7 @@ test_ipv4_override_takes_priority() {
 }
 
 test_ipv4_override_generates_direct_links() {
+    local hy2_available_def hy2_pin_def
     UUID="uuid-1"
     NODE_NAME="node"
     REALITY_PORT="443"
@@ -251,10 +491,18 @@ test_ipv4_override_generates_direct_links() {
     urlencode() {
         echo "$1"
     }
+    hy2_available_def=$(declare -f hy2_share_link_available)
+    hy2_pin_def=$(declare -f get_hy2_cert_pin_sha256)
+    hy2_share_link_available() { return 0; }
+    get_hy2_cert_pin_sha256() { printf 'ab12'; }
 
     build_share_links >/dev/null
     assert_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@198.51.100.88:443" "override Reality link"
     assert_contains "$GENERATED_HY2_LINKS" "hysteria2://hy2@198.51.100.88:443" "override Hysteria2 link"
+
+    unset -f hy2_share_link_available get_hy2_cert_pin_sha256
+    eval "$hy2_available_def"
+    eval "$hy2_pin_def"
 }
 
 test_ip_detection_failure_keeps_argo_link_generation() {
@@ -424,12 +672,30 @@ printf '\''%s\n'\'' "$*" >> "${NTPD_LOG}"
 }
 
 test_runtime_param_restore_is_complete() {
-    restore_runtime_params \
-        "uuid-old" "sid-old" "private-old" "public-old" \
-        "443" "www.microsoft.com" "18080" "/sid-old" \
-        "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
-        "24630" "argo.old.example.com" "token-old" \
-        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all"
+    UUID="uuid-old"
+    SHORT_ID="sid-old"
+    PRIVATE_KEY="private-old"
+    PUBLIC_KEY="public-old"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    REALITY_SNI_PREV="www.apple.com"
+    WS_PORT="18080"
+    WS_PATH="/sid-old"
+    NODE_NAME="node-old"
+    HY2_PORT="8443"
+    HY2_PASSWORD="hy2-old"
+    HY2_SNI="bing.com"
+    HY2_MASQUERADE_URL="https://www.bing.com"
+    SUB_TOKEN="sub-old"
+    SUBSCRIPTION_PORT="24630"
+    ARGO_DOMAIN="argo.old.example.com"
+    ARGO_TOKEN="token-old"
+    ARGO_BEST_CF_DOMAIN="cf-old.example.com"
+    ARGO_BEST_CF_DOMAIN_IPV4="cf4-old.example.com"
+    ARGO_BEST_CF_DOMAIN_IPV6="cf6-old.example.com"
+    LINK_IPV4_SELECTION="all"
+    PUBLIC_IPV4_OVERRIDE="198.51.100.77"
+    snapshot_runtime_params
 
     UUID="uuid-new"
     SHORT_ID="sid-new"
@@ -451,13 +717,11 @@ test_runtime_param_restore_is_complete() {
     ARGO_BEST_CF_DOMAIN_IPV4="cf4-new.example.com"
     ARGO_BEST_CF_DOMAIN_IPV6="cf6-new.example.com"
     LINK_IPV4_SELECTION="203.0.113.20"
+    REALITY_SNI_PREV="www.dell.com"
+    SUB_TOKEN="sub-new"
+    PUBLIC_IPV4_OVERRIDE="203.0.113.99"
 
-    restore_runtime_params \
-        "uuid-old" "sid-old" "private-old" "public-old" \
-        "443" "www.microsoft.com" "18080" "/sid-old" \
-        "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
-        "24630" "argo.old.example.com" "token-old" \
-        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all"
+    restore_runtime_params
 
     assert_eq "uuid-old" "$UUID" "restore UUID"
     assert_eq "sid-old" "$SHORT_ID" "restore Short ID"
@@ -479,6 +743,9 @@ test_runtime_param_restore_is_complete() {
     assert_eq "cf4-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV4" "restore Argo IPv4 cache"
     assert_eq "cf6-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV6" "restore Argo IPv6 cache"
     assert_eq "all" "$LINK_IPV4_SELECTION" "restore IPv4 link selection"
+    assert_eq "www.apple.com" "$REALITY_SNI_PREV" "restore previous Reality SNI"
+    assert_eq "sub-old" "$SUB_TOKEN" "restore subscription token"
+    assert_eq "198.51.100.77" "$PUBLIC_IPV4_OVERRIDE" "restore public IPv4 override"
 }
 
 test_hysteria2_config_uses_masquerade_proxy() {
@@ -948,7 +1215,7 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     refresh_argo_runtime >/dev/null
     assert_eq "new.trycloudflare.com" "$ARGO_DOMAIN" "temporary Argo domain renew"
     assert_eq "" "$ARGO_BEST_CF_DOMAIN" "temporary Argo cache clear"
-    assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN=new.trycloudflare.com' "temporary Argo params save"
+    assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN="new.trycloudflare.com"' "temporary Argo params save"
 
     unset -f write_argo_service service_restart service_logs sleep
     eval "$write_argo_service_def"
@@ -1033,7 +1300,10 @@ test_subscription_gateway_uses_local_https_origin() {
     server_body=$(<"$SUBSCRIPTION_SERVER")
     assert_contains "$service_body" "--listen 127.0.0.1" "subscription local listen"
     assert_contains "$service_body" "--upstream-port 18080" "subscription WS upstream"
+    assert_contains "$service_body" "User=nobody" "subscription drops privileges"
     assert_contains "$argo_body" "--url http://127.0.0.1:24630" "Argo HTTPS origin"
+    assert_contains "$argo_body" "User=nobody" "argo drops privileges"
+    assert_not_contains "$argo_body" "Group=nogroup" "argo avoids Debian-only nogroup"
     assert_contains "$server_body" "def proxy_to_upstream" "subscription gateway proxy"
 
     unset -f service_manager service_daemon_reload
@@ -1262,6 +1532,19 @@ test_service_manager_openrc
 test_package_manager_priority
 test_package_manager_alpine
 test_legacy_params_migration
+test_params_parser_is_safe_and_round_trips
+test_params_cjk_and_legacy_ansi_c_round_trip
+test_apply_install_env_overrides_sets_values
+test_apply_install_env_overrides_rejects_invalid_values
+test_fetch_public_ip_parallel_prefers_endpoint_order
+test_probe_available_cf_domains_keeps_order
+test_wait_for_service_active_polls_until_ready
+test_hysteria2_bandwidth_is_optional
+test_persist_iptables_rules_uses_netfilter_persistent
+test_ipv4_public_link_validation
+test_ipv4_override_takes_priority
+test_ipv4_override_generates_direct_links
+test_ip_detection_failure_keeps_argo_link_generation
 test_ipv6_only_links_are_argo_only
 test_multiple_ipv4_direct_links_follow_selection
 test_single_ipv4_falls_back_without_candidate_list

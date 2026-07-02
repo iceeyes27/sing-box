@@ -65,7 +65,6 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 User=nobody
-Group=nogroup
 EOF
     [[ -n "${ARGO_TOKEN:-}" ]] && printf 'EnvironmentFile=%s\n' "$ARGO_ENV_FILE" >> "$ARGO_SERVICE"
     cat >> "$ARGO_SERVICE" << EOF
@@ -231,6 +230,7 @@ description="SBM Subscription Server"
 command="/usr/bin/python3"
 command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}"
 command_background=true
+command_user="nobody"
 pidfile="/run/sbm-subscription.pid"
 output_log="/var/log/sbm-subscription.log"
 error_log="/var/log/sbm-subscription.log"
@@ -260,6 +260,7 @@ After=network.target
 
 [Service]
 Type=simple
+User=nobody
 EnvironmentFile=${SUBSCRIPTION_ENV_FILE}
 ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}
 Restart=on-failure
@@ -298,8 +299,9 @@ fetch_argo_domain() {
         return 0
     fi
 
-    # 临时域名模式获取逻辑
-    local max=10 i=0
+    # 临时域名模式获取逻辑:立即查一次日志，未出现则 2s 间隔轮询
+    # (总预算约 30s，与旧 3s×10 相同，但域名一出现就即时返回)
+    local max=15 i=0
     local previous_domain="${ARGO_DOMAIN:-}"
     ARGO_DOMAIN=""
     while [[ $i -lt $max ]]; do
@@ -314,7 +316,7 @@ fetch_argo_domain() {
             return 0
         fi
         i=$((i + 1))
-        sleep 3
+        sleep 2
     done
     return 1
 }
@@ -358,7 +360,7 @@ refresh_argo_runtime() {
     fi
 
     if [[ -z "${ARGO_TOKEN:-}" ]]; then
-        sleep 5
+        # fetch_argo_domain 自带轮询，无需前置固定等待
         if ! fetch_argo_domain; then
             warn "未获取到新的 Argo 临时域名，订阅链接未更新"
             return 1
