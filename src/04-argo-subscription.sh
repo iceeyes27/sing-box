@@ -322,11 +322,14 @@ fetch_argo_domain() {
 }
 
 refresh_argo_domain_if_needed() {
-    service_is_active argo-tunnel || return
+    # 本函数在 set -e 下常被裸调用，任何路径都必须返回 0：
+    # 「argo-tunnel 未运行」「域名未变化」都是正常情况，
+    # 若透传非零返回码会直接终止整个脚本。
+    service_is_active argo-tunnel || return 0
 
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         # 固定域名模式域名由用户配置，进程重启也不变，无需从日志重新抓取。
-        return
+        return 0
     fi
 
     # 临时隧道每次重启都会分配新的随机域名，缓存里的旧域名会变成死链。
@@ -334,12 +337,15 @@ refresh_argo_domain_if_needed() {
     # 保证 `sbm links` 输出的永远是当前实际可用的临时域名。
     local cached_domain="${ARGO_DOMAIN:-}"
     if fetch_argo_domain 2>/dev/null; then
-        [[ "${ARGO_DOMAIN:-}" != "$cached_domain" ]] && save_params
+        if [[ "${ARGO_DOMAIN:-}" != "$cached_domain" ]]; then
+            save_params
+        fi
     else
         # 抓取失败(如日志已滚动或进程刚起还没打印域名)时回退到缓存域名，
         # 避免 Argo 链接直接消失。
         ARGO_DOMAIN="$cached_domain"
     fi
+    return 0
 }
 
 refresh_argo_runtime() {

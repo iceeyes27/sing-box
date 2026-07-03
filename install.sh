@@ -80,6 +80,9 @@ HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
 HY2_DEFAULT_MASQUERADE_URL="https://www.bing.com"
 TIME_SKEW_THRESHOLD=30
+# ensure_time_sync 每次进程只完整执行一次(检测+修复都不便宜)，
+# 避免菜单里每个操作都重复触发时间同步流程。
+TIME_SYNC_CHECKED=false
 LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
 LOW_MEMORY_SWAP_CREATED=false
 
@@ -1477,6 +1480,55 @@ is_time_synchronized() {
     fi
 }
 
+# 是否存在能查询 NTP 同步状态的工具。
+# busybox ntpd 等环境查不到状态，此时「无法验证」不能当作「未同步」，
+# 否则每次调用都会触发一轮无意义的同步修复。
+time_sync_status_verifiable() {
+    command -v timedatectl &>/dev/null || command -v chronyc &>/dev/null
+}
+
+# 通过 HTTPS 响应头的 Date 字段获取网络 UTC 时间。
+# 用于在 RTC 读数可疑时仲裁系统时间是否真的有问题：
+# 部分虚拟化平台(NAT VPS/容器)的 RTC 是冻结或乱值，偏差可达数十年，
+# 这种情况下 NTP 永远「修不好」RTC，但系统时间本身是准的。
+get_http_date_epoch() {
+    local url raw day mon year hms mon_num epoch
+
+    for url in https://www.cloudflare.com https://www.apple.com; do
+        raw=$(curl -sI --connect-timeout 5 --max-time 8 "$url" 2>/dev/null | tr -d '\r' | \
+              awk 'tolower($1) == "date:" { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
+        # RFC 7231 格式: Thu, 03 Jul 2026 04:35:43 GMT
+        [[ "$raw" =~ ([0-9]{1,2})[[:space:]]+([A-Z][a-z]{2})[[:space:]]+([0-9]{4})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2}) ]] || continue
+        day="${BASH_REMATCH[1]}"
+        mon="${BASH_REMATCH[2]}"
+        year="${BASH_REMATCH[3]}"
+        hms="${BASH_REMATCH[4]}"
+        case "$mon" in
+            Jan) mon_num=01 ;; Feb) mon_num=02 ;; Mar) mon_num=03 ;; Apr) mon_num=04 ;;
+            May) mon_num=05 ;; Jun) mon_num=06 ;; Jul) mon_num=07 ;; Aug) mon_num=08 ;;
+            Sep) mon_num=09 ;; Oct) mon_num=10 ;; Nov) mon_num=11 ;; Dec) mon_num=12 ;;
+            *) continue ;;
+        esac
+        [[ ${#day} -eq 1 ]] && day="0${day}"
+        # 转成 "YYYY-MM-DD HH:MM:SS"，GNU date 和 busybox date 都能解析
+        epoch=$(LC_ALL=C date -u -d "${year}-${mon_num}-${day} ${hms}" +%s 2>/dev/null) || continue
+        [[ "$epoch" =~ ^[0-9]+$ ]] || continue
+        (( epoch >= 946684800 )) || continue
+        echo "$epoch"
+        return 0
+    done
+    return 1
+}
+
+get_network_time_skew_seconds() {
+    local system_epoch net_epoch diff
+    net_epoch=$(get_http_date_epoch) || return 1
+    system_epoch=$(date -u +%s 2>/dev/null) || return 1
+    diff=$((system_epoch - net_epoch))
+    (( diff < 0 )) && diff=$(( -diff ))
+    echo "$diff"
+}
+
 existing_time_sync_service() {
     local svc
     for svc in systemd-timesyncd chrony chronyd ntp ntpd openntpd; do
@@ -1559,16 +1611,32 @@ attempt_time_sync() {
 }
 
 ensure_time_sync() {
-    local skew=""
+    local skew="" net_skew=""
     local need_sync=false
+
+    # 检测+修复流程不便宜(多次探测、重启服务)，同一进程内只完整执行一次，
+    # 避免菜单里每选一个操作都重复触发。
+    if [[ "${TIME_SYNC_CHECKED:-false}" == "true" ]]; then
+        return 0
+    fi
+    TIME_SYNC_CHECKED=true
 
     if skew=$(get_time_skew_seconds 2>/dev/null); then
         if (( skew > TIME_SKEW_THRESHOLD )); then
-            need_sync=true
+            # RTC 偏差过大时先用网络时间仲裁：虚拟化平台的 RTC 可能本身就是
+            # 冻结/乱值(偏差可达数十年)，若系统时间与网络时间一致则无需修复。
+            if net_skew=$(get_network_time_skew_seconds 2>/dev/null) && (( net_skew <= TIME_SKEW_THRESHOLD )); then
+                info "系统时间与网络时间一致 (误差 ${net_skew}s)，RTC 偏差 ${skew}s 判定为宿主机 RTC 异常，已忽略"
+                skew="$net_skew"
+            else
+                need_sync=true
+            fi
         fi
     fi
 
-    if ! is_time_synchronized; then
+    # 只有在存在可查询同步状态的工具(timedatectl/chronyc)且明确报告未同步时
+    # 才触发修复；busybox ntpd 等无法验证的环境不把「查不到」当「未同步」。
+    if time_sync_status_verifiable && ! is_time_synchronized; then
         need_sync=true
     fi
 
@@ -1585,12 +1653,22 @@ ensure_time_sync() {
 
     attempt_time_sync
 
-    if ! is_time_synchronized; then
+    if time_sync_status_verifiable && ! is_time_synchronized; then
         install_time_sync_service && attempt_time_sync
     fi
 
+    # 修复后复查：网络时间优先于 RTC，RTC 只在拿不到网络时间时兜底
+    if net_skew=$(get_network_time_skew_seconds 2>/dev/null); then
+        if (( net_skew <= TIME_SKEW_THRESHOLD )); then
+            success "系统时间已同步，与网络时间误差 ${net_skew}s"
+            return 0
+        fi
+        warn "时间同步后系统时间与网络时间仍相差 ${net_skew}s，请手动检查 NTP 服务"
+        return 1
+    fi
+
     if skew=$(get_time_skew_seconds 2>/dev/null); then
-        if is_time_synchronized && (( skew <= TIME_SKEW_THRESHOLD )); then
+        if (( skew <= TIME_SKEW_THRESHOLD )); then
             success "系统时间已同步，当前与 RTC 误差 ${skew}s"
             return 0
         fi
@@ -2757,11 +2835,14 @@ fetch_argo_domain() {
 }
 
 refresh_argo_domain_if_needed() {
-    service_is_active argo-tunnel || return
+    # 本函数在 set -e 下常被裸调用，任何路径都必须返回 0：
+    # 「argo-tunnel 未运行」「域名未变化」都是正常情况，
+    # 若透传非零返回码会直接终止整个脚本。
+    service_is_active argo-tunnel || return 0
 
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         # 固定域名模式域名由用户配置，进程重启也不变，无需从日志重新抓取。
-        return
+        return 0
     fi
 
     # 临时隧道每次重启都会分配新的随机域名，缓存里的旧域名会变成死链。
@@ -2769,12 +2850,15 @@ refresh_argo_domain_if_needed() {
     # 保证 `sbm links` 输出的永远是当前实际可用的临时域名。
     local cached_domain="${ARGO_DOMAIN:-}"
     if fetch_argo_domain 2>/dev/null; then
-        [[ "${ARGO_DOMAIN:-}" != "$cached_domain" ]] && save_params
+        if [[ "${ARGO_DOMAIN:-}" != "$cached_domain" ]]; then
+            save_params
+        fi
     else
         # 抓取失败(如日志已滚动或进程刚起还没打印域名)时回退到缓存域名，
         # 避免 Argo 链接直接消失。
         ARGO_DOMAIN="$cached_domain"
     fi
+    return 0
 }
 
 refresh_argo_runtime() {
@@ -3173,7 +3257,7 @@ build_direct_share_links_for_ip() {
     local family_label="$2"
     local host remark reality_name
 
-    [[ -n "$ip" ]] || return
+    [[ -n "$ip" ]] || return 0
     host=$(format_url_host "$ip")
 
     if [[ -n "$family_label" ]]; then
@@ -3233,7 +3317,7 @@ build_argo_link_for_domain() {
     local family_label="$2"
     local argo_name argo_remark
 
-    [[ -n "$best_cf_domain" ]] || return
+    [[ -n "$best_cf_domain" ]] || return 0
 
     if [[ -n "$family_label" ]]; then
         argo_name="${NODE_NAME}-${family_label}-Argo"
@@ -3338,7 +3422,7 @@ subscription_local_url() {
 show_subscription_url() {
     local public_subscription_url local_subscription_url
 
-    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return
+    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return 0
 
     echo ""
     echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"

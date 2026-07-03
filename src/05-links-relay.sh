@@ -357,7 +357,7 @@ build_direct_share_links_for_ip() {
     local family_label="$2"
     local host remark reality_name
 
-    [[ -n "$ip" ]] || return
+    [[ -n "$ip" ]] || return 0
     host=$(format_url_host "$ip")
 
     if [[ -n "$family_label" ]]; then
@@ -417,7 +417,7 @@ build_argo_link_for_domain() {
     local family_label="$2"
     local argo_name argo_remark
 
-    [[ -n "$best_cf_domain" ]] || return
+    [[ -n "$best_cf_domain" ]] || return 0
 
     if [[ -n "$family_label" ]]; then
         argo_name="${NODE_NAME}-${family_label}-Argo"
@@ -522,7 +522,7 @@ subscription_local_url() {
 show_subscription_url() {
     local public_subscription_url local_subscription_url
 
-    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return
+    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return 0
 
     echo ""
     echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
