@@ -35,6 +35,9 @@ HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
 HY2_DEFAULT_MASQUERADE_URL="https://www.bing.com"
 TIME_SKEW_THRESHOLD=30
+# ensure_time_sync 每次进程只完整执行一次(检测+修复都不便宜)，
+# 避免菜单里每个操作都重复触发时间同步流程。
+TIME_SYNC_CHECKED=false
 LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
 LOW_MEMORY_SWAP_CREATED=false
 

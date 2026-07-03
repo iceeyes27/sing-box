@@ -990,10 +990,97 @@ test_refresh_argo_domain_if_needed_tracks_temp_restart() {
     refresh_argo_domain_if_needed
     assert_eq "fixed.example.com" "$ARGO_DOMAIN" "token mode keeps fixed domain"
 
+    # 域名未变化时必须返回 0：本函数在 set -e 下被裸调用，
+    # 返回非零会终止整个脚本 (v2.6.36 「任意菜单操作后退出」回归)
+    ARGO_TOKEN=""
+    ARGO_DOMAIN="same.trycloudflare.com"
+    saved=false
+    fetch_argo_domain() { ARGO_DOMAIN="same.trycloudflare.com"; return 0; }
+    refresh_argo_domain_if_needed || fail "unchanged temp domain must return 0"
+    [[ "$saved" == "false" ]] || fail "unchanged temp domain should not re-save params"
+
+    # 抓取失败(回退缓存)路径同样必须返回 0
+    fetch_argo_domain() { ARGO_DOMAIN=""; return 1; }
+    refresh_argo_domain_if_needed || fail "fetch failure fallback must return 0"
+
+    # argo-tunnel 未运行时必须返回 0
+    service_is_active() { return 1; }
+    refresh_argo_domain_if_needed || fail "inactive argo-tunnel must return 0"
+
     unset -f service_is_active fetch_argo_domain save_params
     [[ -n "$service_is_active_def" ]] && eval "$service_is_active_def"
     [[ -n "$fetch_argo_domain_def" ]] && eval "$fetch_argo_domain_def"
     [[ -n "$save_params_def" ]] && eval "$save_params_def"
+}
+
+test_ensure_time_sync_skips_when_already_checked() {
+    local out get_time_skew_def
+
+    get_time_skew_def=$(declare -f get_time_skew_seconds)
+
+    # 同一进程内第二次调用直接短路：不再探测 RTC，也不输出任何内容
+    TIME_SYNC_CHECKED=true
+    get_time_skew_seconds() { echo "PROBED" >&2; return 1; }
+    out=$(ensure_time_sync 2>&1) || fail "cached ensure_time_sync must return 0"
+    assert_eq "" "$out" "cached ensure_time_sync produces no output"
+
+    TIME_SYNC_CHECKED=false
+    eval "$get_time_skew_def"
+}
+
+test_ensure_time_sync_trusts_network_time_over_broken_rtc() {
+    local out
+    local skew_def net_skew_def verifiable_def synced_def attempt_def
+
+    skew_def=$(declare -f get_time_skew_seconds)
+    net_skew_def=$(declare -f get_network_time_skew_seconds)
+    verifiable_def=$(declare -f time_sync_status_verifiable)
+    synced_def=$(declare -f is_time_synchronized)
+    attempt_def=$(declare -f attempt_time_sync)
+
+    # 宿主机 RTC 乱值(偏差数十年)但系统时间与网络时间一致：
+    # 不应触发同步修复，更不能返回非零 (v2.6.36 Alpine NAT VPS 回归)
+    TIME_SYNC_CHECKED=false
+    get_time_skew_seconds() { echo 1783050943; }
+    get_network_time_skew_seconds() { echo 2; }
+    time_sync_status_verifiable() { return 1; }
+    is_time_synchronized() { return 1; }
+    attempt_time_sync() { echo "SYNC_TRIGGERED"; }
+    out=$(ensure_time_sync 2>&1) || fail "broken RTC with sane network time must return 0"
+    assert_contains "$out" "宿主机 RTC 异常" "broken RTC is reported as host RTC issue"
+    assert_not_contains "$out" "SYNC_TRIGGERED" "broken RTC must not trigger sync attempts"
+
+    # 无法验证同步状态(busybox ntpd)且 RTC 正常：不应反复触发修复
+    TIME_SYNC_CHECKED=false
+    get_time_skew_seconds() { echo 3; }
+    out=$(ensure_time_sync 2>&1) || fail "unverifiable env with sane clock must return 0"
+    assert_not_contains "$out" "SYNC_TRIGGERED" "unverifiable env must not force sync"
+
+    TIME_SYNC_CHECKED=false
+    eval "$skew_def"
+    eval "$net_skew_def"
+    eval "$verifiable_def"
+    eval "$synced_def"
+    eval "$attempt_def"
+}
+
+test_get_http_date_epoch_parses_rfc7231_date() {
+    local epoch curl_def
+
+    curl_def=$(declare -f curl || true)
+    curl() { printf 'HTTP/1.1 200 OK\r\nDate: Thu, 03 Jul 2026 04:35:43 GMT\r\n\r\n'; }
+    epoch=$(get_http_date_epoch) || fail "get_http_date_epoch failed on valid Date header"
+    assert_eq "1783053343" "$epoch" "RFC 7231 Date header epoch"
+
+    # 拿不到 Date 头时必须失败而不是输出垃圾
+    curl() { printf 'HTTP/1.1 200 OK\r\n\r\n'; }
+    if epoch=$(get_http_date_epoch); then
+        fail "get_http_date_epoch must fail without Date header"
+    fi
+
+    unset -f curl
+    [[ -n "$curl_def" ]] && eval "$curl_def"
+    return 0
 }
 
 test_subscription_gateway_uses_local_https_origin() {
@@ -1298,5 +1385,8 @@ test_show_relay_troubleshooting_reports_core_hints
 test_show_relay_success_self_check_reports_core_passes
 test_subscription_page_is_final_section
 test_refresh_argo_domain_if_needed_tracks_temp_restart
+test_ensure_time_sync_skips_when_already_checked
+test_ensure_time_sync_trusts_network_time_over_broken_rtc
+test_get_http_date_epoch_parses_rfc7231_date
 
 echo "OK: regression tests passed"
