@@ -285,6 +285,80 @@ open_firewall() {
     return 0
 }
 
+# ─── Hysteria2 端口跳跃 (UDP 端口范围 DNAT 到主端口) ───────────
+# 用 iptables/ip6tables 在 nat PREROUTING 把一段 UDP 端口范围整体 DNAT 到
+# Hysteria2 主端口。DNAT 在 INPUT 过滤之前发生，改写后目标端口即主端口，因此
+# 无需再为整段范围放行 INPUT——主端口本就已放行。外部云安全组/NAT 面板仍需
+# 用户自行放行该范围。规则精确删除依赖 state 文件记录上一次的范围与目标端口。
+hy2_hop_state_file() { printf '%s/hy2-hop.state' "$CONFIG_DIR"; }
+
+# 校验 "小端口:大端口" 格式(1-65535，小 < 大)
+validate_hop_range() {
+    local range="${1:-}" start end
+    [[ "$range" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    start=${range%%:*}
+    end=${range##*:}
+    (( start >= 1 && start <= 65535 && end >= 1 && end <= 65535 && start < end )) || return 1
+    return 0
+}
+
+hy2_hop_range_label() {
+    if validate_hop_range "${HY2_HOP_RANGE:-}"; then
+        printf '%s → %s' "$HY2_HOP_RANGE" "$HY2_PORT"
+    else
+        printf '未启用'
+    fi
+}
+
+# 删除上一次写入的端口跳跃 DNAT 规则(幂等；无 state 文件时直接返回)
+remove_hy2_port_hopping() {
+    local state_file range target
+    state_file=$(hy2_hop_state_file)
+    [[ -f "$state_file" ]] || return 0
+    range=$(sed -n '1p' "$state_file" 2>/dev/null)
+    target=$(sed -n '2p' "$state_file" 2>/dev/null)
+    if [[ -n "$range" && -n "$target" ]] && command -v iptables >/dev/null 2>&1; then
+        iptables -t nat -D PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || true
+        command -v ip6tables >/dev/null 2>&1 && \
+            ip6tables -t nat -D PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || true
+        persist_iptables_rules >/dev/null 2>&1 || true
+    fi
+    rm -f "$state_file"
+    return 0
+}
+
+# 按当前 HY2_HOP_RANGE / HY2_PORT 重建端口跳跃规则。未启用时仅清理旧规则。
+apply_hy2_port_hopping() {
+    remove_hy2_port_hopping
+    validate_hop_range "${HY2_HOP_RANGE:-}" || return 0
+
+    if ! command -v iptables >/dev/null 2>&1; then
+        warn "未找到 iptables，无法配置 Hysteria2 端口跳跃；请安装 iptables 后重试"
+        return 1
+    fi
+
+    local range="$HY2_HOP_RANGE" target="$HY2_PORT"
+    iptables -t nat -C PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || \
+        iptables -t nat -A PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target"
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -t nat -C PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || \
+            ip6tables -t nat -A PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || true
+    fi
+
+    local state_file
+    state_file=$(hy2_hop_state_file)
+    printf '%s\n%s\n' "$range" "$target" > "$state_file"
+    chmod 600 "$state_file" 2>/dev/null || true
+
+    if persist_iptables_rules >/dev/null 2>&1; then
+        success "Hysteria2 端口跳跃已启用: UDP ${range} → ${target}"
+    else
+        warn "端口跳跃规则已生效，但未能持久化，重启后可能失效；建议安装 iptables-persistent (Debian/Ubuntu) / iptables-services (RHEL 系)"
+    fi
+    warn "若使用云安全组 / NAT 小鸡 / 厂商面板防火墙，请另行放行 UDP 端口范围 ${range}"
+    return 0
+}
+
 open_service_ports() {
     local backend
     backend=$(detect_firewall_backend)
@@ -437,6 +511,58 @@ prompt_hy2_bandwidth() {
     HY2_DOWN_MBPS="$new_down"
     success "Hysteria2 带宽已设置为: $(hy2_bandwidth_label)"
     return 0
+}
+
+# 交互修改 Hysteria2 端口跳跃范围；有实际变化返回 0，取消/无变化返回 1。
+# 仅更新 HY2_HOP_RANGE 变量，规则由调用方 apply_hy2_port_hopping 落地。
+prompt_hy2_hop_range() {
+    local choice input start end
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── Hysteria2 端口跳跃 ──${NC}"
+    echo -e "  当前: ${BOLD}$(hy2_hop_range_label)${NC}"
+    echo -e "  ${DIM}把一段 UDP 端口整体转发到 Hysteria2 主端口(${HY2_PORT})，客户端在范围内随机跳端口，${NC}"
+    echo -e "  ${DIM}可缓解运营商对单一 UDP 端口的 QoS/限速。依赖 iptables，需能持久化才可长期生效。${NC}"
+    echo -e "  1) 设置/修改端口范围"
+    echo -e "  2) 关闭端口跳跃"
+    echo -e "  0) 取消"
+    prompt_read choice "  请选择 [0]: " || return 1
+    choice=${choice:-0}
+
+    case "$choice" in
+        1)
+            prompt_read input "  端口范围 (格式 小端口:大端口，如 20000:40000): " || return 1
+            if ! validate_hop_range "$input"; then
+                warn "范围格式无效。需为 小端口:大端口，均在 1-65535 且小端口 < 大端口"
+                return 1
+            fi
+            start=${input%%:*}
+            end=${input##*:}
+            if (( HY2_PORT >= start && HY2_PORT <= end )); then
+                warn "主端口 ${HY2_PORT} 不能落在跳跃范围内，请另选范围"
+                return 1
+            fi
+            if [[ "$input" == "${HY2_HOP_RANGE:-}" ]]; then
+                info "端口跳跃范围未变化"
+                return 1
+            fi
+            HY2_HOP_RANGE="$input"
+            info "端口跳跃范围已设为: ${HY2_HOP_RANGE}"
+            return 0
+            ;;
+        2)
+            if [[ -z "${HY2_HOP_RANGE:-}" ]]; then
+                info "端口跳跃本就未启用"
+                return 1
+            fi
+            HY2_HOP_RANGE=""
+            info "已关闭端口跳跃"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 prompt_public_ipv4_override_optional() {
@@ -727,6 +853,65 @@ SINGBOX_EOF
         echo -e "${RED}${check_output}${NC}"
         error "请检查上方错误并修复后重试"
     fi
+}
+
+# ─── Reality 链接自检: 临时客户端配置 ────────────────────────
+# 生成与分享链接参数完全一致的 sing-box 客户端配置(vless + reality +
+# vision + chrome 指纹)，用于在服务器本机验证「链接参数 ↔ 服务端配置」
+# 是否匹配。Reality 参数不匹配时服务端会把客户端当普通访客透传到伪装站，
+# 客户端侧表现为超时而非报错，因此只能用真实客户端走一遍链路来验证。
+write_reality_client_check_config() {
+    local out_file="$1"
+    local server="$2"
+    local server_port="$3"
+    local socks_port="$4"
+
+    local json_server json_sni json_uuid json_pbk json_sid
+    json_server=$(json_string "$server")
+    json_sni=$(json_string "$REALITY_SNI")
+    json_uuid=$(json_string "$UUID")
+    json_pbk=$(json_string "$PUBLIC_KEY")
+    json_sid=$(json_string "$SHORT_ID")
+
+    cat > "$out_file" << CLIENT_EOF
+{
+    "log": {
+        "level": "warn"
+    },
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "socks-in",
+            "listen": "127.0.0.1",
+            "listen_port": ${socks_port}
+        }
+    ],
+    "outbounds": [
+        {
+            "type": "vless",
+            "tag": "reality-out",
+            "server": ${json_server},
+            "server_port": ${server_port},
+            "uuid": ${json_uuid},
+            "flow": "xtls-rprx-vision",
+            "tls": {
+                "enabled": true,
+                "server_name": ${json_sni},
+                "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                },
+                "reality": {
+                    "enabled": true,
+                    "public_key": ${json_pbk},
+                    "short_id": ${json_sid}
+                }
+            }
+        }
+    ]
+}
+CLIENT_EOF
+    chmod 600 "$out_file"
 }
 
 systemd_hardening_block() {

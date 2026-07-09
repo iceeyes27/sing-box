@@ -333,6 +333,70 @@ test_hysteria2_bandwidth_is_optional() {
     rm -rf "$tmp"
 }
 
+test_hop_range_validation() {
+    validate_hop_range "20000:40000" || fail "valid range rejected"
+    validate_hop_range "1:65535" || fail "boundary range rejected"
+    validate_hop_range "40000:20000" && fail "reversed range accepted"
+    validate_hop_range "20000" && fail "single port accepted as range"
+    validate_hop_range "0:100" && fail "port 0 accepted"
+    validate_hop_range "100:70000" && fail "out-of-range end accepted"
+    validate_hop_range "" && fail "empty range accepted"
+    validate_hop_range "abc:def" && fail "non-numeric accepted"
+    return 0
+}
+
+test_hy2_mport_suffix_reflects_hop_range() {
+    HY2_HOP_RANGE="20000:40000"
+    assert_eq "&mport=20000-40000" "$(hy2_mport_suffix)" "mport suffix built from enabled range"
+    HY2_HOP_RANGE=""
+    assert_eq "" "$(hy2_mport_suffix)" "mport suffix empty when disabled"
+    HY2_HOP_RANGE="bad"
+    assert_eq "" "$(hy2_mport_suffix)" "mport suffix empty for invalid range"
+    HY2_HOP_RANGE=""
+    return 0
+}
+
+test_apply_and_remove_hy2_port_hopping() {
+    local tmp log
+    tmp=$(mktemp -d)
+    log="${tmp}/ipt.log"
+    make_cmd "${tmp}/iptables" "#!/usr/bin/env bash
+printf '%s\n' \"\$*\" >> '${log}'
+# -C 探测规则是否存在:返回不存在使 -A 分支执行
+[[ \" \$* \" == *' -C '* ]] && exit 1
+exit 0"
+    make_cmd "${tmp}/ip6tables" "#!/usr/bin/env bash
+printf 'v6 %s\n' \"\$*\" >> '${log}'
+[[ \" \$* \" == *' -C '* ]] && exit 1
+exit 0"
+    make_cmd "${tmp}/iptables-save" '#!/usr/bin/env bash
+exit 0'
+    make_cmd "${tmp}/netfilter-persistent" '#!/usr/bin/env bash
+[[ "${1:-}" == "save" ]] && exit 0
+exit 1'
+
+    CONFIG_DIR="$tmp"
+    HY2_PORT="443"
+    HY2_HOP_RANGE="20000:40000"
+    PATH="${tmp}:$PATH" apply_hy2_port_hopping >/dev/null 2>&1 || fail "apply_hy2_port_hopping failed"
+
+    local rules; rules=$(<"$log")
+    assert_contains "$rules" "-t nat -A PREROUTING -p udp --dport 20000:40000 -j DNAT --to-destination :443" "v4 DNAT rule added"
+    assert_contains "$rules" "v6 -t nat -A PREROUTING -p udp --dport 20000:40000 -j DNAT --to-destination :443" "v6 DNAT rule added"
+    [[ -f "${tmp}/hy2-hop.state" ]] || fail "state file not written"
+    assert_eq "20000:40000" "$(sed -n '1p' "${tmp}/hy2-hop.state")" "state records range"
+    assert_eq "443" "$(sed -n '2p' "${tmp}/hy2-hop.state")" "state records target port"
+
+    : > "$log"
+    PATH="${tmp}:$PATH" remove_hy2_port_hopping >/dev/null 2>&1 || fail "remove_hy2_port_hopping failed"
+    rules=$(<"$log")
+    assert_contains "$rules" "-t nat -D PREROUTING -p udp --dport 20000:40000 -j DNAT --to-destination :443" "v4 DNAT rule deleted with recorded values"
+    [[ -f "${tmp}/hy2-hop.state" ]] && fail "state file not cleaned up"
+
+    HY2_HOP_RANGE=""
+    rm -rf "$tmp"
+}
+
 test_persist_iptables_rules_uses_netfilter_persistent() {
     local tmp
     tmp=$(mktemp -d)
@@ -1110,6 +1174,39 @@ test_reality_sni_probe_failure_uses_default() {
     unset -f curl get_reality_probe_parallelism
 }
 
+test_reality_client_check_config_matches_share_link_params() {
+    local tmp cfg
+    tmp=$(mktemp -d)
+    cfg="${tmp}/client.json"
+
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_SNI="www.apple.com"
+    PUBLIC_KEY="test-public-key"
+    SHORT_ID="abcd1234"
+
+    # 自检客户端配置必须与分享链接参数一一对应，否则回环自检会误报“链接错误”。
+    write_reality_client_check_config "$cfg" "127.0.0.1" "8443" "20808"
+
+    local content
+    content=$(cat "$cfg")
+    assert_contains "$content" '"server_port": 8443' "client check uses reality port"
+    assert_contains "$content" '"listen_port": 20808' "client check uses socks port"
+    assert_contains "$content" "\"server\": \"127.0.0.1\"" "client check targets given server"
+    assert_contains "$content" "\"uuid\": \"${UUID}\"" "client check carries uuid"
+    assert_contains "$content" "\"server_name\": \"${REALITY_SNI}\"" "client check carries sni"
+    assert_contains "$content" "\"public_key\": \"${PUBLIC_KEY}\"" "client check carries public key"
+    assert_contains "$content" "\"short_id\": \"${SHORT_ID}\"" "client check carries short id"
+    assert_contains "$content" '"flow": "xtls-rprx-vision"' "client check uses vision flow"
+    assert_contains "$content" '"fingerprint": "chrome"' "client check uses chrome fingerprint"
+
+    rm -rf "$tmp"
+}
+
+test_reality_check_command_is_dispatched() {
+    # check/selfcheck 子命令必须绑定到 do_reality_check，避免自检功能悬空无法调用。
+    assert_contains "$(declare -f main)" "do_reality_check" "check command dispatches self-check"
+}
+
 test_manager_command_rejects_empty_source() {
     local tmp empty_script valid_script old_manager old_alias old_system old_system_alias old_bin old_bin_alias
     local symlink_probe_target symlink_probe_link symlink_supported=false
@@ -1627,6 +1724,9 @@ test_fetch_public_ip_parallel_prefers_endpoint_order
 test_probe_available_cf_domains_keeps_order
 test_wait_for_service_active_polls_until_ready
 test_hysteria2_bandwidth_is_optional
+test_hop_range_validation
+test_hy2_mport_suffix_reflects_hop_range
+test_apply_and_remove_hy2_port_hopping
 test_persist_iptables_rules_uses_netfilter_persistent
 test_ipv4_public_link_validation
 test_ipv4_override_takes_priority
@@ -1658,6 +1758,8 @@ test_low_cpu_uses_low_priority_runner
 test_alpine_cloudflared_prefers_apk
 test_alpine_cloudflared_falls_back_to_binary
 test_reality_sni_probe_failure_uses_default
+test_reality_client_check_config_matches_share_link_params
+test_reality_check_command_is_dispatched
 test_manager_command_rejects_empty_source
 test_refresh_argo_runtime_renews_temporary_domain
 test_subscription_gateway_uses_local_https_origin

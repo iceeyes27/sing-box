@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.1"
+SCRIPT_VERSION="2.7.2"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -665,7 +665,7 @@ PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV WS_PORT WS_PATH NODE_NAME
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
-    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_UP_MBPS HY2_DOWN_MBPS
+    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_UP_MBPS HY2_DOWN_MBPS HY2_HOP_RANGE
 )
 
 is_param_key() {
@@ -827,6 +827,10 @@ load_params() {
         fi
         if [[ ! ${HY2_DOWN_MBPS+x} ]]; then
             HY2_DOWN_MBPS=""
+            need_save=true
+        fi
+        if [[ ! ${HY2_HOP_RANGE+x} ]]; then
+            HY2_HOP_RANGE=""
             need_save=true
         fi
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
@@ -2054,6 +2058,80 @@ open_firewall() {
     return 0
 }
 
+# ─── Hysteria2 端口跳跃 (UDP 端口范围 DNAT 到主端口) ───────────
+# 用 iptables/ip6tables 在 nat PREROUTING 把一段 UDP 端口范围整体 DNAT 到
+# Hysteria2 主端口。DNAT 在 INPUT 过滤之前发生，改写后目标端口即主端口，因此
+# 无需再为整段范围放行 INPUT——主端口本就已放行。外部云安全组/NAT 面板仍需
+# 用户自行放行该范围。规则精确删除依赖 state 文件记录上一次的范围与目标端口。
+hy2_hop_state_file() { printf '%s/hy2-hop.state' "$CONFIG_DIR"; }
+
+# 校验 "小端口:大端口" 格式(1-65535，小 < 大)
+validate_hop_range() {
+    local range="${1:-}" start end
+    [[ "$range" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    start=${range%%:*}
+    end=${range##*:}
+    (( start >= 1 && start <= 65535 && end >= 1 && end <= 65535 && start < end )) || return 1
+    return 0
+}
+
+hy2_hop_range_label() {
+    if validate_hop_range "${HY2_HOP_RANGE:-}"; then
+        printf '%s → %s' "$HY2_HOP_RANGE" "$HY2_PORT"
+    else
+        printf '未启用'
+    fi
+}
+
+# 删除上一次写入的端口跳跃 DNAT 规则(幂等；无 state 文件时直接返回)
+remove_hy2_port_hopping() {
+    local state_file range target
+    state_file=$(hy2_hop_state_file)
+    [[ -f "$state_file" ]] || return 0
+    range=$(sed -n '1p' "$state_file" 2>/dev/null)
+    target=$(sed -n '2p' "$state_file" 2>/dev/null)
+    if [[ -n "$range" && -n "$target" ]] && command -v iptables >/dev/null 2>&1; then
+        iptables -t nat -D PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || true
+        command -v ip6tables >/dev/null 2>&1 && \
+            ip6tables -t nat -D PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || true
+        persist_iptables_rules >/dev/null 2>&1 || true
+    fi
+    rm -f "$state_file"
+    return 0
+}
+
+# 按当前 HY2_HOP_RANGE / HY2_PORT 重建端口跳跃规则。未启用时仅清理旧规则。
+apply_hy2_port_hopping() {
+    remove_hy2_port_hopping
+    validate_hop_range "${HY2_HOP_RANGE:-}" || return 0
+
+    if ! command -v iptables >/dev/null 2>&1; then
+        warn "未找到 iptables，无法配置 Hysteria2 端口跳跃；请安装 iptables 后重试"
+        return 1
+    fi
+
+    local range="$HY2_HOP_RANGE" target="$HY2_PORT"
+    iptables -t nat -C PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || \
+        iptables -t nat -A PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target"
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -t nat -C PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || \
+            ip6tables -t nat -A PREROUTING -p udp --dport "$range" -j DNAT --to-destination ":$target" 2>/dev/null || true
+    fi
+
+    local state_file
+    state_file=$(hy2_hop_state_file)
+    printf '%s\n%s\n' "$range" "$target" > "$state_file"
+    chmod 600 "$state_file" 2>/dev/null || true
+
+    if persist_iptables_rules >/dev/null 2>&1; then
+        success "Hysteria2 端口跳跃已启用: UDP ${range} → ${target}"
+    else
+        warn "端口跳跃规则已生效，但未能持久化，重启后可能失效；建议安装 iptables-persistent (Debian/Ubuntu) / iptables-services (RHEL 系)"
+    fi
+    warn "若使用云安全组 / NAT 小鸡 / 厂商面板防火墙，请另行放行 UDP 端口范围 ${range}"
+    return 0
+}
+
 open_service_ports() {
     local backend
     backend=$(detect_firewall_backend)
@@ -2206,6 +2284,58 @@ prompt_hy2_bandwidth() {
     HY2_DOWN_MBPS="$new_down"
     success "Hysteria2 带宽已设置为: $(hy2_bandwidth_label)"
     return 0
+}
+
+# 交互修改 Hysteria2 端口跳跃范围；有实际变化返回 0，取消/无变化返回 1。
+# 仅更新 HY2_HOP_RANGE 变量，规则由调用方 apply_hy2_port_hopping 落地。
+prompt_hy2_hop_range() {
+    local choice input start end
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── Hysteria2 端口跳跃 ──${NC}"
+    echo -e "  当前: ${BOLD}$(hy2_hop_range_label)${NC}"
+    echo -e "  ${DIM}把一段 UDP 端口整体转发到 Hysteria2 主端口(${HY2_PORT})，客户端在范围内随机跳端口，${NC}"
+    echo -e "  ${DIM}可缓解运营商对单一 UDP 端口的 QoS/限速。依赖 iptables，需能持久化才可长期生效。${NC}"
+    echo -e "  1) 设置/修改端口范围"
+    echo -e "  2) 关闭端口跳跃"
+    echo -e "  0) 取消"
+    prompt_read choice "  请选择 [0]: " || return 1
+    choice=${choice:-0}
+
+    case "$choice" in
+        1)
+            prompt_read input "  端口范围 (格式 小端口:大端口，如 20000:40000): " || return 1
+            if ! validate_hop_range "$input"; then
+                warn "范围格式无效。需为 小端口:大端口，均在 1-65535 且小端口 < 大端口"
+                return 1
+            fi
+            start=${input%%:*}
+            end=${input##*:}
+            if (( HY2_PORT >= start && HY2_PORT <= end )); then
+                warn "主端口 ${HY2_PORT} 不能落在跳跃范围内，请另选范围"
+                return 1
+            fi
+            if [[ "$input" == "${HY2_HOP_RANGE:-}" ]]; then
+                info "端口跳跃范围未变化"
+                return 1
+            fi
+            HY2_HOP_RANGE="$input"
+            info "端口跳跃范围已设为: ${HY2_HOP_RANGE}"
+            return 0
+            ;;
+        2)
+            if [[ -z "${HY2_HOP_RANGE:-}" ]]; then
+                info "端口跳跃本就未启用"
+                return 1
+            fi
+            HY2_HOP_RANGE=""
+            info "已关闭端口跳跃"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 prompt_public_ipv4_override_optional() {
@@ -2496,6 +2626,65 @@ SINGBOX_EOF
         echo -e "${RED}${check_output}${NC}"
         error "请检查上方错误并修复后重试"
     fi
+}
+
+# ─── Reality 链接自检: 临时客户端配置 ────────────────────────
+# 生成与分享链接参数完全一致的 sing-box 客户端配置(vless + reality +
+# vision + chrome 指纹)，用于在服务器本机验证「链接参数 ↔ 服务端配置」
+# 是否匹配。Reality 参数不匹配时服务端会把客户端当普通访客透传到伪装站，
+# 客户端侧表现为超时而非报错，因此只能用真实客户端走一遍链路来验证。
+write_reality_client_check_config() {
+    local out_file="$1"
+    local server="$2"
+    local server_port="$3"
+    local socks_port="$4"
+
+    local json_server json_sni json_uuid json_pbk json_sid
+    json_server=$(json_string "$server")
+    json_sni=$(json_string "$REALITY_SNI")
+    json_uuid=$(json_string "$UUID")
+    json_pbk=$(json_string "$PUBLIC_KEY")
+    json_sid=$(json_string "$SHORT_ID")
+
+    cat > "$out_file" << CLIENT_EOF
+{
+    "log": {
+        "level": "warn"
+    },
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "socks-in",
+            "listen": "127.0.0.1",
+            "listen_port": ${socks_port}
+        }
+    ],
+    "outbounds": [
+        {
+            "type": "vless",
+            "tag": "reality-out",
+            "server": ${json_server},
+            "server_port": ${server_port},
+            "uuid": ${json_uuid},
+            "flow": "xtls-rprx-vision",
+            "tls": {
+                "enabled": true,
+                "server_name": ${json_sni},
+                "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                },
+                "reality": {
+                    "enabled": true,
+                    "public_key": ${json_pbk},
+                    "short_id": ${json_sid}
+                }
+            }
+        }
+    ]
+}
+CLIENT_EOF
+    chmod 600 "$out_file"
 }
 
 systemd_hardening_block() {
@@ -3252,6 +3441,13 @@ hy2_share_link_available() {
     get_hy2_cert_pin_sha256 >/dev/null
 }
 
+# 端口跳跃启用时返回 "&mport=小端口-大端口"(客户端在该范围内随机跳端口)，
+# 未启用返回空串。链接主端口仍为 HY2_PORT，mport 仅告知客户端跳跃范围。
+hy2_mport_suffix() {
+    validate_hop_range "${HY2_HOP_RANGE:-}" || return 0
+    printf '&mport=%s-%s' "${HY2_HOP_RANGE%%:*}" "${HY2_HOP_RANGE##*:}"
+}
+
 build_direct_share_links_for_ip() {
     local ip="$1"
     local family_label="$2"
@@ -3280,7 +3476,7 @@ build_direct_share_links_for_ip() {
         hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
         hy2_pin_sha=$(get_hy2_cert_pin_sha256) || return 0
         hy2_pin_enc=$(urlencode "${hy2_pin_sha}")
-        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?sni=${HY2_SNI}&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
+        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?sni=${HY2_SNI}&pinSHA256=${hy2_pin_enc}$(hy2_mport_suffix)#${hy2_remark}"
     fi
 }
 
@@ -3497,6 +3693,8 @@ generate_and_show_links() {
     if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
         echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
         echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
+        validate_hop_range "${HY2_HOP_RANGE:-}" && \
+            echo -e "  端口跳跃:      ${BOLD}UDP ${HY2_HOP_RANGE} → ${HY2_PORT}${NC}"
     fi
     echo ""
 
@@ -4689,6 +4887,7 @@ do_generate_relay_script() {
 #   SBM_PUBLIC_IPV4     直连链接使用的公网 IPv4 覆盖
 #   SBM_ARGO_TOKEN + SBM_ARGO_DOMAIN  两者同时提供则用固定域名模式
 #   SBM_HY2_UP_MBPS + SBM_HY2_DOWN_MBPS  Hysteria2 带宽(Brutal)，需成对提供，缺省不限速(BBR)
+#   SBM_HY2_HOP_RANGE   Hysteria2 端口跳跃范围(格式 小端口:大端口，如 20000:40000)
 #   SBM_CFOPT_AUTO=1    开启 CF 优选域名每周自动刷新
 apply_install_env_overrides() {
     [[ -n "${SBM_REALITY_PORT:-}" ]] && REALITY_PORT="$SBM_REALITY_PORT"
@@ -4712,6 +4911,14 @@ apply_install_env_overrides() {
             HY2_DOWN_MBPS="$SBM_HY2_DOWN_MBPS"
         else
             warn "SBM_HY2_UP_MBPS 与 SBM_HY2_DOWN_MBPS 需同时为正整数，已忽略，保持不限速"
+        fi
+    fi
+
+    if [[ -n "${SBM_HY2_HOP_RANGE:-}" ]]; then
+        if validate_hop_range "$SBM_HY2_HOP_RANGE"; then
+            HY2_HOP_RANGE="$SBM_HY2_HOP_RANGE"
+        else
+            warn "SBM_HY2_HOP_RANGE 格式无效(应为 小端口:大端口)，已忽略: ${SBM_HY2_HOP_RANGE}"
         fi
     fi
 
@@ -4869,6 +5076,11 @@ do_primary_install() {
 
     ensure_subscription_service || warn "订阅服务启动失败，可稍后执行 sbm restart 重试"
 
+    # 端口跳跃(如已通过 SBM_HY2_HOP_RANGE 指定)
+    if validate_hop_range "${HY2_HOP_RANGE:-}"; then
+        apply_hy2_port_hopping || warn "Hysteria2 端口跳跃规则应用失败"
+    fi
+
     # 启动 Argo
     info "启动 Argo 隧道..."
     service_enable_now argo-tunnel
@@ -4972,13 +5184,15 @@ do_modify_config() {
         echo -e "  13) 修改 IPv4 链接策略     ${DIM}(当前: $(link_ipv4_selection_label))${NC}"
         echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
         echo -e "  15) 修改 Hysteria2 带宽限速 ${DIM}(当前: $(hy2_bandwidth_label))${NC}"
+        echo -e "  16) 修改 Hysteria2 端口跳跃 ${DIM}(当前: $(hy2_hop_range_label))${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        prompt_read choice "  请选择 [0-15]: "
+        prompt_read choice "  请选择 [0-16]: "
 
         local changed=false
         local ports_changed=false
         local restart_singbox=false
+        local apply_hopping=false
         local restart_argo=false
         local links_only_changed=false
         case "$choice" in
@@ -5039,6 +5253,8 @@ do_modify_config() {
                     changed=true
                     ports_changed=true
                     restart_singbox=true
+                    # 主端口变了，端口跳跃的 DNAT 目标端口需同步重建
+                    validate_hop_range "${HY2_HOP_RANGE:-}" && apply_hopping=true
                 fi
                 ;;
             8)
@@ -5054,6 +5270,7 @@ do_modify_config() {
                 changed=true
                 ports_changed=true
                 restart_singbox=true
+                validate_hop_range "${HY2_HOP_RANGE:-}" && apply_hopping=true
                 ;;
             10)
                 echo -e "\n  当前模式: $( [[ -n "$ARGO_TOKEN" ]] && echo "固定域名" || echo "临时域名" )"
@@ -5119,6 +5336,15 @@ do_modify_config() {
                 if prompt_hy2_bandwidth; then
                     changed=true
                     restart_singbox=true
+                else
+                    press_enter
+                    continue
+                fi
+                ;;
+            16)
+                if prompt_hy2_hop_range; then
+                    changed=true
+                    apply_hopping=true
                 else
                     press_enter
                     continue
@@ -5192,6 +5418,10 @@ do_modify_config() {
             else
                 save_params
                 success "配置已更新"
+            fi
+
+            if [[ "$apply_hopping" == "true" ]]; then
+                apply_hy2_port_hopping || warn "Hysteria2 端口跳跃规则应用失败"
             fi
 
             if [[ "$restart_argo" == "true" ]]; then
@@ -5335,6 +5565,157 @@ do_reoptimize_reality_sni() {
     return 0
 }
 
+# ─── Reality 链接自检 ────────────────────────────────────────
+# v2rayN 等客户端对 Reality 节点测速超时(TaskCanceledException)时，
+# 无法区分「链接参数错误」与「线路被墙/丢包」: Reality 参数不匹配时
+# 服务端会把客户端当普通访客透传到伪装站，客户端同样表现为超时而非
+# 报错。本自检在服务器本机用 sing-box 启动临时客户端，以与分享链接
+# 完全一致的参数走一遍完整代理链路，把两类问题分开。
+
+find_free_loopback_port() {
+    local attempt port
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        port=$(( 20000 + RANDOM % 25000 ))
+        if [[ -z "$(get_port_listeners "$port" tcp)" ]]; then
+            echo "$port"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 用临时 sing-box 客户端经本地 socks 入站真实走一遍 Reality 代理链路。
+# $1 为要连接的服务器地址(127.0.0.1 或公网 IP)。
+# 返回: 0=链路可用(stdout 输出全链路延迟 ms) 1=链路不通 2=自检环境异常
+run_reality_client_probe() {
+    local server="$1"
+    local tmp_dir cfg log socks_port pid
+
+    tmp_dir=$(mktemp -d 2>/dev/null) || { warn "创建临时目录失败"; return 2; }
+    cfg="${tmp_dir}/client.json"
+    log="${tmp_dir}/client.log"
+
+    if ! socks_port=$(find_free_loopback_port); then
+        warn "未找到可用的本地端口"
+        rm -rf "$tmp_dir"
+        return 2
+    fi
+    write_reality_client_check_config "$cfg" "$server" "$REALITY_PORT" "$socks_port"
+
+    sing-box run -c "$cfg" >"$log" 2>&1 &
+    pid=$!
+
+    local i ready=0
+    for ((i = 0; i < 25; i++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        if [[ -n "$(get_port_listeners "$socks_port" tcp)" ]]; then
+            ready=1
+            break
+        fi
+        sleep 0.2
+    done
+
+    if (( ! ready )); then
+        warn "临时自检客户端未能启动(sing-box 版本过旧或配置不被支持):"
+        tail -n 5 "$log" >&2 || true
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -rf "$tmp_dir"
+        return 2
+    fi
+
+    local url out code secs ms rc=1
+    for url in "http://www.gstatic.com/generate_204" "http://cp.cloudflare.com/generate_204"; do
+        out=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 10 \
+            -x "socks5h://127.0.0.1:${socks_port}" "$url" 2>/dev/null) || out=""
+        code="${out%% *}"
+        secs="${out##* }"
+        if [[ "$code" == "204" || "$code" == "200" ]]; then
+            ms=$(awk -v t="$secs" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo 0)
+            echo "$ms"
+            rc=0
+            break
+        fi
+    done
+
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf "$tmp_dir"
+    return "$rc"
+}
+
+do_reality_check() {
+    if ! load_params; then
+        warn "未安装，无法自检"
+        return 1
+    fi
+    if ! command -v sing-box >/dev/null 2>&1; then
+        warn "未找到 sing-box 命令，请先完成安装"
+        return 1
+    fi
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── Reality 链接自检 ──${NC}"
+    echo -e "  ${DIM}客户端测速超时(如 v2rayN 的 TaskCanceledException)时，${NC}"
+    echo -e "  ${DIM}本自检可区分「链接参数错误」与「服务器线路问题」两类原因。${NC}"
+    echo ""
+
+    if service_is_active sing-box; then
+        success "sing-box 服务运行中"
+    else
+        warn "sing-box 服务未运行，请先执行: sbm start"
+        return 1
+    fi
+    if [[ -n "$(get_port_listeners "$REALITY_PORT" tcp)" ]]; then
+        success "Reality 端口 ${REALITY_PORT}/TCP 正在监听"
+    else
+        warn "Reality 端口 ${REALITY_PORT}/TCP 未在监听，请重启服务或检查日志"
+        return 1
+    fi
+
+    info "① 回环自检: 用与分享链接一致的参数经 127.0.0.1:${REALITY_PORT} 走完整代理链路..."
+    local loop_ms rc=0
+    loop_ms=$(run_reality_client_probe "127.0.0.1") || rc=$?
+    if (( rc == 2 )); then
+        warn "自检环境异常，未能完成验证"
+        return 1
+    elif (( rc != 0 )); then
+        warn "回环自检失败: 链接参数与服务端配置不匹配，或服务器本身出网异常"
+        echo -e "  ${DIM}常见原因: 客户端里是旧链接(密钥/short_id 已变化)、服务器无法访问外网。${NC}" >&2
+        echo -e "  ${DIM}建议: 执行 sbm links 重新生成链接并重新导入客户端；仍失败则执行 sbm apply 同步配置。${NC}" >&2
+        return 1
+    fi
+    success "回环自检通过 (全链路延迟 ${loop_ms}ms) → 链接参数与服务端完全匹配"
+
+    refresh_public_ip_stack >/dev/null 2>&1 || true
+    local pub_ip="${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
+    if [[ -n "$pub_ip" ]]; then
+        info "② 公网回连自检: 经 ${pub_ip}:${REALITY_PORT} 再走一遍..."
+        local pub_ms
+        rc=0
+        pub_ms=$(run_reality_client_probe "$pub_ip") || rc=$?
+        if (( rc == 0 )); then
+            success "公网回连自检通过 (${pub_ms}ms) → 本机防火墙已放行"
+        else
+            warn "公网回连失败: 可能是防火墙/云安全组未放行 ${REALITY_PORT}/TCP；"
+            warn "也可能是本机不支持 NAT 环回(此时不代表外部不可达，以客户端实测为准)"
+        fi
+    else
+        info "② 未检测到公网 IP，跳过公网回连自检"
+    fi
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── 自检结论 ──${NC}"
+    echo -e "  服务端配置与链接参数${GREEN}${BOLD}一致且可用${NC}。若客户端测速仍超时，基本可判定为"
+    echo -e "  ${BOLD}客户端到服务器的线路问题${NC}(IP/端口被墙、国际链路丢包)，按优先级建议:"
+    echo -e "   1) 换端口: 菜单 [修改配置] 更换 Reality 端口(如 8443/2053 等)"
+    echo -e "   2) 换伪装域名: 执行 ${BOLD}sbm resni${NC} 重新优选 SNI"
+    echo -e "   3) 对比测速 Hysteria2 / Argo 链接: 若同机其它协议正常，更可确认是 Reality 端口/IP 被针对性阻断"
+    echo ""
+    press_enter
+    return 0
+}
+
 # ─── 应用当前版本配置 (一键同步) ─────────────────────────────
 # 用当前已保存的凭证 (UUID / 端口 / 域名 / 密钥均不变) 按新版本模板
 # 重写服务端配置并重启，再按新格式重新生成链接。适用于升级脚本后
@@ -5363,6 +5744,10 @@ do_apply_latest() {
     fi
 
     success "配置已按 v${SCRIPT_VERSION} 同步并重启"
+    # 端口跳跃规则不在 sing-box 配置内，重写后按当前范围重建(未启用则清理旧规则)
+    if validate_hop_range "${HY2_HOP_RANGE:-}"; then
+        apply_hy2_port_hopping || warn "Hysteria2 端口跳跃规则应用失败"
+    fi
     refresh_argo_domain_if_needed
     generate_and_show_links
     ensure_subscription_service || warn "订阅服务启动失败"
@@ -5698,6 +6083,7 @@ do_uninstall() {
     prompt_read confirm "  确认卸载？(y/N): "
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消"; press_enter; return; }
 
+    remove_hy2_port_hopping 2>/dev/null || true
     service_stop sing-box 2>/dev/null || true
     service_disable sing-box 2>/dev/null || true
     service_stop argo-tunnel 2>/dev/null || true
@@ -5831,6 +6217,7 @@ main() {
         stop)        do_stop ;;
         restart)     do_restart ;;
         resni|reality-sni) do_reoptimize_reality_sni || warn "Reality 伪装域名优选未完成" ;;
+        check|selfcheck) do_reality_check || warn "Reality 链接自检未通过" ;;
         apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
         cfopt|refresh-cf) do_refresh_cf_domains || warn "优选域名刷新未完成" ;;
         cfopt-auto)  do_cfopt_auto "${2:-status}" || true ;;
@@ -5850,6 +6237,7 @@ main() {
             echo "  stop            停止服务"
             echo "  restart         重启服务"
             echo "  resni           重新优选 Reality 伪装域名(SNI)并重启生效"
+            echo "  check           Reality 链接自检(区分链接参数错误与线路问题)"
             echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
             echo "  cfopt           从 BestCF 刷新 CF 优选域名(电信/移动)并更新链接"
             echo "  cfopt-auto on   开启每周自动刷新优选域名 (off 关闭, status 查看; 默认关闭)"

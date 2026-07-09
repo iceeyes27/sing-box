@@ -10,6 +10,7 @@
 
 - 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box + cloudflared 为系统服务。
 - 🔧 **多协议链路框架** — 预置支持 VLESS Reality、VLESS WebSocket over Argo 以及 Hysteria2，兼容 TCP、WebSocket 与 UDP(QUIC) 等传输路径。
+- 🎢 **Hysteria2 端口跳跃** — 可将一段 UDP 端口整体转发到主端口，客户端在范围内随机跳端口（分享链接自动带 `mport`），缓解运营商对单一 UDP 端口的 QoS/限速。
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
 - 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、HTTPS 订阅链接、Argo 订阅链接、重载配置、监控日志与开机自启。
 - 📡 **本地订阅网关** — 生成带 token 的订阅文件，并通过本地监听的订阅服务配合 Argo 暴露 HTTPS 订阅地址。
@@ -44,7 +45,7 @@ SBM_NODE_NAME=hk-01 SBM_ARGO_TOKEN='eyJ...' SBM_ARGO_DOMAIN=v2.example.com \
   bash install.sh install
 ```
 
-支持的变量：`SBM_REALITY_PORT`、`SBM_HY2_PORT`、`SBM_SUBSCRIPTION_PORT`、`SBM_REALITY_SNI`、`SBM_NODE_NAME`、`SBM_PUBLIC_IPV4`（直连链接公网 IPv4 覆盖）、`SBM_ARGO_TOKEN` + `SBM_ARGO_DOMAIN`（固定域名模式，需成对提供）、`SBM_HY2_UP_MBPS` + `SBM_HY2_DOWN_MBPS`（Hysteria2 Brutal 限速，需成对提供，缺省不限速走 BBR）、`SBM_CFOPT_AUTO=1`（开启每周 CF 优选自动刷新）。交互模式下这些变量同样生效，作为各提示的默认值。
+支持的变量：`SBM_REALITY_PORT`、`SBM_HY2_PORT`、`SBM_SUBSCRIPTION_PORT`、`SBM_REALITY_SNI`、`SBM_NODE_NAME`、`SBM_PUBLIC_IPV4`（直连链接公网 IPv4 覆盖）、`SBM_ARGO_TOKEN` + `SBM_ARGO_DOMAIN`（固定域名模式，需成对提供）、`SBM_HY2_UP_MBPS` + `SBM_HY2_DOWN_MBPS`（Hysteria2 Brutal 限速，需成对提供，缺省不限速走 BBR）、`SBM_HY2_HOP_RANGE`（Hysteria2 端口跳跃范围，格式 `小端口:大端口`，如 `20000:40000`）、`SBM_CFOPT_AUTO=1`（开启每周 CF 优选自动刷新）。交互模式下这些变量同样生效，作为各提示的默认值。
 
 ## 🎛️ 管理面板使用指南
 
@@ -56,7 +57,7 @@ sbm
 
 **面板概览：**
 ```text
-  sing-box 管理面板  v2.7.1
+  sing-box 管理面板  v2.7.2
   ────────────────────────────────────────
   sing-box: ● 运行中    argo-tunnel: ● 运行中
 

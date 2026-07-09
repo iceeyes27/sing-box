@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.1"
+SCRIPT_VERSION="2.7.2"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -620,7 +620,7 @@ PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV WS_PORT WS_PATH NODE_NAME
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
-    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_UP_MBPS HY2_DOWN_MBPS
+    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_UP_MBPS HY2_DOWN_MBPS HY2_HOP_RANGE
 )
 
 is_param_key() {
@@ -782,6 +782,10 @@ load_params() {
         fi
         if [[ ! ${HY2_DOWN_MBPS+x} ]]; then
             HY2_DOWN_MBPS=""
+            need_save=true
+        fi
+        if [[ ! ${HY2_HOP_RANGE+x} ]]; then
+            HY2_HOP_RANGE=""
             need_save=true
         fi
         if [[ -z "${ARGO_TOKEN:-}" ]]; then

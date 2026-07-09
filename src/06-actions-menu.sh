@@ -10,6 +10,7 @@
 #   SBM_PUBLIC_IPV4     直连链接使用的公网 IPv4 覆盖
 #   SBM_ARGO_TOKEN + SBM_ARGO_DOMAIN  两者同时提供则用固定域名模式
 #   SBM_HY2_UP_MBPS + SBM_HY2_DOWN_MBPS  Hysteria2 带宽(Brutal)，需成对提供，缺省不限速(BBR)
+#   SBM_HY2_HOP_RANGE   Hysteria2 端口跳跃范围(格式 小端口:大端口，如 20000:40000)
 #   SBM_CFOPT_AUTO=1    开启 CF 优选域名每周自动刷新
 apply_install_env_overrides() {
     [[ -n "${SBM_REALITY_PORT:-}" ]] && REALITY_PORT="$SBM_REALITY_PORT"
@@ -33,6 +34,14 @@ apply_install_env_overrides() {
             HY2_DOWN_MBPS="$SBM_HY2_DOWN_MBPS"
         else
             warn "SBM_HY2_UP_MBPS 与 SBM_HY2_DOWN_MBPS 需同时为正整数，已忽略，保持不限速"
+        fi
+    fi
+
+    if [[ -n "${SBM_HY2_HOP_RANGE:-}" ]]; then
+        if validate_hop_range "$SBM_HY2_HOP_RANGE"; then
+            HY2_HOP_RANGE="$SBM_HY2_HOP_RANGE"
+        else
+            warn "SBM_HY2_HOP_RANGE 格式无效(应为 小端口:大端口)，已忽略: ${SBM_HY2_HOP_RANGE}"
         fi
     fi
 
@@ -190,6 +199,11 @@ do_primary_install() {
 
     ensure_subscription_service || warn "订阅服务启动失败，可稍后执行 sbm restart 重试"
 
+    # 端口跳跃(如已通过 SBM_HY2_HOP_RANGE 指定)
+    if validate_hop_range "${HY2_HOP_RANGE:-}"; then
+        apply_hy2_port_hopping || warn "Hysteria2 端口跳跃规则应用失败"
+    fi
+
     # 启动 Argo
     info "启动 Argo 隧道..."
     service_enable_now argo-tunnel
@@ -293,13 +307,15 @@ do_modify_config() {
         echo -e "  13) 修改 IPv4 链接策略     ${DIM}(当前: $(link_ipv4_selection_label))${NC}"
         echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
         echo -e "  15) 修改 Hysteria2 带宽限速 ${DIM}(当前: $(hy2_bandwidth_label))${NC}"
+        echo -e "  16) 修改 Hysteria2 端口跳跃 ${DIM}(当前: $(hy2_hop_range_label))${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        prompt_read choice "  请选择 [0-15]: "
+        prompt_read choice "  请选择 [0-16]: "
 
         local changed=false
         local ports_changed=false
         local restart_singbox=false
+        local apply_hopping=false
         local restart_argo=false
         local links_only_changed=false
         case "$choice" in
@@ -360,6 +376,8 @@ do_modify_config() {
                     changed=true
                     ports_changed=true
                     restart_singbox=true
+                    # 主端口变了，端口跳跃的 DNAT 目标端口需同步重建
+                    validate_hop_range "${HY2_HOP_RANGE:-}" && apply_hopping=true
                 fi
                 ;;
             8)
@@ -375,6 +393,7 @@ do_modify_config() {
                 changed=true
                 ports_changed=true
                 restart_singbox=true
+                validate_hop_range "${HY2_HOP_RANGE:-}" && apply_hopping=true
                 ;;
             10)
                 echo -e "\n  当前模式: $( [[ -n "$ARGO_TOKEN" ]] && echo "固定域名" || echo "临时域名" )"
@@ -440,6 +459,15 @@ do_modify_config() {
                 if prompt_hy2_bandwidth; then
                     changed=true
                     restart_singbox=true
+                else
+                    press_enter
+                    continue
+                fi
+                ;;
+            16)
+                if prompt_hy2_hop_range; then
+                    changed=true
+                    apply_hopping=true
                 else
                     press_enter
                     continue
@@ -513,6 +541,10 @@ do_modify_config() {
             else
                 save_params
                 success "配置已更新"
+            fi
+
+            if [[ "$apply_hopping" == "true" ]]; then
+                apply_hy2_port_hopping || warn "Hysteria2 端口跳跃规则应用失败"
             fi
 
             if [[ "$restart_argo" == "true" ]]; then
@@ -656,6 +688,157 @@ do_reoptimize_reality_sni() {
     return 0
 }
 
+# ─── Reality 链接自检 ────────────────────────────────────────
+# v2rayN 等客户端对 Reality 节点测速超时(TaskCanceledException)时，
+# 无法区分「链接参数错误」与「线路被墙/丢包」: Reality 参数不匹配时
+# 服务端会把客户端当普通访客透传到伪装站，客户端同样表现为超时而非
+# 报错。本自检在服务器本机用 sing-box 启动临时客户端，以与分享链接
+# 完全一致的参数走一遍完整代理链路，把两类问题分开。
+
+find_free_loopback_port() {
+    local attempt port
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        port=$(( 20000 + RANDOM % 25000 ))
+        if [[ -z "$(get_port_listeners "$port" tcp)" ]]; then
+            echo "$port"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 用临时 sing-box 客户端经本地 socks 入站真实走一遍 Reality 代理链路。
+# $1 为要连接的服务器地址(127.0.0.1 或公网 IP)。
+# 返回: 0=链路可用(stdout 输出全链路延迟 ms) 1=链路不通 2=自检环境异常
+run_reality_client_probe() {
+    local server="$1"
+    local tmp_dir cfg log socks_port pid
+
+    tmp_dir=$(mktemp -d 2>/dev/null) || { warn "创建临时目录失败"; return 2; }
+    cfg="${tmp_dir}/client.json"
+    log="${tmp_dir}/client.log"
+
+    if ! socks_port=$(find_free_loopback_port); then
+        warn "未找到可用的本地端口"
+        rm -rf "$tmp_dir"
+        return 2
+    fi
+    write_reality_client_check_config "$cfg" "$server" "$REALITY_PORT" "$socks_port"
+
+    sing-box run -c "$cfg" >"$log" 2>&1 &
+    pid=$!
+
+    local i ready=0
+    for ((i = 0; i < 25; i++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        if [[ -n "$(get_port_listeners "$socks_port" tcp)" ]]; then
+            ready=1
+            break
+        fi
+        sleep 0.2
+    done
+
+    if (( ! ready )); then
+        warn "临时自检客户端未能启动(sing-box 版本过旧或配置不被支持):"
+        tail -n 5 "$log" >&2 || true
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -rf "$tmp_dir"
+        return 2
+    fi
+
+    local url out code secs ms rc=1
+    for url in "http://www.gstatic.com/generate_204" "http://cp.cloudflare.com/generate_204"; do
+        out=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 10 \
+            -x "socks5h://127.0.0.1:${socks_port}" "$url" 2>/dev/null) || out=""
+        code="${out%% *}"
+        secs="${out##* }"
+        if [[ "$code" == "204" || "$code" == "200" ]]; then
+            ms=$(awk -v t="$secs" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo 0)
+            echo "$ms"
+            rc=0
+            break
+        fi
+    done
+
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf "$tmp_dir"
+    return "$rc"
+}
+
+do_reality_check() {
+    if ! load_params; then
+        warn "未安装，无法自检"
+        return 1
+    fi
+    if ! command -v sing-box >/dev/null 2>&1; then
+        warn "未找到 sing-box 命令，请先完成安装"
+        return 1
+    fi
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── Reality 链接自检 ──${NC}"
+    echo -e "  ${DIM}客户端测速超时(如 v2rayN 的 TaskCanceledException)时，${NC}"
+    echo -e "  ${DIM}本自检可区分「链接参数错误」与「服务器线路问题」两类原因。${NC}"
+    echo ""
+
+    if service_is_active sing-box; then
+        success "sing-box 服务运行中"
+    else
+        warn "sing-box 服务未运行，请先执行: sbm start"
+        return 1
+    fi
+    if [[ -n "$(get_port_listeners "$REALITY_PORT" tcp)" ]]; then
+        success "Reality 端口 ${REALITY_PORT}/TCP 正在监听"
+    else
+        warn "Reality 端口 ${REALITY_PORT}/TCP 未在监听，请重启服务或检查日志"
+        return 1
+    fi
+
+    info "① 回环自检: 用与分享链接一致的参数经 127.0.0.1:${REALITY_PORT} 走完整代理链路..."
+    local loop_ms rc=0
+    loop_ms=$(run_reality_client_probe "127.0.0.1") || rc=$?
+    if (( rc == 2 )); then
+        warn "自检环境异常，未能完成验证"
+        return 1
+    elif (( rc != 0 )); then
+        warn "回环自检失败: 链接参数与服务端配置不匹配，或服务器本身出网异常"
+        echo -e "  ${DIM}常见原因: 客户端里是旧链接(密钥/short_id 已变化)、服务器无法访问外网。${NC}" >&2
+        echo -e "  ${DIM}建议: 执行 sbm links 重新生成链接并重新导入客户端；仍失败则执行 sbm apply 同步配置。${NC}" >&2
+        return 1
+    fi
+    success "回环自检通过 (全链路延迟 ${loop_ms}ms) → 链接参数与服务端完全匹配"
+
+    refresh_public_ip_stack >/dev/null 2>&1 || true
+    local pub_ip="${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
+    if [[ -n "$pub_ip" ]]; then
+        info "② 公网回连自检: 经 ${pub_ip}:${REALITY_PORT} 再走一遍..."
+        local pub_ms
+        rc=0
+        pub_ms=$(run_reality_client_probe "$pub_ip") || rc=$?
+        if (( rc == 0 )); then
+            success "公网回连自检通过 (${pub_ms}ms) → 本机防火墙已放行"
+        else
+            warn "公网回连失败: 可能是防火墙/云安全组未放行 ${REALITY_PORT}/TCP；"
+            warn "也可能是本机不支持 NAT 环回(此时不代表外部不可达，以客户端实测为准)"
+        fi
+    else
+        info "② 未检测到公网 IP，跳过公网回连自检"
+    fi
+
+    echo ""
+    echo -e "${CYAN}${BOLD}── 自检结论 ──${NC}"
+    echo -e "  服务端配置与链接参数${GREEN}${BOLD}一致且可用${NC}。若客户端测速仍超时，基本可判定为"
+    echo -e "  ${BOLD}客户端到服务器的线路问题${NC}(IP/端口被墙、国际链路丢包)，按优先级建议:"
+    echo -e "   1) 换端口: 菜单 [修改配置] 更换 Reality 端口(如 8443/2053 等)"
+    echo -e "   2) 换伪装域名: 执行 ${BOLD}sbm resni${NC} 重新优选 SNI"
+    echo -e "   3) 对比测速 Hysteria2 / Argo 链接: 若同机其它协议正常，更可确认是 Reality 端口/IP 被针对性阻断"
+    echo ""
+    press_enter
+    return 0
+}
+
 # ─── 应用当前版本配置 (一键同步) ─────────────────────────────
 # 用当前已保存的凭证 (UUID / 端口 / 域名 / 密钥均不变) 按新版本模板
 # 重写服务端配置并重启，再按新格式重新生成链接。适用于升级脚本后
@@ -684,6 +867,10 @@ do_apply_latest() {
     fi
 
     success "配置已按 v${SCRIPT_VERSION} 同步并重启"
+    # 端口跳跃规则不在 sing-box 配置内，重写后按当前范围重建(未启用则清理旧规则)
+    if validate_hop_range "${HY2_HOP_RANGE:-}"; then
+        apply_hy2_port_hopping || warn "Hysteria2 端口跳跃规则应用失败"
+    fi
     refresh_argo_domain_if_needed
     generate_and_show_links
     ensure_subscription_service || warn "订阅服务启动失败"
@@ -1019,6 +1206,7 @@ do_uninstall() {
     prompt_read confirm "  确认卸载？(y/N): "
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消"; press_enter; return; }
 
+    remove_hy2_port_hopping 2>/dev/null || true
     service_stop sing-box 2>/dev/null || true
     service_disable sing-box 2>/dev/null || true
     service_stop argo-tunnel 2>/dev/null || true
@@ -1152,6 +1340,7 @@ main() {
         stop)        do_stop ;;
         restart)     do_restart ;;
         resni|reality-sni) do_reoptimize_reality_sni || warn "Reality 伪装域名优选未完成" ;;
+        check|selfcheck) do_reality_check || warn "Reality 链接自检未通过" ;;
         apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
         cfopt|refresh-cf) do_refresh_cf_domains || warn "优选域名刷新未完成" ;;
         cfopt-auto)  do_cfopt_auto "${2:-status}" || true ;;
@@ -1171,6 +1360,7 @@ main() {
             echo "  stop            停止服务"
             echo "  restart         重启服务"
             echo "  resni           重新优选 Reality 伪装域名(SNI)并重启生效"
+            echo "  check           Reality 链接自检(区分链接参数错误与线路问题)"
             echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
             echo "  cfopt           从 BestCF 刷新 CF 优选域名(电信/移动)并更新链接"
             echo "  cfopt-auto on   开启每周自动刷新优选域名 (off 关闭, status 查看; 默认关闭)"

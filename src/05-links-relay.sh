@@ -352,6 +352,13 @@ hy2_share_link_available() {
     get_hy2_cert_pin_sha256 >/dev/null
 }
 
+# 端口跳跃启用时返回 "&mport=小端口-大端口"(客户端在该范围内随机跳端口)，
+# 未启用返回空串。链接主端口仍为 HY2_PORT，mport 仅告知客户端跳跃范围。
+hy2_mport_suffix() {
+    validate_hop_range "${HY2_HOP_RANGE:-}" || return 0
+    printf '&mport=%s-%s' "${HY2_HOP_RANGE%%:*}" "${HY2_HOP_RANGE##*:}"
+}
+
 build_direct_share_links_for_ip() {
     local ip="$1"
     local family_label="$2"
@@ -380,7 +387,7 @@ build_direct_share_links_for_ip() {
         hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
         hy2_pin_sha=$(get_hy2_cert_pin_sha256) || return 0
         hy2_pin_enc=$(urlencode "${hy2_pin_sha}")
-        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?sni=${HY2_SNI}&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
+        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?sni=${HY2_SNI}&pinSHA256=${hy2_pin_enc}$(hy2_mport_suffix)#${hy2_remark}"
     fi
 }
 
@@ -597,6 +604,8 @@ generate_and_show_links() {
     if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
         echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
         echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
+        validate_hop_range "${HY2_HOP_RANGE:-}" && \
+            echo -e "  端口跳跃:      ${BOLD}UDP ${HY2_HOP_RANGE} → ${HY2_PORT}${NC}"
     fi
     echo ""
 
