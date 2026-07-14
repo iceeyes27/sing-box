@@ -18,6 +18,7 @@ generate_params() {
     SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT:-24630}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
+    ARGO_PROTOCOL="auto"
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
@@ -300,6 +301,13 @@ validate_hop_range() {
     end=${range##*:}
     (( start >= 1 && start <= 65535 && end >= 1 && end <= 65535 && start < end )) || return 1
     return 0
+}
+
+is_valid_argo_protocol() {
+    case "${1:-}" in
+        auto|http2|quic) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 hy2_hop_range_label() {

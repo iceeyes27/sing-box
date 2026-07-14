@@ -663,7 +663,7 @@ link_ipv4_selection_label() {
 # ─── 参数持久化 ──────────────────────────────────────────────
 PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV WS_PORT WS_PATH NODE_NAME
-    SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
+    SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_PROTOCOL ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_UP_MBPS HY2_DOWN_MBPS HY2_HOP_RANGE
 )
@@ -836,6 +836,10 @@ load_params() {
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
             ARGO_TOKEN=""
             # need_save 不标记，除非有实质性变化
+        fi
+        if [[ ! ${ARGO_PROTOCOL+x} ]] || ! is_valid_argo_protocol "${ARGO_PROTOCOL:-}"; then
+            ARGO_PROTOCOL="auto"
+            need_save=true
         fi
         if [[ -z "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
             ARGO_BEST_CF_DOMAIN=""
@@ -1791,6 +1795,7 @@ generate_params() {
     SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT:-24630}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
+    ARGO_PROTOCOL="auto"
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
@@ -2073,6 +2078,13 @@ validate_hop_range() {
     end=${range##*:}
     (( start >= 1 && start <= 65535 && end >= 1 && end <= 65535 && start < end )) || return 1
     return 0
+}
+
+is_valid_argo_protocol() {
+    case "${1:-}" in
+        auto|http2|quic) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 hy2_hop_range_label() {
@@ -2702,20 +2714,24 @@ EOF
 
 # ─── Argo 服务 ───────────────────────────────────────────────
 write_argo_service() {
-    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening
+    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening argo_protocol
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
 
+    # auto: 优先 QUIC(抗丢包/抖动更强)，出站 UDP 7844 被封时自动回退 http2。
+    # http2: 纯 TCP 443；NAT 小鸡等 UDP 链路不稳、隧道频繁断线换域名的机器建议手动指定。
+    argo_protocol="${ARGO_PROTOCOL:-auto}"
+    is_valid_argo_protocol "$argo_protocol" || argo_protocol="auto"
+
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        info "使用 Token 模式启动 Argo 隧道 (固定域名)"
+        info "使用 Token 模式启动 Argo 隧道 (固定域名, 协议: ${argo_protocol})"
         info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
         write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
-        # --protocol auto: 优先 QUIC(抗丢包/抖动更强)，出站 UDP 7844 被封时自动回退 http2。
         # --retries 8: 边缘连接出错时多重试几次，尽量让进程存活而不是退出。
-        exec_cmd="tunnel --protocol auto --retries 8 --no-autoupdate run"
+        exec_cmd="tunnel --protocol ${argo_protocol} --retries 8 --no-autoupdate run"
     else
-        info "使用临时隧道模式 (trycloudflare.com)"
-        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol auto --retries 8"
+        info "使用临时隧道模式 (trycloudflare.com, 协议: ${argo_protocol})"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol ${argo_protocol} --retries 8"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
@@ -3683,10 +3699,10 @@ generate_and_show_links() {
     fi
     echo -e "  订阅端口:      ${BOLD}${SUBSCRIPTION_PORT}${NC}"
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC}"
+        echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-auto}${NC}"
         echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN:-未配置}${NC}"
     else
-        echo -e "  Argo 模式:     ${YELLOW}临时域名 (Quick)${NC}"
+        echo -e "  Argo 模式:     ${YELLOW}临时域名 (Quick)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-auto}${NC}"
         [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
     fi
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
@@ -4886,6 +4902,7 @@ do_generate_relay_script() {
 #   SBM_NODE_NAME       节点名称
 #   SBM_PUBLIC_IPV4     直连链接使用的公网 IPv4 覆盖
 #   SBM_ARGO_TOKEN + SBM_ARGO_DOMAIN  两者同时提供则用固定域名模式
+#   SBM_ARGO_PROTOCOL   Argo 隧道传输协议 auto/http2/quic (默认 auto；UDP 不稳的 NAT 机器建议 http2)
 #   SBM_HY2_UP_MBPS + SBM_HY2_DOWN_MBPS  Hysteria2 带宽(Brutal)，需成对提供，缺省不限速(BBR)
 #   SBM_HY2_HOP_RANGE   Hysteria2 端口跳跃范围(格式 小端口:大端口，如 20000:40000)
 #   SBM_CFOPT_AUTO=1    开启 CF 优选域名每周自动刷新
@@ -4929,6 +4946,14 @@ apply_install_env_overrides() {
         ARGO_DOMAIN="${ARGO_DOMAIN%/}"
     elif [[ -n "${SBM_ARGO_TOKEN:-}${SBM_ARGO_DOMAIN:-}" ]]; then
         warn "SBM_ARGO_TOKEN 与 SBM_ARGO_DOMAIN 需同时提供，已忽略，使用临时域名模式"
+    fi
+
+    if [[ -n "${SBM_ARGO_PROTOCOL:-}" ]]; then
+        if is_valid_argo_protocol "$SBM_ARGO_PROTOCOL"; then
+            ARGO_PROTOCOL="$SBM_ARGO_PROTOCOL"
+        else
+            warn "SBM_ARGO_PROTOCOL 仅支持 auto/http2/quic，已忽略: ${SBM_ARGO_PROTOCOL}"
+        fi
     fi
     return 0
 }
@@ -5185,9 +5210,10 @@ do_modify_config() {
         echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
         echo -e "  15) 修改 Hysteria2 带宽限速 ${DIM}(当前: $(hy2_bandwidth_label))${NC}"
         echo -e "  16) 修改 Hysteria2 端口跳跃 ${DIM}(当前: $(hy2_hop_range_label))${NC}"
+        echo -e "  17) 修改 Argo 隧道协议     ${DIM}(当前: ${ARGO_PROTOCOL:-auto})${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        prompt_read choice "  请选择 [0-16]: "
+        prompt_read choice "  请选择 [0-17]: "
 
         local changed=false
         local ports_changed=false
@@ -5349,6 +5375,29 @@ do_modify_config() {
                     press_enter
                     continue
                 fi
+                ;;
+            17)
+                echo -e "\n  当前协议: ${ARGO_PROTOCOL:-auto}"
+                echo -e "  1) auto  (默认；优先 QUIC/UDP，出站 UDP 被封时自动回退 http2)"
+                echo -e "  2) http2 (纯 TCP 443；UDP 链路不稳、隧道频繁断线换域名时推荐)"
+                echo -e "  3) quic  (强制 QUIC/UDP 7844)"
+                [[ -z "${ARGO_TOKEN:-}" ]] && echo -e "  ${YELLOW}注意: 临时域名模式下切换协议会重启隧道并更换域名${NC}"
+                prompt_read sub_choice "  请选择 [1-3]: "
+                local new_argo_protocol=""
+                case "$sub_choice" in
+                    1) new_argo_protocol="auto" ;;
+                    2) new_argo_protocol="http2" ;;
+                    3) new_argo_protocol="quic" ;;
+                    *) warn "无效选项"; press_enter; continue ;;
+                esac
+                if [[ "$new_argo_protocol" == "${ARGO_PROTOCOL:-auto}" ]]; then
+                    info "协议未变化"
+                    press_enter
+                    continue
+                fi
+                ARGO_PROTOCOL="$new_argo_protocol"
+                changed=true
+                restart_argo=true
                 ;;
             14)
                 if prompt_public_ipv4_override; then
@@ -6249,7 +6298,7 @@ main() {
             echo "    SBM_NODE_NAME=hk-01 SBM_REALITY_PORT=8443 bash $0 install"
             echo "  支持: SBM_REALITY_PORT SBM_HY2_PORT SBM_SUBSCRIPTION_PORT SBM_REALITY_SNI"
             echo "        SBM_NODE_NAME SBM_PUBLIC_IPV4 SBM_ARGO_TOKEN SBM_ARGO_DOMAIN"
-            echo "        SBM_HY2_UP_MBPS SBM_HY2_DOWN_MBPS SBM_CFOPT_AUTO"
+            echo "        SBM_ARGO_PROTOCOL SBM_HY2_UP_MBPS SBM_HY2_DOWN_MBPS SBM_CFOPT_AUTO"
             exit 0
             ;;
         *)  main_menu ;;

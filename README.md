@@ -45,7 +45,7 @@ SBM_NODE_NAME=hk-01 SBM_ARGO_TOKEN='eyJ...' SBM_ARGO_DOMAIN=v2.example.com \
   bash install.sh install
 ```
 
-支持的变量：`SBM_REALITY_PORT`、`SBM_HY2_PORT`、`SBM_SUBSCRIPTION_PORT`、`SBM_REALITY_SNI`、`SBM_NODE_NAME`、`SBM_PUBLIC_IPV4`（直连链接公网 IPv4 覆盖）、`SBM_ARGO_TOKEN` + `SBM_ARGO_DOMAIN`（固定域名模式，需成对提供）、`SBM_HY2_UP_MBPS` + `SBM_HY2_DOWN_MBPS`（Hysteria2 Brutal 限速，需成对提供，缺省不限速走 BBR）、`SBM_HY2_HOP_RANGE`（Hysteria2 端口跳跃范围，格式 `小端口:大端口`，如 `20000:40000`）、`SBM_CFOPT_AUTO=1`（开启每周 CF 优选自动刷新）。交互模式下这些变量同样生效，作为各提示的默认值。
+支持的变量：`SBM_REALITY_PORT`、`SBM_HY2_PORT`、`SBM_SUBSCRIPTION_PORT`、`SBM_REALITY_SNI`、`SBM_NODE_NAME`、`SBM_PUBLIC_IPV4`（直连链接公网 IPv4 覆盖）、`SBM_ARGO_TOKEN` + `SBM_ARGO_DOMAIN`（固定域名模式，需成对提供）、`SBM_ARGO_PROTOCOL`（Argo 隧道传输协议 `auto`/`http2`/`quic`，默认 `auto`；NAT 机器 UDP 链路不稳、隧道频繁断线换域名时建议 `http2`）、`SBM_HY2_UP_MBPS` + `SBM_HY2_DOWN_MBPS`（Hysteria2 Brutal 限速，需成对提供，缺省不限速走 BBR）、`SBM_HY2_HOP_RANGE`（Hysteria2 端口跳跃范围，格式 `小端口:大端口`，如 `20000:40000`）、`SBM_CFOPT_AUTO=1`（开启每周 CF 优选自动刷新）。交互模式下这些变量同样生效，作为各提示的默认值。
 
 ## 🎛️ 管理面板使用指南
 

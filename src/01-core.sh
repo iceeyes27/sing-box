@@ -618,7 +618,7 @@ link_ipv4_selection_label() {
 # ─── 参数持久化 ──────────────────────────────────────────────
 PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV WS_PORT WS_PATH NODE_NAME
-    SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
+    SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_PROTOCOL ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_UP_MBPS HY2_DOWN_MBPS HY2_HOP_RANGE
 )
@@ -791,6 +791,10 @@ load_params() {
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
             ARGO_TOKEN=""
             # need_save 不标记，除非有实质性变化
+        fi
+        if [[ ! ${ARGO_PROTOCOL+x} ]] || ! is_valid_argo_protocol "${ARGO_PROTOCOL:-}"; then
+            ARGO_PROTOCOL="auto"
+            need_save=true
         fi
         if [[ -z "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
             ARGO_BEST_CF_DOMAIN=""

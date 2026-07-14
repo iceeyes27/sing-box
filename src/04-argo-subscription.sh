@@ -1,19 +1,23 @@
 # ─── Argo 服务 ───────────────────────────────────────────────
 write_argo_service() {
-    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening
+    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening argo_protocol
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
 
+    # auto: 优先 QUIC(抗丢包/抖动更强)，出站 UDP 7844 被封时自动回退 http2。
+    # http2: 纯 TCP 443；NAT 小鸡等 UDP 链路不稳、隧道频繁断线换域名的机器建议手动指定。
+    argo_protocol="${ARGO_PROTOCOL:-auto}"
+    is_valid_argo_protocol "$argo_protocol" || argo_protocol="auto"
+
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        info "使用 Token 模式启动 Argo 隧道 (固定域名)"
+        info "使用 Token 模式启动 Argo 隧道 (固定域名, 协议: ${argo_protocol})"
         info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
         write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
-        # --protocol auto: 优先 QUIC(抗丢包/抖动更强)，出站 UDP 7844 被封时自动回退 http2。
         # --retries 8: 边缘连接出错时多重试几次，尽量让进程存活而不是退出。
-        exec_cmd="tunnel --protocol auto --retries 8 --no-autoupdate run"
+        exec_cmd="tunnel --protocol ${argo_protocol} --retries 8 --no-autoupdate run"
     else
-        info "使用临时隧道模式 (trycloudflare.com)"
-        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol auto --retries 8"
+        info "使用临时隧道模式 (trycloudflare.com, 协议: ${argo_protocol})"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol ${argo_protocol} --retries 8"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
