@@ -1267,12 +1267,13 @@ test_manager_command_rejects_empty_source() {
 
 test_refresh_argo_runtime_renews_temporary_domain() {
     local tmp
-    local write_argo_service_def service_restart_def service_logs_def sleep_def
+    local write_argo_service_def service_restart_def service_logs_def sleep_def domain_alive_def
     tmp=$(mktemp -d)
     write_argo_service_def=$(declare -f write_argo_service || true)
     service_restart_def=$(declare -f service_restart || true)
     service_logs_def=$(declare -f service_logs || true)
     sleep_def=$(declare -f sleep || true)
+    domain_alive_def=$(declare -f argo_quick_domain_alive || true)
 
     PARAMS_FILE="${tmp}/params"
     CONFIG_DIR="$tmp"
@@ -1308,17 +1309,22 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     sleep() {
         :
     }
+    # 避免测试对 trycloudflare 真实发起连通性探测
+    argo_quick_domain_alive() {
+        return 0
+    }
 
     refresh_argo_runtime >/dev/null
     assert_eq "new.trycloudflare.com" "$ARGO_DOMAIN" "temporary Argo domain renew"
     assert_eq "" "$ARGO_BEST_CF_DOMAIN" "temporary Argo cache clear"
     assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN="new.trycloudflare.com"' "temporary Argo params save"
 
-    unset -f write_argo_service service_restart service_logs sleep
+    unset -f write_argo_service service_restart service_logs sleep argo_quick_domain_alive
     eval "$write_argo_service_def"
     eval "$service_restart_def"
     eval "$service_logs_def"
     eval "$sleep_def"
+    eval "$domain_alive_def"
     rm -rf "$tmp"
 }
 

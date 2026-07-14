@@ -838,7 +838,7 @@ load_params() {
             # need_save 不标记，除非有实质性变化
         fi
         if [[ ! ${ARGO_PROTOCOL+x} ]] || ! is_valid_argo_protocol "${ARGO_PROTOCOL:-}"; then
-            ARGO_PROTOCOL="auto"
+            ARGO_PROTOCOL="http2"
             need_save=true
         fi
         if [[ -z "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
@@ -1795,7 +1795,7 @@ generate_params() {
     SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT:-24630}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
-    ARGO_PROTOCOL="auto"
+    ARGO_PROTOCOL="http2"
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
@@ -2718,20 +2718,21 @@ write_argo_service() {
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
 
-    # auto: 优先 QUIC(抗丢包/抖动更强)，出站 UDP 7844 被封时自动回退 http2。
-    # http2: 纯 TCP 443；NAT 小鸡等 UDP 链路不稳、隧道频繁断线换域名的机器建议手动指定。
-    argo_protocol="${ARGO_PROTOCOL:-auto}"
-    is_valid_argo_protocol "$argo_protocol" || argo_protocol="auto"
+    # http2(默认): 纯 TCP 443，NAT 小鸡/UDP 受限环境下最稳(sing-box-yg 同款实践)；
+    # auto: 优先 QUIC(抗丢包/抖动更强)，出站 UDP 7844 被封时自动回退 http2；
+    # quic: 强制 QUIC，UDP 通畅且追求弱网性能时手动选择。
+    argo_protocol="${ARGO_PROTOCOL:-http2}"
+    is_valid_argo_protocol "$argo_protocol" || argo_protocol="http2"
 
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         info "使用 Token 模式启动 Argo 隧道 (固定域名, 协议: ${argo_protocol})"
         info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
         write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
         # --retries 8: 边缘连接出错时多重试几次，尽量让进程存活而不是退出。
-        exec_cmd="tunnel --protocol ${argo_protocol} --retries 8 --no-autoupdate run"
+        exec_cmd="tunnel --protocol ${argo_protocol} --edge-ip-version auto --retries 8 --no-autoupdate run"
     else
         info "使用临时隧道模式 (trycloudflare.com, 协议: ${argo_protocol})"
-        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol ${argo_protocol} --retries 8"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol ${argo_protocol} --edge-ip-version auto --retries 8"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
@@ -3007,6 +3008,17 @@ ensure_subscription_service() {
 }
 
 # ─── 获取 Argo 域名 ──────────────────────────────────────────
+# trycloudflare 域名对已注销的隧道仍会 DNS 解析，并由 CF 边缘应答 53x/52x(如错误 1033)，
+# 因此判断存活不能只看能否连通，要看状态码是否由源站应答(404/400/503 等，参考 sing-box-yg)。
+argo_quick_domain_alive() {
+    local domain="$1" code
+    code=$(curl -so /dev/null -m 5 -w '%{http_code}' "https://${domain}/" 2>/dev/null) || true
+    case "$code" in
+        ''|000|52[0-9]|53[0-9]) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 fetch_argo_domain() {
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         # Token 模式下，如果用户没填域名，提醒一下
@@ -3017,16 +3029,18 @@ fetch_argo_domain() {
         return 0
     fi
 
-    # 临时域名模式获取逻辑:立即查一次日志，未出现则 2s 间隔轮询
-    # (总预算约 30s，与旧 3s×10 相同，但域名一出现就即时返回)
-    local max=15 i=0
+    # 临时域名模式获取逻辑:立即查一次日志，未出现则 2s 间隔轮询。
+    # 抓到域名后还需通过边缘连通性验证，避免把进程重启前遗留在日志里的
+    # 旧域名(已作废，边缘返回 530)当成现役域名输出成死链。
+    local max=15 i=0 candidate=""
     local previous_domain="${ARGO_DOMAIN:-}"
     ARGO_DOMAIN=""
     while [[ $i -lt $max ]]; do
-        ARGO_DOMAIN=$(service_logs argo-tunnel 1000 2>/dev/null | \
+        candidate=$(service_logs argo-tunnel 1000 2>/dev/null | \
                       grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' | \
                       tail -1 | sed 's|https://||')
-        if [[ -n "$ARGO_DOMAIN" ]]; then
+        if [[ -n "$candidate" ]] && argo_quick_domain_alive "$candidate"; then
+            ARGO_DOMAIN="$candidate"
             if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
                 clear_argo_best_cf_cache
                 info "检测到新的 Argo 临时域名，已清空缓存的优选接入域名"
@@ -3036,6 +3050,16 @@ fetch_argo_domain() {
         i=$((i + 1))
         sleep 2
     done
+    if [[ -n "$candidate" ]]; then
+        # 预算内始终未通过验证:多半是新域名 DNS 尚未全网生效，仍按日志里的最新域名
+        # 输出以免链接凭空消失，但提醒用户稍后复核。
+        ARGO_DOMAIN="$candidate"
+        warn "Argo 临时域名 ${candidate} 暂未通过连通性验证(可能尚未生效)，若稍后仍不可用请重新执行 sbm links"
+        if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
+            clear_argo_best_cf_cache
+        fi
+        return 0
+    fi
     return 1
 }
 
@@ -3699,10 +3723,10 @@ generate_and_show_links() {
     fi
     echo -e "  订阅端口:      ${BOLD}${SUBSCRIPTION_PORT}${NC}"
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-auto}${NC}"
+        echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-http2}${NC}"
         echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN:-未配置}${NC}"
     else
-        echo -e "  Argo 模式:     ${YELLOW}临时域名 (Quick)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-auto}${NC}"
+        echo -e "  Argo 模式:     ${YELLOW}临时域名 (Quick)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-http2}${NC}"
         [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
     fi
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
@@ -4902,7 +4926,7 @@ do_generate_relay_script() {
 #   SBM_NODE_NAME       节点名称
 #   SBM_PUBLIC_IPV4     直连链接使用的公网 IPv4 覆盖
 #   SBM_ARGO_TOKEN + SBM_ARGO_DOMAIN  两者同时提供则用固定域名模式
-#   SBM_ARGO_PROTOCOL   Argo 隧道传输协议 auto/http2/quic (默认 auto；UDP 不稳的 NAT 机器建议 http2)
+#   SBM_ARGO_PROTOCOL   Argo 隧道传输协议 http2/auto/quic (默认 http2 最稳；UDP 通畅追求弱网性能可选 auto/quic)
 #   SBM_HY2_UP_MBPS + SBM_HY2_DOWN_MBPS  Hysteria2 带宽(Brutal)，需成对提供，缺省不限速(BBR)
 #   SBM_HY2_HOP_RANGE   Hysteria2 端口跳跃范围(格式 小端口:大端口，如 20000:40000)
 #   SBM_CFOPT_AUTO=1    开启 CF 优选域名每周自动刷新
@@ -5210,7 +5234,7 @@ do_modify_config() {
         echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
         echo -e "  15) 修改 Hysteria2 带宽限速 ${DIM}(当前: $(hy2_bandwidth_label))${NC}"
         echo -e "  16) 修改 Hysteria2 端口跳跃 ${DIM}(当前: $(hy2_hop_range_label))${NC}"
-        echo -e "  17) 修改 Argo 隧道协议     ${DIM}(当前: ${ARGO_PROTOCOL:-auto})${NC}"
+        echo -e "  17) 修改 Argo 隧道协议     ${DIM}(当前: ${ARGO_PROTOCOL:-http2})${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
         prompt_read choice "  请选择 [0-17]: "
@@ -5377,20 +5401,20 @@ do_modify_config() {
                 fi
                 ;;
             17)
-                echo -e "\n  当前协议: ${ARGO_PROTOCOL:-auto}"
-                echo -e "  1) auto  (默认；优先 QUIC/UDP，出站 UDP 被封时自动回退 http2)"
-                echo -e "  2) http2 (纯 TCP 443；UDP 链路不稳、隧道频繁断线换域名时推荐)"
+                echo -e "\n  当前协议: ${ARGO_PROTOCOL:-http2}"
+                echo -e "  1) http2 (默认；纯 TCP 443，NAT/UDP 受限环境最稳) ${GREEN}推荐${NC}"
+                echo -e "  2) auto  (优先 QUIC/UDP，抗丢包更强，出站 UDP 被封时自动回退 http2)"
                 echo -e "  3) quic  (强制 QUIC/UDP 7844)"
                 [[ -z "${ARGO_TOKEN:-}" ]] && echo -e "  ${YELLOW}注意: 临时域名模式下切换协议会重启隧道并更换域名${NC}"
                 prompt_read sub_choice "  请选择 [1-3]: "
                 local new_argo_protocol=""
                 case "$sub_choice" in
-                    1) new_argo_protocol="auto" ;;
-                    2) new_argo_protocol="http2" ;;
+                    1) new_argo_protocol="http2" ;;
+                    2) new_argo_protocol="auto" ;;
                     3) new_argo_protocol="quic" ;;
                     *) warn "无效选项"; press_enter; continue ;;
                 esac
-                if [[ "$new_argo_protocol" == "${ARGO_PROTOCOL:-auto}" ]]; then
+                if [[ "$new_argo_protocol" == "${ARGO_PROTOCOL:-http2}" ]]; then
                     info "协议未变化"
                     press_enter
                     continue

@@ -9,7 +9,7 @@
 #   SBM_NODE_NAME       节点名称
 #   SBM_PUBLIC_IPV4     直连链接使用的公网 IPv4 覆盖
 #   SBM_ARGO_TOKEN + SBM_ARGO_DOMAIN  两者同时提供则用固定域名模式
-#   SBM_ARGO_PROTOCOL   Argo 隧道传输协议 auto/http2/quic (默认 auto；UDP 不稳的 NAT 机器建议 http2)
+#   SBM_ARGO_PROTOCOL   Argo 隧道传输协议 http2/auto/quic (默认 http2 最稳；UDP 通畅追求弱网性能可选 auto/quic)
 #   SBM_HY2_UP_MBPS + SBM_HY2_DOWN_MBPS  Hysteria2 带宽(Brutal)，需成对提供，缺省不限速(BBR)
 #   SBM_HY2_HOP_RANGE   Hysteria2 端口跳跃范围(格式 小端口:大端口，如 20000:40000)
 #   SBM_CFOPT_AUTO=1    开启 CF 优选域名每周自动刷新
@@ -317,7 +317,7 @@ do_modify_config() {
         echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
         echo -e "  15) 修改 Hysteria2 带宽限速 ${DIM}(当前: $(hy2_bandwidth_label))${NC}"
         echo -e "  16) 修改 Hysteria2 端口跳跃 ${DIM}(当前: $(hy2_hop_range_label))${NC}"
-        echo -e "  17) 修改 Argo 隧道协议     ${DIM}(当前: ${ARGO_PROTOCOL:-auto})${NC}"
+        echo -e "  17) 修改 Argo 隧道协议     ${DIM}(当前: ${ARGO_PROTOCOL:-http2})${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
         prompt_read choice "  请选择 [0-17]: "
@@ -484,20 +484,20 @@ do_modify_config() {
                 fi
                 ;;
             17)
-                echo -e "\n  当前协议: ${ARGO_PROTOCOL:-auto}"
-                echo -e "  1) auto  (默认；优先 QUIC/UDP，出站 UDP 被封时自动回退 http2)"
-                echo -e "  2) http2 (纯 TCP 443；UDP 链路不稳、隧道频繁断线换域名时推荐)"
+                echo -e "\n  当前协议: ${ARGO_PROTOCOL:-http2}"
+                echo -e "  1) http2 (默认；纯 TCP 443，NAT/UDP 受限环境最稳) ${GREEN}推荐${NC}"
+                echo -e "  2) auto  (优先 QUIC/UDP，抗丢包更强，出站 UDP 被封时自动回退 http2)"
                 echo -e "  3) quic  (强制 QUIC/UDP 7844)"
                 [[ -z "${ARGO_TOKEN:-}" ]] && echo -e "  ${YELLOW}注意: 临时域名模式下切换协议会重启隧道并更换域名${NC}"
                 prompt_read sub_choice "  请选择 [1-3]: "
                 local new_argo_protocol=""
                 case "$sub_choice" in
-                    1) new_argo_protocol="auto" ;;
-                    2) new_argo_protocol="http2" ;;
+                    1) new_argo_protocol="http2" ;;
+                    2) new_argo_protocol="auto" ;;
                     3) new_argo_protocol="quic" ;;
                     *) warn "无效选项"; press_enter; continue ;;
                 esac
-                if [[ "$new_argo_protocol" == "${ARGO_PROTOCOL:-auto}" ]]; then
+                if [[ "$new_argo_protocol" == "${ARGO_PROTOCOL:-http2}" ]]; then
                     info "协议未变化"
                     press_enter
                     continue

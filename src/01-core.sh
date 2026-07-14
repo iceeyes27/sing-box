@@ -793,7 +793,7 @@ load_params() {
             # need_save 不标记，除非有实质性变化
         fi
         if [[ ! ${ARGO_PROTOCOL+x} ]] || ! is_valid_argo_protocol "${ARGO_PROTOCOL:-}"; then
-            ARGO_PROTOCOL="auto"
+            ARGO_PROTOCOL="http2"
             need_save=true
         fi
         if [[ -z "${ARGO_BEST_CF_DOMAIN:-}" ]]; then

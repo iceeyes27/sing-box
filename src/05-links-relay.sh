@@ -594,10 +594,10 @@ generate_and_show_links() {
     fi
     echo -e "  订阅端口:      ${BOLD}${SUBSCRIPTION_PORT}${NC}"
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-auto}${NC}"
+        echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-http2}${NC}"
         echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN:-未配置}${NC}"
     else
-        echo -e "  Argo 模式:     ${YELLOW}临时域名 (Quick)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-auto}${NC}"
+        echo -e "  Argo 模式:     ${YELLOW}临时域名 (Quick)${NC} ${DIM}协议: ${ARGO_PROTOCOL:-http2}${NC}"
         [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
     fi
     echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
