@@ -616,12 +616,12 @@ install_cloudflared() {
 }
 
 write_singbox_service() {
-    [[ "$(service_manager)" == "openrc" ]] || return 0
+    case "$(service_manager)" in
+        openrc)
+            local singbox_bin
+            singbox_bin=$(command -v sing-box 2>/dev/null || echo "/usr/bin/sing-box")
 
-    local singbox_bin
-    singbox_bin=$(command -v sing-box 2>/dev/null || echo "/usr/bin/sing-box")
-
-    cat > "$SINGBOX_OPENRC_SERVICE" << EOF
+            cat > "$SINGBOX_OPENRC_SERVICE" << EOF
 #!/sbin/openrc-run
 name="sing-box"
 description="sing-box service"
@@ -636,6 +636,30 @@ depend() {
     need net
 }
 EOF
-    chmod 755 "$SINGBOX_OPENRC_SERVICE"
-}
+            chmod 755 "$SINGBOX_OPENRC_SERVICE"
+            ;;
+        systemd)
+            if ! mkdir -p "$SINGBOX_SYSTEMD_DROPIN_DIR" 2>/dev/null; then
+                warn "无法创建 sing-box systemd 自恢复目录，继续使用默认服务"
+                return 0
+            fi
+            if ! cat > "$SINGBOX_SYSTEMD_OVERRIDE_FILE" << 'EOF'
+[Unit]
+StartLimitIntervalSec=0
 
+[Service]
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+EOF
+            then
+                warn "无法写入 sing-box systemd 自恢复配置，继续使用默认服务"
+                return 0
+            fi
+            service_daemon_reload
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}

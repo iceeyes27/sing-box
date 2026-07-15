@@ -43,6 +43,9 @@ export SBM_TEST_MODE=1
 # shellcheck source=../install.sh
 source "$SCRIPT"
 
+# 部分用例会就地 stub 函数且不恢复，这里保存原始定义供后续用例还原
+ORIG_RESOLVE_ARGO_BEST_CF_DOMAIN_DEF=$(declare -f resolve_argo_best_cf_domain)
+
 test_service_manager_systemd() {
     local tmp result
     tmp=$(mktemp -d)
@@ -64,6 +67,43 @@ exit 0'
     PATH="${tmp}:$PATH" result=$(PATH="${tmp}:$PATH" service_manager)
     rm -rf "$tmp"
     assert_eq "openrc" "$result" "service_manager openrc detection"
+}
+
+test_singbox_systemd_override_enables_restart() {
+    local tmp body
+    local service_manager_def service_daemon_reload_def
+    local old_dropin_dir old_override_file
+
+    tmp=$(mktemp -d)
+    service_manager_def=$(declare -f service_manager)
+    service_daemon_reload_def=$(declare -f service_daemon_reload)
+    old_dropin_dir="$SINGBOX_SYSTEMD_DROPIN_DIR"
+    old_override_file="$SINGBOX_SYSTEMD_OVERRIDE_FILE"
+
+    SINGBOX_SYSTEMD_DROPIN_DIR="${tmp}/sing-box.service.d"
+    SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
+
+    service_manager() {
+        echo "systemd"
+    }
+    service_daemon_reload() {
+        : > "${tmp}/daemon-reload"
+    }
+
+    write_singbox_service
+    body=$(<"$SINGBOX_SYSTEMD_OVERRIDE_FILE")
+    assert_contains "$body" "Restart=always" "sing-box systemd restart policy"
+    assert_contains "$body" "RestartSec=3" "sing-box systemd restart delay"
+    assert_contains "$body" "StartLimitIntervalSec=0" "sing-box systemd start limit"
+    assert_contains "$body" "LimitNOFILE=1048576" "sing-box systemd file limit"
+    [[ -f "${tmp}/daemon-reload" ]] || fail "sing-box systemd daemon-reload was not called"
+
+    SINGBOX_SYSTEMD_DROPIN_DIR="$old_dropin_dir"
+    SINGBOX_SYSTEMD_OVERRIDE_FILE="$old_override_file"
+    unset -f service_manager service_daemon_reload
+    eval "$service_manager_def"
+    eval "$service_daemon_reload_def"
+    rm -rf "$tmp"
 }
 
 test_package_manager_priority() {
@@ -904,11 +944,13 @@ test_manager_command_rejects_empty_source() {
 test_refresh_argo_runtime_renews_temporary_domain() {
     local tmp
     local write_argo_service_def service_restart_def service_logs_def sleep_def
+    local quick_alive_def
     tmp=$(mktemp -d)
     write_argo_service_def=$(declare -f write_argo_service || true)
     service_restart_def=$(declare -f service_restart || true)
     service_logs_def=$(declare -f service_logs || true)
     sleep_def=$(declare -f sleep || true)
+    quick_alive_def=$(declare -f argo_quick_domain_alive || true)
 
     PARAMS_FILE="${tmp}/params"
     CONFIG_DIR="$tmp"
@@ -944,17 +986,21 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     sleep() {
         :
     }
+    argo_quick_domain_alive() {
+        [[ "$1" == "new.trycloudflare.com" ]]
+    }
 
     refresh_argo_runtime >/dev/null
     assert_eq "new.trycloudflare.com" "$ARGO_DOMAIN" "temporary Argo domain renew"
     assert_eq "" "$ARGO_BEST_CF_DOMAIN" "temporary Argo cache clear"
     assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN=new.trycloudflare.com' "temporary Argo params save"
 
-    unset -f write_argo_service service_restart service_logs sleep
+    unset -f write_argo_service service_restart service_logs sleep argo_quick_domain_alive
     eval "$write_argo_service_def"
     eval "$service_restart_def"
     eval "$service_logs_def"
     eval "$sleep_def"
+    eval "$quick_alive_def"
     rm -rf "$tmp"
 }
 
@@ -996,6 +1042,8 @@ test_subscription_gateway_uses_local_https_origin() {
     assert_contains "$service_body" "--listen 127.0.0.1" "subscription local listen"
     assert_contains "$service_body" "--upstream-port 18080" "subscription WS upstream"
     assert_contains "$argo_body" "--url http://127.0.0.1:24630" "Argo HTTPS origin"
+    assert_not_contains "$argo_body" "--edge-ip-version" "Argo quick tunnel keeps stable edge selection"
+    assert_not_contains "$argo_body" "--retries" "Argo quick tunnel keeps legacy retry behavior"
     assert_contains "$server_body" "def proxy_to_upstream" "subscription gateway proxy"
 
     unset -f service_manager service_daemon_reload
@@ -1219,8 +1267,236 @@ test_subscription_page_is_final_section() {
     rm -rf "$tmp"
 }
 
+test_cf_edge_code_dead_classification() {
+    local code
+    for code in "" 000 520 525 529 530 533 539; do
+        cf_edge_code_dead "$code" || fail "cf_edge_code_dead should treat '${code}' as dead"
+    done
+    for code in 200 302 400 404 502 503 540 519; do
+        cf_edge_code_dead "$code" && fail "cf_edge_code_dead should treat '${code}' as alive"
+    done
+    return 0
+}
+
+test_argo_cf_domain_verified_uses_connect_to() {
+    local tmp
+    tmp=$(mktemp -d)
+    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
+printf "%s\n" "$*" > "'"${tmp}"'/curl-args"
+printf "404"'
+
+    ARGO_DOMAIN="host.trycloudflare.com"
+    PATH="${tmp}:$PATH" argo_cf_domain_verified "cf.example.com" ipv4 || \
+        fail "argo_cf_domain_verified should pass on origin response"
+    assert_contains "$(<"${tmp}/curl-args")" \
+        "--connect-to host.trycloudflare.com:443:cf.example.com:443" \
+        "strict probe connect-to mapping"
+    assert_contains "$(<"${tmp}/curl-args")" "https://host.trycloudflare.com/" "strict probe keeps Argo host"
+
+    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
+printf "530"'
+    PATH="${tmp}:$PATH" argo_cf_domain_verified "cf.example.com" ipv4 && \
+        fail "argo_cf_domain_verified should reject 530"
+
+    ARGO_DOMAIN=""
+    rm -rf "$tmp"
+}
+
+test_select_cf_domain_prefers_verified() {
+    local tmp result cf_domains_backup=("${CF_DOMAINS[@]}")
+    tmp=$(mktemp -d)
+    # good.example.com 严格验证通过(404)，其余域名仅基础可达
+    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"--connect-to"* ]]; then
+    if [[ "$args" == *"good.example.com"* ]]; then
+        printf "404"
+        exit 0
+    fi
+    printf "000"
+    exit 28
+fi
+exit 0'
+
+    CF_DOMAINS=("bad.example.com" "good.example.com" "worse.example.com")
+    ARGO_DOMAIN="host.trycloudflare.com"
+    result=$(PATH="${tmp}:$PATH" select_random_cf_domain_by_family ipv4 2>/dev/null)
+    assert_eq "good.example.com" "$result" "verified CF domain preferred"
+
+    CF_DOMAINS=("${cf_domains_backup[@]}")
+    ARGO_DOMAIN=""
+    rm -rf "$tmp"
+}
+
+test_select_cf_domain_falls_back_to_reachable() {
+    local tmp result cf_domains_backup=("${CF_DOMAINS[@]}")
+    tmp=$(mktemp -d)
+    # 所有严格验证均返回 530(如 Argo 域名瞬时陈旧)，但基础可达:
+    # 域名不得被排除，更不得回退到 Argo 域名
+    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
+if [[ "$*" == *"--connect-to"* ]]; then
+    printf "530"
+    exit 0
+fi
+exit 0'
+
+    CF_DOMAINS=("cf-a.example.com" "cf-b.example.com")
+    ARGO_DOMAIN="host.trycloudflare.com"
+    result=$(PATH="${tmp}:$PATH" select_random_cf_domain_by_family ipv4 2>/dev/null)
+    assert_contains "cf-a.example.com cf-b.example.com" "$result" "reachable tier fallback stays in CF list"
+    assert_not_contains "$result" "trycloudflare" "reachable tier fallback never uses Argo domain"
+
+    CF_DOMAINS=("${cf_domains_backup[@]}")
+    ARGO_DOMAIN=""
+    rm -rf "$tmp"
+}
+
+test_resolve_argo_best_cf_domain_never_falls_back_to_argo_domain() {
+    local tmp cf_domains_backup=("${CF_DOMAINS[@]}")
+    # 还原被前序用例 stub 掉的真实实现
+    eval "$ORIG_RESOLVE_ARGO_BEST_CF_DOMAIN_DEF"
+    tmp=$(mktemp -d)
+    # 所有探测彻底失败(VPS 出口连不上任何优选线路)
+    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
+exit 6'
+
+    PARAMS_FILE="${tmp}/params"
+    CONFIG_DIR="$tmp"
+    CF_DOMAINS=("cf-default.example.com" "cf-alt.example.com")
+    ARGO_DOMAIN="host.trycloudflare.com"
+    ARGO_BEST_CF_DOMAIN=""
+    IP_STACK_MODE="dual-stack"
+
+    PATH="${tmp}:$PATH" resolve_argo_best_cf_domain >/dev/null 2>&1 || \
+        fail "resolve_argo_best_cf_domain should not fail"
+    assert_eq "cf-default.example.com" "$ARGO_BEST_CF_DOMAIN" "probe-all-fail falls back to first CF domain"
+
+    # 已有缓存域名时保留缓存，同样不得回退到 Argo 域名
+    ARGO_BEST_CF_DOMAIN="cf-cached.example.com"
+    PATH="${tmp}:$PATH" resolve_argo_best_cf_domain >/dev/null 2>&1 || \
+        fail "resolve_argo_best_cf_domain should not fail with cache"
+    assert_eq "cf-cached.example.com" "$ARGO_BEST_CF_DOMAIN" "probe-all-fail keeps cached CF domain"
+
+    CF_DOMAINS=("${cf_domains_backup[@]}")
+    ARGO_DOMAIN=""
+    ARGO_BEST_CF_DOMAIN=""
+    IP_STACK_MODE=""
+    rm -rf "$tmp"
+}
+
+test_fetch_argo_domain_skips_stale_log_domain() {
+    local tmp
+    local service_logs_def sleep_def quick_alive_def clear_cache_def
+    tmp=$(mktemp -d)
+    service_logs_def=$(declare -f service_logs)
+    sleep_def=$(declare -f sleep || true)
+    quick_alive_def=$(declare -f argo_quick_domain_alive)
+    clear_cache_def=$(declare -f clear_argo_best_cf_cache)
+
+    # 前两次轮询日志里只有重启前遗留的旧域名(已死)，第三次起出现新域名
+    : > "${tmp}/calls"
+    service_logs() {
+        echo x >> "${tmp}/calls"
+        if [[ $(wc -l < "${tmp}/calls") -lt 3 ]]; then
+            echo "https://stale.trycloudflare.com"
+        else
+            echo "https://stale.trycloudflare.com"
+            echo "https://fresh.trycloudflare.com"
+        fi
+    }
+    sleep() {
+        :
+    }
+    argo_quick_domain_alive() {
+        [[ "$1" == "fresh.trycloudflare.com" ]]
+    }
+    clear_argo_best_cf_cache() {
+        :
+    }
+
+    ARGO_TOKEN=""
+    ARGO_DOMAIN="stale.trycloudflare.com"
+    fetch_argo_domain >/dev/null 2>&1 || fail "fetch_argo_domain should succeed"
+    assert_eq "fresh.trycloudflare.com" "$ARGO_DOMAIN" "stale log domain rejected, fresh domain accepted"
+
+    unset -f service_logs sleep argo_quick_domain_alive clear_argo_best_cf_cache
+    eval "$service_logs_def"
+    eval "$sleep_def"
+    eval "$quick_alive_def"
+    eval "$clear_cache_def"
+    ARGO_DOMAIN=""
+    rm -rf "$tmp"
+}
+
+test_refresh_argo_domain_keeps_alive_cached_domain() {
+    local service_is_active_def quick_alive_def fetch_def
+    service_is_active_def=$(declare -f service_is_active)
+    quick_alive_def=$(declare -f argo_quick_domain_alive)
+    fetch_def=$(declare -f fetch_argo_domain)
+
+    service_is_active() {
+        return 0
+    }
+    argo_quick_domain_alive() {
+        return 0
+    }
+    fetch_argo_domain() {
+        fail "fetch_argo_domain should not run while cached domain is alive"
+    }
+
+    ARGO_TOKEN=""
+    ARGO_DOMAIN="alive.trycloudflare.com"
+    refresh_argo_domain_if_needed >/dev/null 2>&1 || fail "refresh_argo_domain_if_needed must return 0"
+    assert_eq "alive.trycloudflare.com" "$ARGO_DOMAIN" "alive cached domain kept"
+
+    unset -f service_is_active argo_quick_domain_alive fetch_argo_domain
+    eval "$service_is_active_def"
+    eval "$quick_alive_def"
+    eval "$fetch_def"
+    ARGO_DOMAIN=""
+}
+
+test_refresh_argo_domain_refetches_dead_cached_domain() {
+    local tmp
+    local service_is_active_def quick_alive_def fetch_def save_params_def
+    tmp=$(mktemp -d)
+    service_is_active_def=$(declare -f service_is_active)
+    quick_alive_def=$(declare -f argo_quick_domain_alive)
+    fetch_def=$(declare -f fetch_argo_domain)
+    save_params_def=$(declare -f save_params)
+
+    service_is_active() {
+        return 0
+    }
+    argo_quick_domain_alive() {
+        return 1
+    }
+    fetch_argo_domain() {
+        ARGO_DOMAIN="renewed.trycloudflare.com"
+        return 0
+    }
+    save_params() {
+        echo saved > "${tmp}/saved"
+    }
+
+    ARGO_TOKEN=""
+    ARGO_DOMAIN="dead.trycloudflare.com"
+    refresh_argo_domain_if_needed >/dev/null 2>&1 || fail "refresh_argo_domain_if_needed must return 0"
+    assert_eq "renewed.trycloudflare.com" "$ARGO_DOMAIN" "dead cached domain refetched"
+    [[ -f "${tmp}/saved" ]] || fail "renewed Argo domain should be persisted"
+
+    unset -f service_is_active argo_quick_domain_alive fetch_argo_domain save_params
+    eval "$service_is_active_def"
+    eval "$quick_alive_def"
+    eval "$fetch_def"
+    eval "$save_params_def"
+    ARGO_DOMAIN=""
+    rm -rf "$tmp"
+}
+
 test_service_manager_systemd
 test_service_manager_openrc
+test_singbox_systemd_override_enables_restart
 test_package_manager_priority
 test_package_manager_alpine
 test_legacy_params_migration
@@ -1259,5 +1535,13 @@ test_port_validation_can_skip_firewall_changes
 test_show_relay_troubleshooting_reports_core_hints
 test_show_relay_success_self_check_reports_core_passes
 test_subscription_page_is_final_section
+test_cf_edge_code_dead_classification
+test_argo_cf_domain_verified_uses_connect_to
+test_select_cf_domain_prefers_verified
+test_select_cf_domain_falls_back_to_reachable
+test_resolve_argo_best_cf_domain_never_falls_back_to_argo_domain
+test_fetch_argo_domain_skips_stale_log_domain
+test_refresh_argo_domain_keeps_alive_cached_domain
+test_refresh_argo_domain_refetches_dead_cached_domain
 
 echo "OK: regression tests passed"

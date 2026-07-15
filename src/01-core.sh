@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.6.35"
+SCRIPT_VERSION="2.7.5"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -31,6 +31,8 @@ CFOPT_TIMER="/etc/systemd/system/sbm-cfopt.timer"
 CFOPT_CRON_PERIODIC="/etc/periodic/weekly/sbm-cfopt"
 CFOPT_CRON_D="/etc/cron.d/sbm-cfopt"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
+SINGBOX_SYSTEMD_DROPIN_DIR="/etc/systemd/system/sing-box.service.d"
+SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
 HY2_DEFAULT_MASQUERADE_URL="https://www.bing.com"
@@ -885,4 +887,3 @@ restore_runtime_params() {
     PUBLIC_IPV4_OVERRIDE="${21:-}"
     reset_public_ip_cache
 }
-

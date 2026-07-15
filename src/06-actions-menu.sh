@@ -565,7 +565,7 @@ do_reoptimize_reality_sni() {
     fi
 
     if [[ "$REALITY_SNI" == "$old_sni" ]]; then
-        # 兜底：候选已被排除，理论上不会命中；仅当可用候选过少时才可能
+        # 保护分支：候选已被排除，理论上不会命中；仅当可用候选过少时才可能
         success "未找到与当前不同的可用域名: ${REALITY_SNI}，保持不变，跳过重启"
         return 0
     fi
@@ -941,6 +941,8 @@ do_uninstall() {
     rm -f "$SUBSCRIPTION_SERVICE"
     rm -f "$SUBSCRIPTION_OPENRC_SERVICE"
     rm -f "$SINGBOX_OPENRC_SERVICE"
+    rm -f "$SINGBOX_SYSTEMD_OVERRIDE_FILE"
+    rmdir "$SINGBOX_SYSTEMD_DROPIN_DIR" 2>/dev/null || true
     service_daemon_reload
 
     case "$(package_manager)" in

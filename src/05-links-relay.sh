@@ -75,7 +75,7 @@ select_reality_sni() {
 
     # 探测过程允许个别命令失败：在低内存/无 swap 机器上，后台任务 fork 失败、
     # wait 返回非零或管道 SIGPIPE 都会在 set -euo pipefail 下误终止整个脚本。
-    # 本函数已有「全部失败回退到列表首项」的兜底，这里临时关闭 errexit 即可。
+    # 本函数已有「全部失败时使用列表首项」的保护逻辑，这里临时关闭 errexit 即可。
     local errexit_was_set=0
     [[ $- == *e* ]] && errexit_was_set=1
     set +e
@@ -134,62 +134,145 @@ select_reality_sni() {
 }
 
 # ================== CF 优选：随机选择可用域名 ==================
-select_random_cf_domain() {
-    local available=()
-    local curl_ip_arg=()
-    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && curl_ip_arg=(-6)
-
-    for domain in "${CF_DOMAINS[@]}"; do
-        if curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null; then
-            available+=("$domain")
-        fi
-    done
-    if [[ ${#available[@]} -gt 0 ]]; then
-        echo "${available[$((RANDOM % ${#available[@]}))]}"
-    fi
-    return 0
-}
-
-select_random_cf_domain_by_family() {
-    local family="$1"
-    local available=()
+# 探测分两档:
+#   基础可达 —— curl https://优选域名 能通。这是域名可用性的底线判据;
+#     VPS 出口与国内客户端视角不同，探测失败不代表客户端不通，因此无论
+#     哪档探测失败，都绝不回退到 trycloudflare/Argo 域名(IPv6-only 除外，
+#     与旧版一致)，最终仍使用优选域名列表。
+#   严格验证 —— 以优选域名为接入地址、SNI/Host 为当前 Argo 域名走一次
+#     完整 HTTPS(即分享链接的真实访问形态)。通过的域名优先选用;全部
+#     失败只降级回基础档，绝不因此排除域名(000/超时多半只是 VPS 到国内
+#     优选线路不通，客户端侧通常仍可用)。
+cf_domain_reachable() {
+    local domain="$1"
+    local family="${2:-}"
     local curl_ip_arg=()
 
     case "$family" in
         ipv4) curl_ip_arg=(-4) ;;
         ipv6) curl_ip_arg=(-6) ;;
     esac
+    # ${arr[@]+...} 写法兼容 bash 4.4 之前 set -u 下空数组展开报 unbound 的问题
+    curl ${curl_ip_arg[@]+"${curl_ip_arg[@]}"} -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+}
+
+# CF 边缘应答的"死链"状态码:空/000(连不上)、52x/53x(边缘无法回源或
+# 路由该 Host，如已注销 quick tunnel 的错误 1033 → 530)。
+cf_edge_code_dead() {
+    case "${1:-}" in
+        ''|000|52[0-9]|53[0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 严格验证:连接地址为优选域名，TLS SNI/Host 仍为当前 Argo 域名。
+# 只要拿到边缘/源站的正常应答(非 000/52x/53x)即视为已验证。
+argo_cf_domain_verified() {
+    local domain="$1"
+    local family="${2:-}"
+    local argo_host="${ARGO_DOMAIN:-}"
+    local curl_ip_arg=()
+    local code
+
+    [[ -n "$domain" && -n "$argo_host" ]] || return 1
+
+    case "$family" in
+        ipv4) curl_ip_arg=(-4) ;;
+        ipv6) curl_ip_arg=(-6) ;;
+    esac
+
+    code=$(curl ${curl_ip_arg[@]+"${curl_ip_arg[@]}"} -s --connect-timeout 2 --max-time 4 \
+        --connect-to "${argo_host}:443:${domain}:443" \
+        -o /dev/null -w '%{http_code}' "https://${argo_host}/" 2>/dev/null) || true
+
+    ! cf_edge_code_dead "$code"
+}
+
+# 并行探测所有优选域名，stdout 每行输出「档位 域名」:
+#   verified  严格验证通过(接入该域名可代理当前 Argo Host)
+#   reachable 仅基础可达
+# 临时目录创建失败(极端受限环境)时回退为串行探测。
+probe_cf_domains_tiered() {
+    local family="${1:-}"
+    local tmp_dir idx domain
+
+    if tmp_dir=$(mktemp -d 2>/dev/null); then
+        for idx in "${!CF_DOMAINS[@]}"; do
+            domain="${CF_DOMAINS[$idx]}"
+            {
+                if argo_cf_domain_verified "$domain" "$family"; then
+                    printf 'verified' > "${tmp_dir}/${idx}"
+                elif cf_domain_reachable "$domain" "$family"; then
+                    printf 'reachable' > "${tmp_dir}/${idx}"
+                fi
+            } &
+        done
+        wait 2>/dev/null || true
+
+        for idx in "${!CF_DOMAINS[@]}"; do
+            if [[ -s "${tmp_dir}/${idx}" ]]; then
+                printf '%s %s\n' "$(<"${tmp_dir}/${idx}")" "${CF_DOMAINS[$idx]}"
+            fi
+        done
+        rm -rf "$tmp_dir"
+        return 0
+    fi
 
     for domain in "${CF_DOMAINS[@]}"; do
-        if curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null; then
-            available+=("$domain")
+        if argo_cf_domain_verified "$domain" "$family"; then
+            printf 'verified %s\n' "$domain"
+        elif cf_domain_reachable "$domain" "$family"; then
+            printf 'reachable %s\n' "$domain"
         fi
     done
-    if [[ ${#available[@]} -gt 0 ]]; then
-        echo "${available[$((RANDOM % ${#available[@]}))]}"
+    return 0
+}
+
+select_random_cf_domain_by_family() {
+    local family="${1:-}"
+    local verified=() reachable=() tier domain
+
+    while read -r tier domain; do
+        [[ -n "$domain" ]] || continue
+        case "$tier" in
+            verified)  verified+=("$domain") ;;
+            reachable) reachable+=("$domain") ;;
+        esac
+    done < <(probe_cf_domains_tiered "$family")
+
+    if [[ ${#verified[@]} -gt 0 ]]; then
+        echo "${verified[$((RANDOM % ${#verified[@]}))]}"
+        return 0
+    fi
+    if [[ ${#reachable[@]} -gt 0 ]]; then
+        # 本函数 stdout 会被 $(...) 捕获为域名，提示必须显式写到 stderr
+        [[ -n "${ARGO_DOMAIN:-}" ]] && \
+            warn "优选域名均未通过服务器侧的 Argo Host 验证，已按基础可达性选择(客户端侧通常仍可用)" >&2
+        echo "${reachable[$((RANDOM % ${#reachable[@]}))]}"
     fi
     return 0
+}
+
+select_random_cf_domain() {
+    local family=""
+    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && family="ipv6"
+    select_random_cf_domain_by_family "$family"
 }
 
 check_cf_domain_available_by_family() {
     local domain="$1"
     local family="$2"
-    local curl_ip_arg=()
 
     [[ -n "$domain" ]] || return 1
-    case "$family" in
-        ipv4) curl_ip_arg=(-4) ;;
-        ipv6) curl_ip_arg=(-6) ;;
-    esac
-    curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+    cf_domain_reachable "$domain" "$family"
 }
 
 check_cf_domain_available() {
     local domain="$1"
-    local curl_ip_arg=()
+    local family=""
     [[ -n "$domain" ]] || return 1
-    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && curl_ip_arg=(-6)
-    curl "${curl_ip_arg[@]}" -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
+    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && family="ipv6"
+    cf_domain_reachable "$domain" "$family"
 }
 
 resolve_argo_best_cf_domain() {
