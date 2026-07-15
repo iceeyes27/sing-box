@@ -147,7 +147,45 @@ cf_domain_reachable() {
     curl ${curl_ip_arg[@]+"${curl_ip_arg[@]}"} -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
 }
 
-# 并行探测 CF_DOMAINS 可用性，输出可用域名(每行一个，保持列表原顺序)。
+argo_cf_domain_reachable() {
+    local domain="$1"
+    local family="${2:-}"
+    local argo_host="${ARGO_DOMAIN:-}"
+    local curl_ip_arg=()
+    local code
+
+    [[ -n "$domain" && -n "$argo_host" ]] || return 1
+
+    case "$family" in
+        ipv4) curl_ip_arg=(-4) ;;
+        ipv6) curl_ip_arg=(-6) ;;
+    esac
+
+    # 这里验证的是分享链接的真实访问形态:
+    # 连接地址为优选域名，TLS SNI/Host 仍为当前 Argo 域名。
+    # 只测优选域名自身 HTTPS 可访问，会把无法代理当前 Host 的域名误判为可用。
+    code=$(curl ${curl_ip_arg[@]+"${curl_ip_arg[@]}"} -s --max-time 5 --connect-timeout 3 \
+        --connect-to "${argo_host}:443:${domain}:443" \
+        -o /dev/null -w '%{http_code}' "https://${argo_host}/" 2>/dev/null) || true
+
+    case "$code" in
+        ''|000|52[0-9]|53[0-9]) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+cf_domain_usable_for_argo() {
+    local domain="$1"
+    local family="${2:-}"
+
+    if [[ -n "${ARGO_DOMAIN:-}" ]]; then
+        argo_cf_domain_reachable "$domain" "$family"
+    else
+        cf_domain_reachable "$domain" "$family"
+    fi
+}
+
+# 并行探测 CF_DOMAINS 对当前 Argo Host 的可用性，输出可用域名(每行一个，保持列表原顺序)。
 # 并发度沿用 Reality 探测的资源自适应策略:低配(单核 / 低内存无 swap)
 # 自动退回串行；临时目录创建失败时同样退回串行。
 probe_available_cf_domains() {
@@ -164,7 +202,7 @@ probe_available_cf_domains() {
         for idx in "${!CF_DOMAINS[@]}"; do
             domain="${CF_DOMAINS[$idx]}"
             {
-                if cf_domain_reachable "$domain" "$family"; then
+                if cf_domain_usable_for_argo "$domain" "$family"; then
                     : > "${tmp_dir}/${idx}"
                 fi
             } &
@@ -187,7 +225,7 @@ probe_available_cf_domains() {
     fi
 
     for domain in "${CF_DOMAINS[@]}"; do
-        if cf_domain_reachable "$domain" "$family"; then
+        if cf_domain_usable_for_argo "$domain" "$family"; then
             printf '%s\n' "$domain"
         fi
     done
@@ -228,7 +266,7 @@ check_cf_domain_available_by_family() {
     local family="$2"
 
     [[ -n "$domain" ]] || return 1
-    cf_domain_reachable "$domain" "$family"
+    cf_domain_usable_for_argo "$domain" "$family"
 }
 
 check_cf_domain_available() {
@@ -236,7 +274,7 @@ check_cf_domain_available() {
     local family=""
     [[ -n "$domain" ]] || return 1
     [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && family="ipv6"
-    cf_domain_reachable "$domain" "$family"
+    cf_domain_usable_for_argo "$domain" "$family"
 }
 
 resolve_argo_best_cf_domain() {
@@ -264,8 +302,8 @@ resolve_argo_best_cf_domain() {
             return 0
         fi
 
-        ARGO_BEST_CF_DOMAIN="${CF_DOMAINS[0]}"
-        warn "未探测到可用的 CF 优选域名，首次生成链接时使用默认地址: ${ARGO_BEST_CF_DOMAIN}"
+        ARGO_BEST_CF_DOMAIN="${ARGO_DOMAIN}"
+        warn "未探测到可用于当前 Argo Host 的 CF 优选域名，使用 Argo 域名作为接入地址"
         save_params
         return 0
     fi
@@ -483,19 +521,25 @@ build_share_links() {
                 ARGO_BEST_CF_DOMAIN_IPV6=$(select_random_cf_domain_by_family ipv6)
             fi
             if [[ -z "$ARGO_BEST_CF_DOMAIN_IPV4" ]]; then
-                ARGO_BEST_CF_DOMAIN_IPV4="${ARGO_BEST_CF_DOMAIN:-${CF_DOMAINS[0]}}"
-                warn "未探测到可用的 IPv4 CF 优选域名，使用默认/缓存地址: ${ARGO_BEST_CF_DOMAIN_IPV4}"
+                ARGO_BEST_CF_DOMAIN_IPV4="${ARGO_DOMAIN}"
+                warn "未探测到可用于当前 Argo Host 的 IPv4 CF 优选域名，使用 Argo 域名作为 IPv4 接入地址"
             fi
             if [[ -z "$ARGO_BEST_CF_DOMAIN_IPV6" ]]; then
                 ARGO_BEST_CF_DOMAIN_IPV6="${ARGO_DOMAIN}"
-                warn "未探测到可用的 IPv6 CF 优选域名，使用 Argo 域名作为 IPv6 接入地址"
+                warn "未探测到可用于当前 Argo Host 的 IPv6 CF 优选域名，使用 Argo 域名作为 IPv6 接入地址"
             fi
             ARGO_BEST_CF_DOMAIN="$ARGO_BEST_CF_DOMAIN_IPV4"
             if [[ "$ARGO_BEST_CF_DOMAIN_IPV4" != "$old_cf_v4" || "$ARGO_BEST_CF_DOMAIN_IPV6" != "$old_cf_v6" ]]; then
                 save_params
             fi
-            build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV4" "IPv4"
-            build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV6" "IPv6"
+            if [[ "$ARGO_BEST_CF_DOMAIN_IPV4" == "$ARGO_DOMAIN" && "$ARGO_BEST_CF_DOMAIN_IPV6" == "$ARGO_DOMAIN" ]]; then
+                build_argo_link_for_domain "$ARGO_DOMAIN" ""
+            else
+                build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV4" "IPv4"
+                if [[ "$ARGO_BEST_CF_DOMAIN_IPV6" != "$ARGO_BEST_CF_DOMAIN_IPV4" ]]; then
+                    build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV6" "IPv6"
+                fi
+            fi
         else
             resolve_argo_best_cf_domain
             local best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
@@ -1785,4 +1829,3 @@ do_generate_relay_script() {
     echo "--------------------"
     press_enter
 }
-

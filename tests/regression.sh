@@ -238,6 +238,7 @@ test_probe_available_cf_domains_keeps_order() {
     local -a cf_domains_backup=("${CF_DOMAINS[@]}")
 
     CF_DOMAINS=("cf1.example.com" "cf2.example.com" "cf3.example.com")
+    ARGO_DOMAIN=""
     curl() {
         local url
         for url in "$@"; do :; done
@@ -257,6 +258,59 @@ test_probe_available_cf_domains_keeps_order() {
     assert_eq $'cf1.example.com\ncf3.example.com' "$result" "serial CF probe filters and keeps order"
 
     unset -f curl get_reality_probe_parallelism
+    eval "$parallelism_def"
+    CF_DOMAINS=("${cf_domains_backup[@]}")
+}
+
+test_probe_available_cf_domains_validates_current_argo_host() {
+    local result parallelism_def
+    local -a cf_domains_backup=("${CF_DOMAINS[@]}")
+
+    parallelism_def=$(declare -f get_reality_probe_parallelism)
+    get_reality_probe_parallelism() { echo 1; }
+    ARGO_DOMAIN="argo.example.com"
+    CF_DOMAINS=("bad.example.com" "good.example.com")
+    curl() {
+        local args=" $* "
+        case "$args" in
+            *" --connect-to argo.example.com:443:bad.example.com:443 "*) printf '530'; return 0 ;;
+            *" --connect-to argo.example.com:443:good.example.com:443 "*) printf '400'; return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    result=$(probe_available_cf_domains "")
+    assert_eq "good.example.com" "$result" "Argo CF probe validates current host"
+
+    unset -f curl get_reality_probe_parallelism
+    eval "$parallelism_def"
+    CF_DOMAINS=("${cf_domains_backup[@]}")
+}
+
+test_resolve_argo_best_cf_domain_falls_back_to_argo_domain() {
+    local save_params_def parallelism_def
+    local -a cf_domains_backup=("${CF_DOMAINS[@]}")
+
+    save_params_def=$(declare -f save_params)
+    parallelism_def=$(declare -f get_reality_probe_parallelism)
+    get_reality_probe_parallelism() { echo 1; }
+    ARGO_DOMAIN="argo.example.com"
+    ARGO_BEST_CF_DOMAIN=""
+    IP_STACK_MODE="ipv4-only"
+    CF_DOMAINS=("bad.example.com")
+    curl() {
+        printf '530'
+        return 0
+    }
+    save_params() {
+        :
+    }
+
+    resolve_argo_best_cf_domain >/dev/null
+    assert_eq "argo.example.com" "$ARGO_BEST_CF_DOMAIN" "Argo fallback uses real domain"
+
+    unset -f curl save_params get_reality_probe_parallelism
+    eval "$save_params_def"
     eval "$parallelism_def"
     CF_DOMAINS=("${cf_domains_backup[@]}")
 }
@@ -1728,6 +1782,8 @@ test_apply_install_env_overrides_sets_values
 test_apply_install_env_overrides_rejects_invalid_values
 test_fetch_public_ip_parallel_prefers_endpoint_order
 test_probe_available_cf_domains_keeps_order
+test_probe_available_cf_domains_validates_current_argo_host
+test_resolve_argo_best_cf_domain_falls_back_to_argo_domain
 test_wait_for_service_active_polls_until_ready
 test_hysteria2_bandwidth_is_optional
 test_hop_range_validation
