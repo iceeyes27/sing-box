@@ -1,24 +1,17 @@
 # ─── Argo 服务 ───────────────────────────────────────────────
 write_argo_service() {
-    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening argo_protocol
+    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
 
-    # http2(默认): 纯 TCP 443，NAT 小鸡/UDP 受限环境下最稳(sing-box-yg 同款实践)；
-    # auto: 优先 QUIC(抗丢包/抖动更强)，出站 UDP 7844 被封时自动回退 http2；
-    # quic: 强制 QUIC，UDP 通畅且追求弱网性能时手动选择。
-    argo_protocol="${ARGO_PROTOCOL:-http2}"
-    is_valid_argo_protocol "$argo_protocol" || argo_protocol="http2"
-
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        info "使用 Token 模式启动 Argo 隧道 (固定域名, 协议: ${argo_protocol})"
+        info "使用 Token 模式启动 Argo 隧道 (固定域名)"
         info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
         write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
-        # --retries 8: 边缘连接出错时多重试几次，尽量让进程存活而不是退出。
-        exec_cmd="tunnel --protocol ${argo_protocol} --edge-ip-version auto --retries 8 --no-autoupdate run"
+        exec_cmd="tunnel --protocol http2 --no-autoupdate run"
     else
-        info "使用临时隧道模式 (trycloudflare.com, 协议: ${argo_protocol})"
-        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol ${argo_protocol} --edge-ip-version auto --retries 8"
+        info "使用临时隧道模式 (trycloudflare.com)"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
@@ -28,10 +21,7 @@ name="argo-tunnel"
 description="Cloudflare Argo Tunnel"
 command="${cloudflared_bin}"
 command_args="${exec_cmd}"
-# supervise-daemon 会在 cloudflared 崩溃退出后自动重启，等价于 systemd 的 Restart=always。
-supervisor=supervise-daemon
-respawn_delay=5
-respawn_max=0
+command_background=true
 pidfile="/run/argo-tunnel.pid"
 output_log="/var/log/argo-tunnel.log"
 error_log="/var/log/argo-tunnel.log"
@@ -65,17 +55,17 @@ EOF
 Description=Cloudflare Argo Tunnel
 After=network.target sing-box.service
 Wants=sing-box.service
-StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=nobody
+Group=nogroup
 EOF
     [[ -n "${ARGO_TOKEN:-}" ]] && printf 'EnvironmentFile=%s\n' "$ARGO_ENV_FILE" >> "$ARGO_SERVICE"
     cat >> "$ARGO_SERVICE" << EOF
 ExecStart=${cloudflared_bin} ${exec_cmd}
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
 StandardOutput=journal
 StandardError=journal
 ${systemd_hardening}
@@ -235,7 +225,6 @@ description="SBM Subscription Server"
 command="/usr/bin/python3"
 command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}"
 command_background=true
-command_user="nobody"
 pidfile="/run/sbm-subscription.pid"
 output_log="/var/log/sbm-subscription.log"
 error_log="/var/log/sbm-subscription.log"
@@ -265,7 +254,6 @@ After=network.target
 
 [Service]
 Type=simple
-User=nobody
 EnvironmentFile=${SUBSCRIPTION_ENV_FILE}
 ExecStart=/usr/bin/env python3 ${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}
 Restart=on-failure
@@ -294,17 +282,6 @@ ensure_subscription_service() {
 }
 
 # ─── 获取 Argo 域名 ──────────────────────────────────────────
-# trycloudflare 域名对已注销的隧道仍会 DNS 解析，并由 CF 边缘应答 53x/52x(如错误 1033)，
-# 因此判断存活不能只看能否连通，要看状态码是否由源站应答(404/400/503 等，参考 sing-box-yg)。
-argo_quick_domain_alive() {
-    local domain="$1" code
-    code=$(curl -so /dev/null -m 5 -w '%{http_code}' "https://${domain}/" 2>/dev/null) || true
-    case "$code" in
-        ''|000|52[0-9]|53[0-9]) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
 fetch_argo_domain() {
     if [[ -n "${ARGO_TOKEN:-}" ]]; then
         # Token 模式下，如果用户没填域名，提醒一下
@@ -315,18 +292,15 @@ fetch_argo_domain() {
         return 0
     fi
 
-    # 临时域名模式获取逻辑:立即查一次日志，未出现则 2s 间隔轮询。
-    # 抓到域名后还需通过边缘连通性验证，避免把进程重启前遗留在日志里的
-    # 旧域名(已作废，边缘返回 530)当成现役域名输出成死链。
-    local max=15 i=0 candidate=""
+    # 临时域名模式获取逻辑
+    local max=10 i=0
     local previous_domain="${ARGO_DOMAIN:-}"
     ARGO_DOMAIN=""
     while [[ $i -lt $max ]]; do
-        candidate=$(service_logs argo-tunnel 1000 2>/dev/null | \
+        ARGO_DOMAIN=$(service_logs argo-tunnel 300 2>/dev/null | \
                       grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' | \
                       tail -1 | sed 's|https://||')
-        if [[ -n "$candidate" ]] && argo_quick_domain_alive "$candidate"; then
-            ARGO_DOMAIN="$candidate"
+        if [[ -n "$ARGO_DOMAIN" ]]; then
             if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
                 clear_argo_best_cf_cache
                 info "检测到新的 Argo 临时域名，已清空缓存的优选接入域名"
@@ -334,46 +308,16 @@ fetch_argo_domain() {
             return 0
         fi
         i=$((i + 1))
-        sleep 2
+        sleep 3
     done
-    if [[ -n "$candidate" ]]; then
-        # 预算内始终未通过验证:多半是新域名 DNS 尚未全网生效，仍按日志里的最新域名
-        # 输出以免链接凭空消失，但提醒用户稍后复核。
-        ARGO_DOMAIN="$candidate"
-        warn "Argo 临时域名 ${candidate} 暂未通过连通性验证(可能尚未生效)，若稍后仍不可用请重新执行 sbm links"
-        if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
-            clear_argo_best_cf_cache
-        fi
-        return 0
-    fi
     return 1
 }
 
 refresh_argo_domain_if_needed() {
-    # 本函数在 set -e 下常被裸调用，任何路径都必须返回 0：
-    # 「argo-tunnel 未运行」「域名未变化」都是正常情况，
-    # 若透传非零返回码会直接终止整个脚本。
-    service_is_active argo-tunnel || return 0
-
-    if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        # 固定域名模式域名由用户配置，进程重启也不变，无需从日志重新抓取。
-        return 0
+    if [[ -z "${ARGO_DOMAIN:-}" ]] && service_is_active argo-tunnel; then
+        fetch_argo_domain 2>/dev/null || true
+        [[ -n "${ARGO_DOMAIN:-}" ]] && save_params
     fi
-
-    # 临时隧道每次重启都会分配新的随机域名，缓存里的旧域名会变成死链。
-    # 因此这里总是以 cloudflared 当前进程日志中的域名为准，抓到新域名就刷新缓存，
-    # 保证 `sbm links` 输出的永远是当前实际可用的临时域名。
-    local cached_domain="${ARGO_DOMAIN:-}"
-    if fetch_argo_domain 2>/dev/null; then
-        if [[ "${ARGO_DOMAIN:-}" != "$cached_domain" ]]; then
-            save_params
-        fi
-    else
-        # 抓取失败(如日志已滚动或进程刚起还没打印域名)时回退到缓存域名，
-        # 避免 Argo 链接直接消失。
-        ARGO_DOMAIN="$cached_domain"
-    fi
-    return 0
 }
 
 refresh_argo_runtime() {
@@ -394,7 +338,7 @@ refresh_argo_runtime() {
     fi
 
     if [[ -z "${ARGO_TOKEN:-}" ]]; then
-        # fetch_argo_domain 自带轮询，无需前置固定等待
+        sleep 5
         if ! fetch_argo_domain; then
             warn "未获取到新的 Argo 临时域名，订阅链接未更新"
             return 1
