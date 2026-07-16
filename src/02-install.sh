@@ -222,14 +222,25 @@ install_packages_low_resource() {
 }
 
 install_missing_required_deps() {
-    local missing=()
+    local missing_required=()
+    local missing_optional=()
 
-    command -v curl &>/dev/null || missing+=(curl)
-    command -v openssl &>/dev/null || missing+=(openssl)
-    [[ ${#missing[@]} -eq 0 ]] && return 0
+    command -v curl &>/dev/null || missing_required+=(curl)
+    command -v openssl &>/dev/null || missing_optional+=(openssl)
 
-    warn "缺少关键依赖: ${missing[*]}"
-    install_packages_low_resource "${missing[@]}"
+    if [[ ${#missing_required[@]} -gt 0 ]]; then
+        warn "缺少关键依赖: ${missing_required[*]}"
+        install_packages_low_resource "${missing_required[@]}" || return 1
+    fi
+
+    if [[ ${#missing_optional[@]} -gt 0 ]]; then
+        warn "缺少可选依赖: ${missing_optional[*]}"
+        if ! install_packages_low_resource "${missing_optional[@]}"; then
+            warn "可选依赖安装失败: ${missing_optional[*]}。将继续部署 Reality / Argo，Hysteria2 会自动关闭"
+        fi
+    fi
+
+    command -v curl &>/dev/null
 }
 
 install_optional_deps() {
@@ -364,7 +375,7 @@ install_deps() {
     info "安装基础依赖..."
     info "资源检测: $(resource_profile_label), $(cpu_profile_label)"
     prepare_low_memory_swap
-    install_missing_required_deps || error "关键依赖安装失败: curl openssl。请检查系统内存、磁盘空间或软件源"
+    install_missing_required_deps || error "关键依赖安装失败: curl。请检查系统内存、磁盘空间或软件源"
     install_optional_deps
     success "关键依赖就绪"
 }

@@ -1209,13 +1209,13 @@ install_deps() {
         apt)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y
-            apt-get install -y curl ca-certificates openssl
+            apt-get install -y curl ca-certificates
             ;;
-        dnf) dnf install -y curl ca-certificates openssl ;;
-        yum) yum install -y curl ca-certificates openssl ;;
+        dnf) dnf install -y curl ca-certificates ;;
+        yum) yum install -y curl ca-certificates ;;
         apk)
             apk update
-            apk add --no-cache curl ca-certificates openssl openrc tar
+            apk add --no-cache curl ca-certificates openrc tar
             ;;
         *) err "未识别系统包管理器" ;;
     esac
@@ -1366,9 +1366,9 @@ RELAY_UUID=$(sing-box generate uuid)
 REALITY_KEYS=$(sing-box generate reality-keypair)
 REALITY_PRIVATE_KEY=$(printf '%s\n' "$REALITY_KEYS" | awk '/PrivateKey/ {print $NF; exit}')
 REALITY_PUBLIC_KEY=$(printf '%s\n' "$REALITY_KEYS" | awk '/PublicKey/ {print $NF; exit}')
-REALITY_SHORT_ID=$(sing-box generate rand 8 --hex 2>/dev/null || openssl rand -hex 4)
+REALITY_SHORT_ID=$(sing-box generate rand 8 --hex 2>/dev/null || od -An -N 4 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')
 
-[[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" ]] || err "Reality 密钥生成失败"
+[[ -n "$REALITY_PRIVATE_KEY" && -n "$REALITY_PUBLIC_KEY" && -n "$REALITY_SHORT_ID" ]] || err "Reality 密钥生成失败"
 
 mkdir -p /etc/sing-box
 json_relay_uuid=$(json_string "$RELAY_UUID")

@@ -254,7 +254,7 @@ do_modify_config() {
                 keypair=$(sing-box generate reality-keypair)
                 PRIVATE_KEY=$(echo "$keypair" | grep -i "PrivateKey" | awk '{print $NF}')
                 PUBLIC_KEY=$(echo "$keypair" | grep -i "PublicKey"  | awk '{print $NF}')
-                SHORT_ID=$(openssl rand -hex 4)
+                SHORT_ID=$(random_hex 4)
                 WS_PATH="/${SHORT_ID}"
                 info "新密钥对已生成"
                 changed=true
@@ -285,7 +285,7 @@ do_modify_config() {
                 fi
                 ;;
             8)
-                HY2_PASSWORD=$(openssl rand -base64 16)
+                HY2_PASSWORD=$(random_base64 16)
                 info "新 Hysteria2 密码: $HY2_PASSWORD"
                 changed=true
                 restart_singbox=true

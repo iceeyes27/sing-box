@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.5"
+SCRIPT_VERSION="2.7.6"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -562,7 +562,7 @@ PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV WS_PORT WS_PATH NODE_NAME
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
-    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL
+    HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
 )
 
 is_param_key() {
@@ -597,6 +597,35 @@ write_param() {
     local key="$1"
     local value="${!key-}"
     printf '%s=%s\n' "$key" "$(shell_quote "$value")"
+}
+
+random_hex() {
+    local bytes="$1" value
+    if command -v openssl &>/dev/null; then
+        openssl rand -hex "$bytes"
+        return $?
+    fi
+    if command -v sing-box &>/dev/null; then
+        sing-box generate rand "$bytes" --hex 2>/dev/null && return 0
+    fi
+    if [[ -r /dev/urandom ]] && command -v od &>/dev/null; then
+        value=$(od -An -N "$bytes" -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')
+        [[ -n "$value" ]] && { printf '%s\n' "$value"; return 0; }
+    fi
+    return 1
+}
+
+random_base64() {
+    local bytes="$1" value
+    if command -v openssl &>/dev/null; then
+        openssl rand -base64 "$bytes"
+        return $?
+    fi
+    if [[ -r /dev/urandom ]] && command -v dd &>/dev/null && command -v base64 &>/dev/null; then
+        value=$(dd if=/dev/urandom bs="$bytes" count=1 2>/dev/null | base64 | tr -d '\n')
+        [[ -n "$value" ]] && { printf '%s\n' "$value"; return 0; }
+    fi
+    random_hex "$bytes"
 }
 
 parse_param_value() {
@@ -648,7 +677,7 @@ load_params() {
             need_save=true
         fi
         if [[ -z "${HY2_PASSWORD:-}" ]]; then
-            HY2_PASSWORD=$(openssl rand -base64 16)
+            HY2_PASSWORD=$(random_base64 16)
             need_save=true
         fi
         if [[ -z "${HY2_SNI:-}" ]]; then
@@ -657,6 +686,10 @@ load_params() {
         fi
         if [[ -z "${HY2_MASQUERADE_URL:-}" ]]; then
             HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
+            need_save=true
+        fi
+        if [[ -z "${HY2_ENABLED:-}" ]]; then
+            HY2_ENABLED="true"
             need_save=true
         fi
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
@@ -695,7 +728,7 @@ load_params() {
             fi
         fi
         if [[ -z "${SUB_TOKEN:-}" ]]; then
-            SUB_TOKEN=$(openssl rand -hex 16)
+            SUB_TOKEN=$(random_hex 16)
             need_save=true
         fi
         if [[ -z "${SUBSCRIPTION_PORT:-}" ]]; then

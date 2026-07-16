@@ -132,6 +132,45 @@ exit 0'
     assert_eq "apk" "$result" "package_manager Alpine detection"
 }
 
+test_missing_openssl_does_not_block_core_install() {
+    local tmp old_path install_packages_def
+
+    tmp=$(mktemp -d)
+    old_path="$PATH"
+    install_packages_def=$(declare -f install_packages_low_resource)
+    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
+exit 0'
+
+    install_packages_low_resource() {
+        [[ "$*" == "openssl" ]] && return 1
+        return 0
+    }
+
+    PATH="$tmp" install_missing_required_deps >/dev/null
+
+    PATH="$old_path"
+    unset -f install_packages_low_resource
+    eval "$install_packages_def"
+    rm -rf "$tmp"
+}
+
+test_generate_tls_cert_without_openssl_disables_hy2() {
+    local tmp old_path
+
+    tmp=$(mktemp -d)
+    old_path="$PATH"
+    CONFIG_DIR="$tmp"
+    HY2_SNI="bing.com"
+    HY2_ENABLED="true"
+
+    PATH="$tmp" generate_tls_cert >/dev/null
+    assert_eq "false" "$HY2_ENABLED" "HY2 disabled when openssl is unavailable"
+    [[ ! -f "${tmp}/server.crt" ]] || fail "certificate should not be created without openssl"
+
+    PATH="$old_path"
+    rm -rf "$tmp"
+}
+
 test_legacy_params_migration() {
     local tmp
     tmp=$(mktemp -d)
@@ -544,6 +583,7 @@ test_hysteria2_config_uses_masquerade_proxy() {
     HY2_PASSWORD="hy2-password"
     HY2_SNI="bing.com"
     HY2_MASQUERADE_URL="https://www.bing.com"
+    HY2_ENABLED="true"
 
     write_singbox_config >/dev/null
     unset -f chown sing-box
@@ -555,6 +595,38 @@ test_hysteria2_config_uses_masquerade_proxy() {
     assert_contains "$config" '"type": "proxy"' "HY2 masquerade proxy type"
     assert_contains "$config" '"url": "https://www.bing.com"' "HY2 masquerade proxy URL"
     assert_contains "$config" '"rewrite_host": true' "HY2 masquerade rewrite host"
+}
+
+test_hysteria2_disabled_omits_inbound() {
+    local tmp config chown_def
+    tmp=$(mktemp -d)
+
+    chown_def=$(declare -f chown 2>/dev/null || true)
+    chown() { return 0; }
+    sing-box() {
+        [[ "${1:-}" == "check" ]] && return 0
+        return 1
+    }
+    CONFIG_DIR="$tmp"
+    CONFIG_FILE="${tmp}/config.json"
+    UUID="uuid-1"
+    REALITY_PORT="443"
+    REALITY_SNI="www.microsoft.com"
+    PRIVATE_KEY="private"
+    SHORT_ID="abcd1234"
+    WS_PORT="18080"
+    WS_PATH="/abcd1234"
+    HY2_ENABLED="false"
+
+    write_singbox_config >/dev/null
+    unset -f chown sing-box
+    [[ -n "$chown_def" ]] && eval "$chown_def"
+    config=$(<"$CONFIG_FILE")
+    rm -rf "$tmp"
+
+    assert_not_contains "$config" '"type": "hysteria2"' "HY2 disabled omits inbound"
+    assert_contains "$config" '"tag": "vless-reality"' "Reality remains enabled"
+    assert_contains "$config" '"tag": "vless-ws-argo"' "Argo WS remains enabled"
 }
 
 test_relay_script_generation_uses_argo_upstream() {
@@ -1499,6 +1571,8 @@ test_service_manager_openrc
 test_singbox_systemd_override_enables_restart
 test_package_manager_priority
 test_package_manager_alpine
+test_missing_openssl_does_not_block_core_install
+test_generate_tls_cert_without_openssl_disables_hy2
 test_legacy_params_migration
 test_ipv6_only_links_are_argo_only
 test_multiple_ipv4_direct_links_follow_selection
@@ -1507,6 +1581,7 @@ test_rtc_epoch_uses_timedatectl_without_hwclock
 test_busybox_ntpd_can_step_system_time
 test_runtime_param_restore_is_complete
 test_hysteria2_config_uses_masquerade_proxy
+test_hysteria2_disabled_omits_inbound
 test_relay_script_generation_uses_argo_upstream
 test_relay_script_requires_argo_upstream
 test_parse_vless_ws_argo_link_extracts_required_fields

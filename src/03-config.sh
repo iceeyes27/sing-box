@@ -2,7 +2,7 @@
 generate_params() {
     info "生成安全参数..."
     UUID=$(sing-box generate uuid)
-    SHORT_ID=$(openssl rand -hex 4)
+    SHORT_ID=$(random_hex 4)
 
     local keypair
     keypair=$(sing-box generate reality-keypair)
@@ -14,7 +14,7 @@ generate_params() {
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
-    SUB_TOKEN=$(openssl rand -hex 16)
+    SUB_TOKEN=$(random_hex 16)
     SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT:-24630}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
@@ -26,9 +26,10 @@ generate_params() {
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
-    HY2_PASSWORD=$(openssl rand -base64 16)
+    HY2_PASSWORD=$(random_base64 16)
     HY2_SNI="${HY2_DEFAULT_SNI}"
     HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
+    HY2_ENABLED="true"
 
     success "参数生成完成"
 }
@@ -43,12 +44,27 @@ generate_tls_cert() {
         return
     fi
 
+    if ! command -v openssl &>/dev/null; then
+        HY2_ENABLED="false"
+        warn "未检测到 openssl，跳过 Hysteria2 证书生成；本次部署将仅启用 Reality / Argo"
+        return 0
+    fi
+
     info "生成自签 TLS 证书 (Hysteria2)..."
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+    if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
         -keyout "$key_file" -out "$cert_file" \
-        -days 3650 -nodes -subj "/CN=${HY2_SNI}" 2>/dev/null
+        -days 3650 -nodes -subj "/CN=${HY2_SNI}" 2>/dev/null; then
+        HY2_ENABLED="false"
+        warn "Hysteria2 证书生成失败；本次部署将仅启用 Reality / Argo"
+        return 0
+    fi
     chmod 600 "$key_file" "$cert_file"
+    HY2_ENABLED="true"
     success "TLS 自签证书已生成 (有效期 10 年)"
+}
+
+is_hy2_enabled() {
+    [[ "${HY2_ENABLED:-true}" == "true" ]]
 }
 
 # ─── 端口 / 防火墙检查 ───────────────────────────────────────
@@ -242,7 +258,7 @@ open_service_ports() {
     backend=$(detect_firewall_backend)
 
     [[ -n "${REALITY_PORT:-}" ]] && open_firewall "$REALITY_PORT" "$backend" || return 1
-    if [[ -n "${HY2_PORT:-}" && "${HY2_PORT}" != "${REALITY_PORT:-}" ]]; then
+    if is_hy2_enabled && [[ -n "${HY2_PORT:-}" && "${HY2_PORT}" != "${REALITY_PORT:-}" ]]; then
         open_firewall "$HY2_PORT" "$backend" || return 1
     fi
     return 0
@@ -256,7 +272,9 @@ validate_service_ports() {
 
     validate_port "${REALITY_PORT:-}" "Reality" || return 1
     validate_port "${WS_PORT:-}" "VLESS-WS" || return 1
-    validate_port "${HY2_PORT:-}" "Hysteria2" || return 1
+    if is_hy2_enabled; then
+        validate_port "${HY2_PORT:-}" "Hysteria2" || return 1
+    fi
     validate_port "${SUBSCRIPTION_PORT:-}" "订阅服务" || return 1
 
     if [[ "${REALITY_PORT}" == "${WS_PORT}" ]]; then
@@ -274,9 +292,9 @@ validate_service_ports() {
         info "Reality 端口未变化，跳过占用检查"
     fi
 
-    if [[ -z "$old_hy2_port" || "$HY2_PORT" != "$old_hy2_port" ]]; then
+    if is_hy2_enabled && [[ -z "$old_hy2_port" || "$HY2_PORT" != "$old_hy2_port" ]]; then
         assert_port_available "$HY2_PORT" "udp" "Hysteria2" || return 1
-    else
+    elif is_hy2_enabled; then
         info "Hysteria2 端口未变化，跳过占用检查"
     fi
 
@@ -318,13 +336,19 @@ show_port_confirmation() {
     echo ""
     echo -e "${CYAN}${BOLD}── 端口确认 ──${NC}"
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
-    if [[ "${HY2_PORT}" == "${REALITY_PORT}" ]]; then
+    if ! is_hy2_enabled; then
+        echo -e "  Hysteria2:    ${DIM}未启用${NC}"
+    elif [[ "${HY2_PORT}" == "${REALITY_PORT}" ]]; then
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC} ${DIM}(与 Reality 共用端口号，协议不同)${NC}"
     else
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
     fi
     echo -e "  订阅服务:     ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(仅本机/Argo 使用)${NC}"
-    echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}, ${BOLD}${HY2_PORT}/UDP${NC}"
+    if is_hy2_enabled; then
+        echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}, ${BOLD}${HY2_PORT}/UDP${NC}"
+    else
+        echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}"
+    fi
     echo -e "  不需要外部放行: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
     echo ""
 }
@@ -480,7 +504,9 @@ show_external_access_requirements() {
         echo -e "  IPv4 链接策略: ${BOLD}$(link_ipv4_selection_label)${NC} (${BOLD}$(public_ipv4_display)${NC})"
     fi
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
-    if [[ "${HY2_PORT}" == "${REALITY_PORT}" ]]; then
+    if ! is_hy2_enabled; then
+        echo -e "  Hysteria2:    ${DIM}未启用${NC}"
+    elif [[ "${HY2_PORT}" == "${REALITY_PORT}" ]]; then
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC} ${DIM}(与 Reality 共用端口号，但协议不同)${NC}"
     else
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
@@ -504,15 +530,17 @@ write_singbox_config() {
     [[ -z "${SHORT_ID:-}" ]]    && missing+="SHORT_ID "
     [[ -z "${WS_PORT:-}" ]]     && missing+="WS_PORT "
     [[ -z "${WS_PATH:-}" ]]     && missing+="WS_PATH "
-    [[ -z "${HY2_PORT:-}" ]]    && missing+="HY2_PORT "
-    [[ -z "${HY2_PASSWORD:-}" ]] && missing+="HY2_PASSWORD "
-    [[ -z "${HY2_SNI:-}" ]]     && missing+="HY2_SNI "
-    [[ -z "${HY2_MASQUERADE_URL:-}" ]] && missing+="HY2_MASQUERADE_URL "
+    if is_hy2_enabled; then
+        [[ -z "${HY2_PORT:-}" ]]    && missing+="HY2_PORT "
+        [[ -z "${HY2_PASSWORD:-}" ]] && missing+="HY2_PASSWORD "
+        [[ -z "${HY2_SNI:-}" ]]     && missing+="HY2_SNI "
+        [[ -z "${HY2_MASQUERADE_URL:-}" ]] && missing+="HY2_MASQUERADE_URL "
+    fi
     if [[ -n "$missing" ]]; then
         error "配置生成失败: 以下关键变量为空: ${missing}"
     fi
 
-    local json_uuid json_reality_sni json_private_key json_short_id json_ws_path
+    local json_uuid json_reality_sni json_private_key json_short_id json_ws_path hy2_inbound
     local json_hy2_password json_hy2_sni json_key_path json_cert_path json_hy2_masquerade_url
 
     json_uuid=$(json_string "$UUID")
@@ -520,11 +548,42 @@ write_singbox_config() {
     json_private_key=$(json_string "$PRIVATE_KEY")
     json_short_id=$(json_string "$SHORT_ID")
     json_ws_path=$(json_string "$WS_PATH")
-    json_hy2_password=$(json_string "$HY2_PASSWORD")
-    json_hy2_sni=$(json_string "$HY2_SNI")
-    json_key_path=$(json_string "${CONFIG_DIR}/server.key")
-    json_cert_path=$(json_string "${CONFIG_DIR}/server.crt")
-    json_hy2_masquerade_url=$(json_string "$HY2_MASQUERADE_URL")
+    hy2_inbound=""
+    if is_hy2_enabled; then
+        json_hy2_password=$(json_string "$HY2_PASSWORD")
+        json_hy2_sni=$(json_string "$HY2_SNI")
+        json_key_path=$(json_string "${CONFIG_DIR}/server.key")
+        json_cert_path=$(json_string "${CONFIG_DIR}/server.crt")
+        json_hy2_masquerade_url=$(json_string "$HY2_MASQUERADE_URL")
+        hy2_inbound=$(cat << HY2_EOF
+,
+        {
+            "type": "hysteria2",
+            "tag": "hysteria2-in",
+            "listen": "::",
+            "listen_port": ${HY2_PORT},
+            "up_mbps": 100,
+            "down_mbps": 100,
+            "users": [
+                {
+                    "password": ${json_hy2_password}
+                }
+            ],
+            "tls": {
+                "enabled": true,
+                "server_name": ${json_hy2_sni},
+                "key_path": ${json_key_path},
+                "certificate_path": ${json_cert_path}
+            },
+            "masquerade": {
+                "type": "proxy",
+                "url": ${json_hy2_masquerade_url},
+                "rewrite_host": true
+            }
+        }
+HY2_EOF
+)
+    fi
 
     cat > "$CONFIG_FILE" << SINGBOX_EOF
 {
@@ -576,31 +635,7 @@ write_singbox_config() {
                 "max_early_data": 2048,
                 "early_data_header_name": "Sec-WebSocket-Protocol"
             }
-        },
-        {
-            "type": "hysteria2",
-            "tag": "hysteria2-in",
-            "listen": "::",
-            "listen_port": ${HY2_PORT},
-            "up_mbps": 100,
-            "down_mbps": 100,
-            "users": [
-                {
-                    "password": ${json_hy2_password}
-                }
-            ],
-            "tls": {
-                "enabled": true,
-                "server_name": ${json_hy2_sni},
-                "key_path": ${json_key_path},
-                "certificate_path": ${json_cert_path}
-            },
-            "masquerade": {
-                "type": "proxy",
-                "url": ${json_hy2_masquerade_url},
-                "rewrite_host": true
-            }
-        }
+        }${hy2_inbound}
     ],
     "outbounds": [
         {
@@ -640,4 +675,3 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 EOF
 }
-
