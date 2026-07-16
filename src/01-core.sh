@@ -1,8 +1,10 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.6"
+SCRIPT_VERSION="2.7.7"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
+SINGBOX_BIN_DIR="/usr/local/bin"
+SINGBOX_BIN_PATH="${SINGBOX_BIN_DIR}/sing-box"
 # 用户侧覆盖的 CF 优选域名列表(由 `sbm cfopt` 刷新生成；删除即恢复内置默认)
 CF_DOMAINS_FILE="${CONFIG_DIR}/cf_domains.txt"
 # BestCF 优选域名数据源(三网分流，侧重电信/移动)

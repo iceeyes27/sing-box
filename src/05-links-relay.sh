@@ -1237,21 +1237,21 @@ latest_singbox_version() {
 }
 
 install_singbox_from_musl_tarball() {
-    local version arch tmp url archive bin_path
+    local version arch url archive_member tmp_bin
 
     version=$(latest_singbox_version)
     arch=$(singbox_arch)
-    tmp=$(mktemp -d)
-    archive="${tmp}/sing-box.tar.gz"
     url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}-musl.tar.gz"
+    archive_member="sing-box-${version}-linux-${arch}-musl/sing-box"
+    tmp_bin="/usr/local/bin/.sing-box.${$}.tmp"
 
-    curl -fL "$url" -o "$archive"
-    tar -xzf "$archive" -C "$tmp"
-    bin_path=$(find "$tmp" -type f -name sing-box | head -n 1) || true
-    [[ -n "$bin_path" ]] || err "未找到 sing-box 二进制"
-    cp "$bin_path" /usr/local/bin/sing-box
-    chmod +x /usr/local/bin/sing-box
-    rm -rf "$tmp"
+    mkdir -p /usr/local/bin
+    if ! curl -fL "$url" | tar -xzO "$archive_member" > "$tmp_bin"; then
+        rm -f "$tmp_bin"
+        err "sing-box 二进制下载失败"
+    fi
+    chmod +x "$tmp_bin"
+    mv -f "$tmp_bin" /usr/local/bin/sing-box
 }
 
 install_singbox() {

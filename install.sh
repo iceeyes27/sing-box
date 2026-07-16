@@ -44,10 +44,12 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.6"
+SCRIPT_VERSION="2.7.7"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
+SINGBOX_BIN_DIR="/usr/local/bin"
+SINGBOX_BIN_PATH="${SINGBOX_BIN_DIR}/sing-box"
 # 用户侧覆盖的 CF 优选域名列表(由 `sbm cfopt` 刷新生成；删除即恢复内置默认)
 CF_DOMAINS_FILE="${CONFIG_DIR}/cf_domains.txt"
 # BestCF 优选域名数据源(三网分流，侧重电信/移动)
@@ -1279,45 +1281,33 @@ get_latest_singbox_version() {
 }
 
 install_singbox_from_official_tarball() {
-    local version arch tmp_dir archive url bin_path
+    local version arch url tmp_bin archive_member
 
     arch=$(get_singbox_release_arch) || return 1
     version=$(get_latest_singbox_version) || return 1
-    tmp_dir=$(mktemp -d)
-    archive="${tmp_dir}/sing-box.tar.gz"
     url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}-musl.tar.gz"
+    archive_member="sing-box-${version}-linux-${arch}-musl/sing-box"
+    tmp_bin="${SINGBOX_BIN_DIR}/.sing-box.${$}.tmp"
 
     info "下载 sing-box 官方二进制: v${version} (${arch}-musl)"
-    if ! curl -fL --retry 3 --connect-timeout 15 -o "$archive" "$url"; then
-        rm -rf "$tmp_dir"
+    if ! mkdir -p "$SINGBOX_BIN_DIR"; then
+        return 1
+    fi
+    if ! curl -fL --retry 3 --connect-timeout 15 "$url" \
+        | tar -xzO "$archive_member" > "$tmp_bin"; then
+        rm -f "$tmp_bin"
         return 1
     fi
 
-    if ! tar -xzf "$archive" -C "$tmp_dir"; then
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    bin_path=$(find "$tmp_dir" -type f -name sing-box | head -n 1 || true)
-    if [[ -z "$bin_path" || ! -f "$bin_path" ]]; then
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    if command -v install &>/dev/null; then
-        install -m 0755 "$bin_path" /usr/local/bin/sing-box
-    else
-        cp "$bin_path" /usr/local/bin/sing-box
-        chmod 755 /usr/local/bin/sing-box
-    fi
+    chmod 755 "$tmp_bin"
+    mv -f "$tmp_bin" "$SINGBOX_BIN_PATH"
 
     hash -r 2>/dev/null || true
-    if ! singbox_binary_available && [[ -x /usr/local/bin/sing-box ]]; then
-        ln -sf /usr/local/bin/sing-box /usr/bin/sing-box 2>/dev/null || true
+    if ! singbox_binary_available && [[ -x "$SINGBOX_BIN_PATH" ]]; then
+        ln -sf "$SINGBOX_BIN_PATH" /usr/bin/sing-box 2>/dev/null || true
         hash -r 2>/dev/null || true
     fi
 
-    rm -rf "$tmp_dir"
     singbox_binary_available
 }
 
@@ -3959,21 +3949,21 @@ latest_singbox_version() {
 }
 
 install_singbox_from_musl_tarball() {
-    local version arch tmp url archive bin_path
+    local version arch url archive_member tmp_bin
 
     version=$(latest_singbox_version)
     arch=$(singbox_arch)
-    tmp=$(mktemp -d)
-    archive="${tmp}/sing-box.tar.gz"
     url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}-musl.tar.gz"
+    archive_member="sing-box-${version}-linux-${arch}-musl/sing-box"
+    tmp_bin="/usr/local/bin/.sing-box.${$}.tmp"
 
-    curl -fL "$url" -o "$archive"
-    tar -xzf "$archive" -C "$tmp"
-    bin_path=$(find "$tmp" -type f -name sing-box | head -n 1) || true
-    [[ -n "$bin_path" ]] || err "未找到 sing-box 二进制"
-    cp "$bin_path" /usr/local/bin/sing-box
-    chmod +x /usr/local/bin/sing-box
-    rm -rf "$tmp"
+    mkdir -p /usr/local/bin
+    if ! curl -fL "$url" | tar -xzO "$archive_member" > "$tmp_bin"; then
+        rm -f "$tmp_bin"
+        err "sing-box 二进制下载失败"
+    fi
+    chmod +x "$tmp_bin"
+    mv -f "$tmp_bin" /usr/local/bin/sing-box
 }
 
 install_singbox() {

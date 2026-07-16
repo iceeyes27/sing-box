@@ -807,6 +807,41 @@ exit 0'
     rm -rf "$tmp"
 }
 
+test_official_tarball_install_streams_without_mktemp() {
+    local tmp old_bin_dir old_bin_path old_path
+
+    tmp=$(mktemp -d)
+    old_bin_dir="$SINGBOX_BIN_DIR"
+    old_bin_path="$SINGBOX_BIN_PATH"
+    old_path="$PATH"
+    SINGBOX_BIN_DIR="${tmp}/bin"
+    SINGBOX_BIN_PATH="${SINGBOX_BIN_DIR}/sing-box"
+
+    make_cmd "${tmp}/mktemp" '#!/usr/bin/env bash
+exit 1'
+    make_cmd "${tmp}/uname" '#!/usr/bin/env bash
+echo x86_64'
+    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
+case "$*" in
+    *api.github.com*) printf "%s\n" "{\"tag_name\":\"v1.2.3\"}" ;;
+    *) printf "archive-bytes" ;;
+esac'
+    make_cmd "${tmp}/tar" '#!/usr/bin/env bash
+args="$*"
+cat >/dev/null
+[[ "$args" == *"-xzO sing-box-1.2.3-linux-amd64-musl/sing-box"* ]] || exit 1
+printf "%s\n" "#!/usr/bin/env sh"
+printf "%s\n" "exit 0"'
+
+    PATH="${tmp}:${SINGBOX_BIN_DIR}:${old_path}" install_singbox_from_official_tarball >/dev/null
+    [[ -x "$SINGBOX_BIN_PATH" ]] || fail "streamed sing-box binary was not installed"
+
+    SINGBOX_BIN_DIR="$old_bin_dir"
+    SINGBOX_BIN_PATH="$old_bin_path"
+    PATH="$old_path"
+    rm -rf "$tmp"
+}
+
 test_non_alpine_package_verifies_binary() {
     local tmp
     tmp=$(mktemp -d)
@@ -1595,6 +1630,7 @@ test_validate_relay_inputs_rejects_empty_upstream_server
 test_validate_relay_inputs_accepts_valid_values
 test_relay_install_help_mentions_relay_install
 test_alpine_package_fallback
+test_official_tarball_install_streams_without_mktemp
 test_non_alpine_package_verifies_binary
 test_low_memory_without_swap_skips_optional_deps
 test_low_cpu_uses_low_priority_runner
