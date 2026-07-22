@@ -1,18 +1,16 @@
 # ─── Argo 服务 ───────────────────────────────────────────────
 write_argo_service() {
     local cloudflared_bin exec_cmd argo_origin_url systemd_hardening
+    if ! argo_fixed_enabled; then
+        warn "Argo 未启用：必须同时配置固定域名和 Tunnel Token"
+        return 1
+    fi
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
-
-    if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        info "使用 Token 模式启动 Argo 隧道 (固定域名)"
-        info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
-        write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
-        exec_cmd="tunnel --protocol http2 --no-autoupdate run"
-    else
-        info "使用临时隧道模式 (trycloudflare.com)"
-        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
-    fi
+    info "使用固定域名启动 Argo 隧道"
+    info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
+    write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
+    exec_cmd="tunnel --protocol http2 --no-autoupdate run"
 
     if [[ "$(service_manager)" == "openrc" ]]; then
         cat > "$ARGO_OPENRC_SERVICE" << EOF
@@ -26,8 +24,7 @@ pidfile="/run/argo-tunnel.pid"
 output_log="/var/log/argo-tunnel.log"
 error_log="/var/log/argo-tunnel.log"
 EOF
-        if [[ -n "${ARGO_TOKEN:-}" ]]; then
-            cat >> "$ARGO_OPENRC_SERVICE" << EOF
+        cat >> "$ARGO_OPENRC_SERVICE" << EOF
 env_file="${ARGO_ENV_FILE}"
 start_pre() {
     if [ -r "\${env_file}" ]; then
@@ -37,7 +34,6 @@ start_pre() {
     fi
 }
 EOF
-        fi
         cat >> "$ARGO_OPENRC_SERVICE" << 'EOF'
 
 depend() {
@@ -61,7 +57,7 @@ Type=simple
 User=nobody
 Group=nogroup
 EOF
-    [[ -n "${ARGO_TOKEN:-}" ]] && printf 'EnvironmentFile=%s\n' "$ARGO_ENV_FILE" >> "$ARGO_SERVICE"
+    printf 'EnvironmentFile=%s\n' "$ARGO_ENV_FILE" >> "$ARGO_SERVICE"
     cat >> "$ARGO_SERVICE" << EOF
 ExecStart=${cloudflared_bin} ${exec_cmd}
 Restart=on-failure
@@ -281,111 +277,34 @@ ensure_subscription_service() {
     service_enable_now sbm-subscription
 }
 
-# ─── 获取 Argo 域名 ──────────────────────────────────────────
-# trycloudflare 域名对已注销的隧道仍会 DNS 解析，并由 CF 边缘应答 52x/53x
-# (如错误 1033 → 530)，因此判断存活不能只看能否连通，要看状态码是否为
-# 边缘/源站的正常应答。
-argo_quick_domain_alive() {
-    local domain="$1" code
-    code=$(curl -so /dev/null -m 5 -w '%{http_code}' "https://${domain}/" 2>/dev/null) || true
-    ! cf_edge_code_dead "$code"
+ensure_subscription_service_if_enabled() {
+    argo_fixed_enabled || return 0
+    ensure_subscription_service
 }
 
-fetch_argo_domain() {
-    if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        # Token 模式下，如果用户没填域名，提醒一下
-        if [[ -z "${ARGO_DOMAIN:-}" ]]; then
-            warn "检测到 Token 模式但未配置自定义域名，分享链接将不包含 Argo 节点。"
-            return 1
-        fi
-        return 0
-    fi
-
-    # 临时域名模式:立即查一次日志，未出现则 2s 间隔轮询。抓到的域名还需
-    # 通过存活验证，避免把进程重启前遗留在日志里的旧域名(已作废，边缘返
-    # 回 530)当成现役域名写进链接。
-    local max=15 i=0 candidate=""
-    local previous_domain="${ARGO_DOMAIN:-}"
-    ARGO_DOMAIN=""
-    while [[ $i -lt $max ]]; do
-        candidate=$(service_logs argo-tunnel 1000 2>/dev/null | \
-                      grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' | \
-                      tail -1 | sed 's|https://||')
-        if [[ -n "$candidate" ]] && argo_quick_domain_alive "$candidate"; then
-            ARGO_DOMAIN="$candidate"
-            if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
-                clear_argo_best_cf_cache
-                info "检测到新的 Argo 临时域名，已清空缓存的优选接入域名"
-            fi
-            return 0
-        fi
-        i=$((i + 1))
-        sleep 2
-    done
-    if [[ -n "$candidate" ]]; then
-        # 预算内始终未通过存活验证:多半是新域名 DNS 尚未全网生效。仍按日志
-        # 里的最新域名输出以免链接凭空消失，但提醒用户稍后复核。
-        ARGO_DOMAIN="$candidate"
-        warn "Argo 临时域名 ${candidate} 暂未通过存活验证(可能尚未生效)，若稍后仍不可用请重新执行 sbm links"
-        if [[ -n "$previous_domain" && "$ARGO_DOMAIN" != "$previous_domain" ]]; then
-            clear_argo_best_cf_cache
-        fi
-        return 0
-    fi
-    return 1
-}
-
+# 固定域名不会从日志发现或自动更换。
 refresh_argo_domain_if_needed() {
-    # 本函数在 set -e 下常被裸调用，所有路径都必须返回 0:
-    # 「隧道未运行」「域名未变化」都是正常情况，透传非零会终止整个脚本。
-    service_is_active argo-tunnel || return 0
-
-    if [[ -n "${ARGO_TOKEN:-}" ]]; then
-        # 固定域名模式域名由用户配置，进程重启也不变
-        return 0
-    fi
-
-    # 临时隧道每次重启都会换域名，缓存的旧域名会变成死链。缓存域名仍存活
-    # 就继续用(保持链接稳定)；已失效才从当前进程日志重新抓取。
-    if [[ -n "${ARGO_DOMAIN:-}" ]] && argo_quick_domain_alive "$ARGO_DOMAIN"; then
-        return 0
-    fi
-
-    local cached_domain="${ARGO_DOMAIN:-}"
-    if fetch_argo_domain 2>/dev/null; then
-        if [[ "${ARGO_DOMAIN:-}" != "$cached_domain" ]]; then
-            save_params
-        fi
-    else
-        # 抓取失败(如日志已滚动)时回退到缓存域名，避免 Argo 链接直接消失
-        ARGO_DOMAIN="$cached_domain"
-    fi
     return 0
 }
 
 refresh_argo_runtime() {
-    if [[ -n "${ARGO_TOKEN:-}" && -z "${ARGO_DOMAIN:-}" ]]; then
-        warn "固定域名模式缺少 Argo 域名，无法生成 Argo 订阅链接"
-        return 1
-    fi
-
-    if [[ -z "${ARGO_TOKEN:-}" ]]; then
+    if ! argo_fixed_enabled; then
+        service_stop argo-tunnel 2>/dev/null || true
+        service_disable argo-tunnel 2>/dev/null || true
+        service_stop sbm-subscription 2>/dev/null || true
+        service_disable sbm-subscription 2>/dev/null || true
+        ARGO_TOKEN=""
         ARGO_DOMAIN=""
         clear_argo_best_cf_cache
+        save_params
+        return 0
     fi
 
-    write_argo_service
-    if ! service_restart argo-tunnel; then
+    install_cloudflared
+    write_argo_service || return 1
+    if ! service_enable_now argo-tunnel; then
         warn "argo-tunnel 重启失败，无法更新 Argo 订阅链接"
         return 1
-    fi
-
-    if [[ -z "${ARGO_TOKEN:-}" ]]; then
-        sleep 5
-        if ! fetch_argo_domain; then
-            warn "未获取到新的 Argo 临时域名，订阅链接未更新"
-            return 1
-        fi
     fi
 
     save_params
@@ -393,10 +312,13 @@ refresh_argo_runtime() {
 }
 
 update_argo_subscription_links() {
+    if ! argo_fixed_enabled; then
+        warn "当前未启用固定域名 Argo"
+        return 1
+    fi
     refresh_argo_runtime || return 1
     generate_and_show_links
-    ensure_subscription_service || warn "订阅服务启动失败，请检查 python3 或服务日志"
+    ensure_subscription_service_if_enabled || warn "订阅服务启动失败，请检查 python3 或服务日志"
     success "Argo 订阅链接已更新"
     show_subscription_url
 }
-

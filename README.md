@@ -8,11 +8,12 @@
 
 ## ✨ 说明
 
-- 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box + cloudflared 为系统服务。
-- 🔧 **多协议链路框架** — 预置支持 VLESS Reality、VLESS WebSocket over Argo 以及 Hysteria2，兼容 TCP、WebSocket 与 UDP(QUIC) 等传输路径。
+- 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box；仅在启用固定域名 Argo 时安装 cloudflared。
+- 🔧 **稳定优先链路** — 默认使用固定 SNI 的 VLESS Reality 直连；Hysteria2 和固定域名 Argo 作为附加链路。
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
 - 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、HTTPS 订阅链接、Argo 订阅链接、重载配置、监控日志与开机自启。
-- 📡 **本地订阅网关** — 生成带 token 的订阅文件，并通过本地监听的订阅服务配合 Argo 暴露 HTTPS 订阅地址。
+- 📡 **可选订阅网关** — 仅在配置固定域名 Argo 时启动本地订阅服务并暴露 HTTPS 订阅地址。
+- 🧩 **NAT VPS 适配** — 自动识别公网 IPv4 不在本机网卡的环境，分别保存本机监听端口与面板公网映射端口；没有 UDP 映射时可直接禁用 Hysteria2。
 - 🔀 **三种部署路径** — 支持主节点完整部署、当前机器直接部署线路机 / 落地机、以及导出独立线路机脚本。
 
 ## 📦 一键安装配置
@@ -71,10 +72,8 @@ sbm install         # 直接执行主节点完整部署流程
 sbm relay-install   # 直接把当前机器部署为线路机 / 落地机
 sbm relay           # 根据主节点 Argo 配置生成线路机部署脚本
 sbm links           # 重新计算并查看服务连接参数与凭证
-sbm resni           # 重新优选 Reality 伪装域名 (SNI) 并自动重启生效
+sbm resni           # 手动重新选择 Reality 伪装域名 (SNI) 并重启生效
 sbm apply           # 升级脚本后一键同步：按新版本模板重写配置并重启、刷新链接
-sbm cfopt           # 从 BestCF 刷新 CF 优选域名(三网分流，侧重电信/移动)并更新链接
-sbm cfopt-auto on   # 开启每周自动刷新优选域名(off 关闭 / status 查看；默认关闭)
 sbm restart         # 重启系统后台的所有相关运行服务
 sbm status          # 查看当前各个核心组件的系统运行状态
 sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
@@ -82,13 +81,15 @@ sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 
 ## 🌐 IPv4 / IPv6 VPS
 
-脚本会按 VPS 实际公网网络自动生成节点链接：IPv4-only 生成 IPv4 直连链接和 Argo 链接，IPv6-only 仅保留 `VLESS + WS + Argo` 节点链接，IPv4 + IPv6 双栈会生成 IPv4 直连链接，并同时输出 IPv4 / IPv6 两条 Argo 链接。
+脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality/Hysteria2 直连链接；IPv6-only VPS 仅在配置固定域名 Argo 后生成外部节点链接。固定域名 Argo 始终直接使用自有域名，不使用第三方 CF 优选域名。
+
+NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持 sing-box 使用本机监听端口。映射变化后可在 `sbm` 的“修改 NAT 公网映射”中更新，无需重写协议参数。
 
 ## 🧭 部署目标
 
 主菜单的 `部署目标选择` 现在提供三种入口：
 
-1. **主节点完整部署** — 从零安装 sing-box + cloudflared + 订阅服务。
+1. **主节点完整部署** — 默认安装 Reality/Hysteria2；固定域名 Argo 及订阅服务按需启用。
 2. **只搭建线路机 / 落地机** — 直接在当前机器部署 relay，接入现有主节点。
 3. **生成线路机部署脚本** — 读取当前主节点的 Argo 参数，导出独立安装脚本给另一台机器执行。
 
@@ -102,7 +103,7 @@ sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 
 ### 教程一：从零搭建主节点
 
-适合：你手上只有一台主 VPS，想一键搭好主节点、Argo 和订阅。
+适合：你手上只有一台主 VPS，想优先部署稳定的 Reality 直连节点。
 
 #### 步骤 1：下载安装脚本
 
@@ -123,10 +124,11 @@ sudo bash install.sh
 脚本会依次引导你：
 
 - 选择单端口或分端口模式
-- 设置订阅服务端口
-- 设置 Reality 伪装域名
+- NAT VPS 填写面板分配的公网 TCP/UDP 映射端口
+- 启用固定域名 Argo 时设置订阅服务端口
+- 确认固定的 Reality 伪装域名
 - 设置节点名称
-- 选择 Argo 临时域名或固定域名模式
+- 选择不启用 Argo，或配置固定域名和 Tunnel Token
 - 自动生成 UUID、Reality 密钥、Hysteria2 参数
 - 自动写入服务并启动
 
@@ -135,9 +137,9 @@ sudo bash install.sh
 安装完成后，脚本会输出：
 
 - Reality 直连链接
-- Argo 链接
+- 固定域名 Argo 链接（启用时）
 - Hysteria2 链接
-- HTTPS 订阅地址
+- HTTPS 订阅地址（启用固定域名 Argo 时）
 
 后续可随时执行：
 

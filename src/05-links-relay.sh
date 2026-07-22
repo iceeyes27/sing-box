@@ -133,193 +133,6 @@ select_reality_sni() {
     fi
 }
 
-# ================== CF 优选：随机选择可用域名 ==================
-# 探测分两档:
-#   基础可达 —— curl https://优选域名 能通。这是域名可用性的底线判据;
-#     VPS 出口与国内客户端视角不同，探测失败不代表客户端不通，因此无论
-#     哪档探测失败，都绝不回退到 trycloudflare/Argo 域名(IPv6-only 除外，
-#     与旧版一致)，最终仍使用优选域名列表。
-#   严格验证 —— 以优选域名为接入地址、SNI/Host 为当前 Argo 域名走一次
-#     完整 HTTPS(即分享链接的真实访问形态)。通过的域名优先选用;全部
-#     失败只降级回基础档，绝不因此排除域名(000/超时多半只是 VPS 到国内
-#     优选线路不通，客户端侧通常仍可用)。
-cf_domain_reachable() {
-    local domain="$1"
-    local family="${2:-}"
-    local curl_ip_arg=()
-
-    case "$family" in
-        ipv4) curl_ip_arg=(-4) ;;
-        ipv6) curl_ip_arg=(-6) ;;
-    esac
-    # ${arr[@]+...} 写法兼容 bash 4.4 之前 set -u 下空数组展开报 unbound 的问题
-    curl ${curl_ip_arg[@]+"${curl_ip_arg[@]}"} -s --max-time 2 -o /dev/null "https://$domain" 2>/dev/null
-}
-
-# CF 边缘应答的"死链"状态码:空/000(连不上)、52x/53x(边缘无法回源或
-# 路由该 Host，如已注销 quick tunnel 的错误 1033 → 530)。
-cf_edge_code_dead() {
-    case "${1:-}" in
-        ''|000|52[0-9]|53[0-9]) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# 严格验证:连接地址为优选域名，TLS SNI/Host 仍为当前 Argo 域名。
-# 只要拿到边缘/源站的正常应答(非 000/52x/53x)即视为已验证。
-argo_cf_domain_verified() {
-    local domain="$1"
-    local family="${2:-}"
-    local argo_host="${ARGO_DOMAIN:-}"
-    local curl_ip_arg=()
-    local code
-
-    [[ -n "$domain" && -n "$argo_host" ]] || return 1
-
-    case "$family" in
-        ipv4) curl_ip_arg=(-4) ;;
-        ipv6) curl_ip_arg=(-6) ;;
-    esac
-
-    code=$(curl ${curl_ip_arg[@]+"${curl_ip_arg[@]}"} -s --connect-timeout 2 --max-time 4 \
-        --connect-to "${argo_host}:443:${domain}:443" \
-        -o /dev/null -w '%{http_code}' "https://${argo_host}/" 2>/dev/null) || true
-
-    ! cf_edge_code_dead "$code"
-}
-
-# 并行探测所有优选域名，stdout 每行输出「档位 域名」:
-#   verified  严格验证通过(接入该域名可代理当前 Argo Host)
-#   reachable 仅基础可达
-# 临时目录创建失败(极端受限环境)时回退为串行探测。
-probe_cf_domains_tiered() {
-    local family="${1:-}"
-    local tmp_dir idx domain
-
-    if tmp_dir=$(mktemp -d 2>/dev/null); then
-        for idx in "${!CF_DOMAINS[@]}"; do
-            domain="${CF_DOMAINS[$idx]}"
-            {
-                if argo_cf_domain_verified "$domain" "$family"; then
-                    printf 'verified' > "${tmp_dir}/${idx}"
-                elif cf_domain_reachable "$domain" "$family"; then
-                    printf 'reachable' > "${tmp_dir}/${idx}"
-                fi
-            } &
-        done
-        wait 2>/dev/null || true
-
-        for idx in "${!CF_DOMAINS[@]}"; do
-            if [[ -s "${tmp_dir}/${idx}" ]]; then
-                printf '%s %s\n' "$(<"${tmp_dir}/${idx}")" "${CF_DOMAINS[$idx]}"
-            fi
-        done
-        rm -rf "$tmp_dir"
-        return 0
-    fi
-
-    for domain in "${CF_DOMAINS[@]}"; do
-        if argo_cf_domain_verified "$domain" "$family"; then
-            printf 'verified %s\n' "$domain"
-        elif cf_domain_reachable "$domain" "$family"; then
-            printf 'reachable %s\n' "$domain"
-        fi
-    done
-    return 0
-}
-
-select_random_cf_domain_by_family() {
-    local family="${1:-}"
-    local verified=() reachable=() tier domain
-
-    while read -r tier domain; do
-        [[ -n "$domain" ]] || continue
-        case "$tier" in
-            verified)  verified+=("$domain") ;;
-            reachable) reachable+=("$domain") ;;
-        esac
-    done < <(probe_cf_domains_tiered "$family")
-
-    if [[ ${#verified[@]} -gt 0 ]]; then
-        echo "${verified[$((RANDOM % ${#verified[@]}))]}"
-        return 0
-    fi
-    if [[ ${#reachable[@]} -gt 0 ]]; then
-        # 本函数 stdout 会被 $(...) 捕获为域名，提示必须显式写到 stderr
-        [[ -n "${ARGO_DOMAIN:-}" ]] && \
-            warn "优选域名均未通过服务器侧的 Argo Host 验证，已按基础可达性选择(客户端侧通常仍可用)" >&2
-        echo "${reachable[$((RANDOM % ${#reachable[@]}))]}"
-    fi
-    return 0
-}
-
-select_random_cf_domain() {
-    local family=""
-    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && family="ipv6"
-    select_random_cf_domain_by_family "$family"
-}
-
-check_cf_domain_available_by_family() {
-    local domain="$1"
-    local family="$2"
-
-    [[ -n "$domain" ]] || return 1
-    cf_domain_reachable "$domain" "$family"
-}
-
-check_cf_domain_available() {
-    local domain="$1"
-    local family=""
-    [[ -n "$domain" ]] || return 1
-    [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]] && family="ipv6"
-    cf_domain_reachable "$domain" "$family"
-}
-
-resolve_argo_best_cf_domain() {
-    [[ -n "${ARGO_DOMAIN:-}" ]] || return 1
-
-    if check_cf_domain_available "${ARGO_BEST_CF_DOMAIN:-}"; then
-        return 0
-    fi
-
-    local previous_domain="${ARGO_BEST_CF_DOMAIN:-}"
-    local next_domain=""
-    next_domain="$(select_random_cf_domain)"
-
-    if [[ -z "$next_domain" ]]; then
-        if [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
-            ARGO_BEST_CF_DOMAIN="${ARGO_DOMAIN}"
-            warn "未探测到可用的 IPv6 CF 优选域名，使用 Argo 域名作为接入地址"
-            save_params
-            return 0
-        fi
-
-        if [[ -n "$previous_domain" ]]; then
-            warn "原 Argo 优选域名当前不可用，且未找到新的可用域名，暂时保留原链接地址"
-            ARGO_BEST_CF_DOMAIN="$previous_domain"
-            return 0
-        fi
-
-        ARGO_BEST_CF_DOMAIN="${CF_DOMAINS[0]}"
-        warn "未探测到可用的 CF 优选域名，首次生成链接时使用默认地址: ${ARGO_BEST_CF_DOMAIN}"
-        save_params
-        return 0
-    fi
-
-    ARGO_BEST_CF_DOMAIN="$next_domain"
-
-    if [[ "${ARGO_BEST_CF_DOMAIN}" != "$previous_domain" ]]; then
-        if [[ -n "$previous_domain" ]]; then
-            warn "原 Argo 优选域名不可用，已切换为: ${ARGO_BEST_CF_DOMAIN}"
-        else
-            info "已为 Argo 选择并缓存优选域名: ${ARGO_BEST_CF_DOMAIN}"
-        fi
-        save_params
-    fi
-
-    return 0
-}
-
 # ─── URL 编码 ────────────────────────────────────────────────
 urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
@@ -403,7 +216,7 @@ build_direct_share_links_for_ip() {
     fi
 
     remark=$(urlencode "$reality_name")
-    append_reality_link "vless://${UUID}@${host}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
+    append_reality_link "vless://${UUID}@${host}:$(reality_share_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
 
     if hy2_share_link_available; then
         local hy2_remark hy2_pass_enc hy2_name hy2_pin_sha hy2_pin_enc
@@ -416,7 +229,7 @@ build_direct_share_links_for_ip() {
         hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
         hy2_pin_sha=$(get_hy2_cert_pin_sha256) || return 0
         hy2_pin_enc=$(urlencode "${hy2_pin_sha}")
-        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?sni=${HY2_SNI}&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
+        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:$(hy2_share_port)?sni=${HY2_SNI}&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
     fi
 }
 
@@ -449,21 +262,13 @@ append_argo_link() {
 }
 
 build_argo_link_for_domain() {
-    local best_cf_domain="$1"
-    local family_label="$2"
     local argo_name argo_remark
 
-    [[ -n "$best_cf_domain" ]] || return
-
-    if [[ -n "$family_label" ]]; then
-        argo_name="${NODE_NAME}-${family_label}-Argo"
-    else
-        argo_name="${NODE_NAME}-Argo"
-    fi
+    argo_fixed_enabled || return
+    argo_name="${NODE_NAME}-Argo"
     argo_remark=$(urlencode "$argo_name")
-    # alpn=http/1.1 固定 ALPN，避免客户端与 Cloudflare 边缘协商到 HTTP/2 导致 WS 升级不稳定；
-    # path 追加 ?ed=2048 启用 WebSocket 0-RTT 早期数据，减少一次握手往返，提升弱网下的连通稳定性。
-    append_argo_link "vless://${UUID}@${best_cf_domain}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}%3Fed%3D2048&alpn=http%2F1.1&fp=chrome#${argo_remark}"
+    # 固定域名同时作为连接地址、SNI 和 Host，避免第三方优选域名及早期数据参数造成漂移。
+    append_argo_link "vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
 }
 
 # ─── 链接与订阅生成 ──────────────────────────────────────────
@@ -491,7 +296,11 @@ build_share_links() {
             build_direct_share_links_for_selected_ipv4s
             ;;
         ipv6-only)
-            warn "检测到 IPv6-only VPS，仅生成 Argo 节点链接。"
+            if argo_fixed_enabled; then
+                warn "检测到 IPv6-only VPS，仅生成固定域名 Argo 节点链接。"
+            else
+                warn "检测到 IPv6-only VPS，且未配置固定域名 Argo，无法生成外部节点链接。"
+            fi
             ;;
         unknown)
             ;;
@@ -500,38 +309,8 @@ build_share_links() {
             ;;
     esac
 
-    if [[ -n "${ARGO_DOMAIN:-}" ]]; then
-        if [[ "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
-            local old_cf_v4="${ARGO_BEST_CF_DOMAIN_IPV4:-}"
-            local old_cf_v6="${ARGO_BEST_CF_DOMAIN_IPV6:-}"
-
-            if ! check_cf_domain_available_by_family "${ARGO_BEST_CF_DOMAIN_IPV4:-}" ipv4; then
-                ARGO_BEST_CF_DOMAIN_IPV4=$(select_random_cf_domain_by_family ipv4)
-            fi
-            if ! check_cf_domain_available_by_family "${ARGO_BEST_CF_DOMAIN_IPV6:-}" ipv6; then
-                ARGO_BEST_CF_DOMAIN_IPV6=$(select_random_cf_domain_by_family ipv6)
-            fi
-            if [[ -z "$ARGO_BEST_CF_DOMAIN_IPV4" ]]; then
-                ARGO_BEST_CF_DOMAIN_IPV4="${ARGO_BEST_CF_DOMAIN:-${CF_DOMAINS[0]}}"
-                warn "未探测到可用的 IPv4 CF 优选域名，使用默认/缓存地址: ${ARGO_BEST_CF_DOMAIN_IPV4}"
-            fi
-            if [[ -z "$ARGO_BEST_CF_DOMAIN_IPV6" ]]; then
-                ARGO_BEST_CF_DOMAIN_IPV6="${ARGO_DOMAIN}"
-                warn "未探测到可用的 IPv6 CF 优选域名，使用 Argo 域名作为 IPv6 接入地址"
-            fi
-            ARGO_BEST_CF_DOMAIN="$ARGO_BEST_CF_DOMAIN_IPV4"
-            if [[ "$ARGO_BEST_CF_DOMAIN_IPV4" != "$old_cf_v4" || "$ARGO_BEST_CF_DOMAIN_IPV6" != "$old_cf_v6" ]]; then
-                save_params
-            fi
-            build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV4" "IPv4"
-            build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV6" "IPv6"
-        else
-            resolve_argo_best_cf_domain
-            local best_cf_domain="${ARGO_BEST_CF_DOMAIN:-}"
-            build_argo_link_for_domain "$best_cf_domain" ""
-        fi
-    elif [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
-        warn "Argo 域名未就绪，暂无法生成 Argo 节点链接。"
+    if argo_fixed_enabled; then
+        build_argo_link_for_domain
     fi
 }
 
@@ -544,7 +323,7 @@ write_subscription_assets() {
 }
 
 subscription_https_url() {
-    [[ -n "${ARGO_DOMAIN:-}" && -n "${SUB_TOKEN:-}" ]] || return 1
+    argo_fixed_enabled && [[ -n "${SUB_TOKEN:-}" ]] || return 1
     echo "https://${ARGO_DOMAIN}/sub/${SUB_TOKEN}"
 }
 
@@ -556,7 +335,7 @@ subscription_local_url() {
 show_subscription_url() {
     local public_subscription_url local_subscription_url
 
-    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] || return
+    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_fixed_enabled || return
 
     echo ""
     echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
@@ -567,7 +346,7 @@ show_subscription_url() {
         echo -e "${GREEN}${BOLD}HTTPS 订阅（导入 v2rayN / v2rayNG）${NC}"
         echo -e "${YELLOW}${BOLD}${public_subscription_url}${NC}"
     else
-        echo -e "${YELLOW}Argo 域名未就绪，稍后执行 sbm links 重新生成 HTTPS 订阅地址。${NC}"
+        echo -e "${DIM}未启用固定域名 Argo，仅提供本机调试地址。${NC}"
     fi
     if local_subscription_url=$(subscription_local_url); then
         echo ""
@@ -614,22 +393,21 @@ generate_and_show_links() {
     fi
     echo -e "  UUID:          ${BOLD}${UUID}${NC}"
     if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
-        echo -e "  Reality 端口:  ${BOLD}${REALITY_PORT}${NC}"
+        echo -e "  Reality 端口:  ${BOLD}$(reality_share_port)${NC}$(nat_mode_enabled && printf ' (本机监听 %s)' "$REALITY_PORT")"
         echo -e "  Reality SNI:   ${BOLD}${REALITY_SNI}${NC}"
         echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
         echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
     fi
-    echo -e "  订阅端口:      ${BOLD}${SUBSCRIPTION_PORT}${NC}"
-    if [[ -n "${ARGO_TOKEN:-}" ]]; then
+    if argo_fixed_enabled; then
+        echo -e "  订阅端口:      ${BOLD}${SUBSCRIPTION_PORT}${NC}"
         echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC}"
         echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN:-未配置}${NC}"
+        echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
     else
-        echo -e "  Argo 模式:     ${YELLOW}临时域名 (Quick)${NC}"
-        [[ -n "${ARGO_DOMAIN:-}" ]] && echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN}${NC}"
+        echo -e "  Argo 模式:     ${DIM}未启用${NC}"
     fi
-    echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
     if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
-        echo -e "  Hysteria2 端口: ${BOLD}${HY2_PORT}${NC}"
+        echo -e "  Hysteria2 端口: ${BOLD}$(hy2_share_port)${NC}$(nat_mode_enabled && printf ' (本机监听 %s)' "$HY2_PORT")"
         echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
     fi
     echo ""
@@ -644,16 +422,8 @@ generate_and_show_links() {
     if [[ -n "${GENERATED_ARGO_LINKS}" ]]; then
         echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
         echo -e "  伪装域名(SNI): ${BOLD}${ARGO_DOMAIN}${NC}"
-        if [[ "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
-            echo -e "  IPv4 优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN_IPV4}${NC}"
-            echo -e "  IPv6 优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN_IPV6}${NC}"
-        else
-            echo -e "  优选域名(ADDR): ${BOLD}${ARGO_BEST_CF_DOMAIN}${NC}"
-        fi
+        echo -e "  接入地址(ADDR): ${BOLD}${ARGO_DOMAIN}${NC}"
         echo -e "${YELLOW}${GENERATED_ARGO_LINKS}${NC}"
-        echo ""
-    elif [[ "${IP_STACK_MODE:-}" == "ipv6-only" ]]; then
-        echo -e "${YELLOW}  Argo 域名未就绪，稍后执行 sbm links 重新生成。${NC}"
         echo ""
     fi
 
@@ -694,14 +464,12 @@ generate_and_show_links() {
             echo "# Hysteria2 (QUIC/UDP 高速)"
             printf '%s\n' "$GENERATED_HY2_LINKS"
         fi
-        if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]]; then
+        if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_fixed_enabled; then
             echo ""
             echo "# Subscription"
             local subscription_url
             if subscription_url=$(subscription_https_url); then
                 echo "$subscription_url"
-            else
-                echo "# Argo domain is not ready. Run: sbm links"
             fi
         fi
     } > "$LINK_FILE"

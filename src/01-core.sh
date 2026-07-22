@@ -1,14 +1,13 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.7"
+SCRIPT_VERSION="2.7.8"
+DEFAULT_REALITY_SNI="www.microsoft.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
 SINGBOX_BIN_DIR="/usr/local/bin"
 SINGBOX_BIN_PATH="${SINGBOX_BIN_DIR}/sing-box"
-# 用户侧覆盖的 CF 优选域名列表(由 `sbm cfopt` 刷新生成；删除即恢复内置默认)
+# 旧版 CF 优选文件，仅用于卸载清理。
 CF_DOMAINS_FILE="${CONFIG_DIR}/cf_domains.txt"
-# BestCF 优选域名数据源(三网分流，侧重电信/移动)
-BESTCF_DOMAINS_URL="https://github.com/DustinWin/BestCF/releases/download/bestcf/bestcf-domain.txt"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 SUBSCRIPTION_FILE="${CONFIG_DIR}/subscription.txt"
 SUBSCRIPTION_ENV_FILE="${CONFIG_DIR}/sbm-subscription.env"
@@ -27,7 +26,7 @@ MANAGER_BIN_ALIAS_COMMAND="/bin/sing-box-manager"
 ARGO_SERVICE="/etc/systemd/system/argo-tunnel.service"
 ARGO_OPENRC_SERVICE="/etc/init.d/argo-tunnel"
 ARGO_ENV_FILE="${CONFIG_DIR}/argo-tunnel.env"
-# CF 优选域名「每周自动刷新」(可选，默认关闭)
+# 旧版 CF 优选定时任务路径，仅用于卸载清理。
 CFOPT_SERVICE="/etc/systemd/system/sbm-cfopt.service"
 CFOPT_TIMER="/etc/systemd/system/sbm-cfopt.timer"
 CFOPT_CRON_PERIODIC="/etc/periodic/weekly/sbm-cfopt"
@@ -73,26 +72,6 @@ REALITY_SNI_LIST=(
     "www.vmware.com"     # VMware，企业级站点，国内可达
 )
 
-# ================== CF 优选域名列表 ==================
-# 这些是「三网分流」智能 DNS 优选域名:客户端解析时会按其所在运营商自动
-# 返回对应的最优 Cloudflare 边缘 IP(电信用户拿到电信最优 IP，移动拿到移动
-# 最优 IP)。因此优选发生在「客户端侧」,链接里对所有人是同一个域名。
-#
-# 选取侧重「电信」、其次「移动」(不针对联通),全部为三网分流优选域名,
-# 任意命中都对电信/移动有优化;来源 DustinWin/BestCF 优选域名聚合
-# (CMLiussss / VPS789 / CFYes / 微测网),已校验为存活的 Cloudflare 边缘。
-#
-# ⚠ 社区优选域名会随时间失效,建议定期对照下列来源更新,并最好用电信网络
-#   实测后再定:https://github.com/DustinWin/BestCF (release: bestcf-domain.txt)
-CF_DOMAINS=(
-    "cf.090227.xyz"      # CMLiussss 三网分流，电信/移动口碑最佳
-    "cf.877774.xyz"      # 三网分流优选
-    "cf.008500.xyz"      # 三网分流优选
-    "bestcf.030101.xyz"  # BestCF 聚合（电信/移动）
-    "cdn.2020111.xyz"    # BestCF 聚合（电信/移动）
-    "cf.0sm.com"         # 三网分流优选
-)
-
 # ─── 颜色 ─────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -108,6 +87,23 @@ NC='\033[0m'
 info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+is_valid_hostname() {
+    local hostname="${1:-}" label
+    local -a labels=()
+
+    [[ -n "$hostname" && ${#hostname} -le 253 ]] || return 1
+    [[ "$hostname" == *.* && "$hostname" != .* && "$hostname" != *. ]] || return 1
+    IFS='.' read -r -a labels <<< "$hostname"
+    for label in "${labels[@]}"; do
+        [[ -n "$label" && ${#label} -le 63 ]] || return 1
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+    done
+}
+
+argo_fixed_enabled() {
+    [[ -n "${ARGO_TOKEN:-}" ]] && is_valid_hostname "${ARGO_DOMAIN:-}"
+}
 success() { echo -e "${GREEN}${BOLD}[OK]${NC} $*"; }
 
 separator() {
@@ -474,22 +470,37 @@ detect_external_access_mode() {
         return 0
     fi
 
-    if [[ "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
-        echo "dual-stack"
-        return 0
-    fi
-
     if has_public_ip_on_interface; then
-        echo "direct"
+        if [[ "${IP_STACK_MODE:-}" == "dual-stack" ]]; then
+            echo "dual-stack"
+        else
+            echo "direct"
+        fi
         return 0
     fi
 
-    if is_private_ipv4 "$PUBLIC_IP"; then
-        echo "nat"
-        return 0
-    fi
+    # 公网 IPv4 只能通过外部查询获得、但不在本机网卡上，通常表示共享 IPv4/NAT。
+    echo "nat"
+}
 
-    echo "panel"
+nat_mode_enabled() {
+    [[ "${NAT_MODE:-false}" == "true" ]]
+}
+
+reality_share_port() {
+    if nat_mode_enabled; then
+        printf '%s' "${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
+    else
+        printf '%s' "${REALITY_PORT}"
+    fi
+}
+
+hy2_share_port() {
+    if nat_mode_enabled; then
+        printf '%s' "${HY2_PUBLIC_PORT:-${HY2_PORT}}"
+    else
+        printf '%s' "${HY2_PORT}"
+    fi
 }
 
 public_ipv4_candidate_count() {
@@ -565,6 +576,7 @@ PARAM_KEYS=(
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
+    NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT
 )
 
 is_param_key() {
@@ -737,7 +749,18 @@ load_params() {
             SUBSCRIPTION_PORT=24630
             need_save=true
         fi
-        apply_cf_domains_override
+        if [[ "${NAT_MODE:-}" != "true" && "${NAT_MODE:-}" != "false" ]]; then
+            NAT_MODE="false"
+            need_save=true
+        fi
+        if ! validate_port "${REALITY_PUBLIC_PORT:-}" "NAT Reality 公网映射" >/dev/null 2>&1; then
+            REALITY_PUBLIC_PORT="${REALITY_PORT}"
+            need_save=true
+        fi
+        if ! validate_port "${HY2_PUBLIC_PORT:-}" "NAT Hysteria2 公网映射" >/dev/null 2>&1; then
+            HY2_PUBLIC_PORT="${HY2_PORT}"
+            need_save=true
+        fi
         [[ "$need_save" == "true" ]] && save_params
         return 0
     fi
@@ -883,21 +906,6 @@ clear_argo_best_cf_cache() {
     ARGO_BEST_CF_DOMAIN_IPV6=""
 }
 
-# 若存在用户侧覆盖文件(由 `sbm cfopt` 生成)，用其内容替换内置 CF_DOMAINS。
-apply_cf_domains_override() {
-    [[ -f "$CF_DOMAINS_FILE" ]] || return 0
-    local -a loaded=()
-    local line host
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        host="${line%%[[:space:]]*}"
-        host="${host%$'\r'}"
-        [[ -n "$host" && "$host" != \#* ]] || continue
-        loaded+=("$host")
-    done < "$CF_DOMAINS_FILE"
-    [[ ${#loaded[@]} -gt 0 ]] && CF_DOMAINS=("${loaded[@]}")
-    return 0
-}
-
 restore_runtime_params() {
     UUID="$1"
     SHORT_ID="$2"
@@ -920,5 +928,8 @@ restore_runtime_params() {
     ARGO_BEST_CF_DOMAIN_IPV6="${19}"
     LINK_IPV4_SELECTION="${20:-all}"
     PUBLIC_IPV4_OVERRIDE="${21:-}"
+    NAT_MODE="${22:-false}"
+    REALITY_PUBLIC_PORT="${23:-${REALITY_PORT}}"
+    HY2_PUBLIC_PORT="${24:-${HY2_PORT}}"
     reset_public_ip_cache
 }

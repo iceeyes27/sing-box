@@ -10,7 +10,8 @@ generate_params() {
     PUBLIC_KEY=$(echo "$keypair" | grep -i "PublicKey"  | awk '{print $NF}')
 
     REALITY_PORT=${REALITY_PORT:-443}
-    REALITY_SNI="" # 在配置时通过测速自动选择
+    # 默认固定 SNI。自动测速只能反映 VPS 到目标站点的路径，不能代表客户端链路。
+    REALITY_SNI="${REALITY_SNI:-${DEFAULT_REALITY_SNI}}"
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
@@ -23,9 +24,12 @@ generate_params() {
     ARGO_BEST_CF_DOMAIN_IPV6=""
     LINK_IPV4_SELECTION="all"
     PUBLIC_IPV4_OVERRIDE=""
+    NAT_MODE="false"
+    REALITY_PUBLIC_PORT="${REALITY_PORT}"
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
+    HY2_PUBLIC_PORT="${HY2_PORT}"
     HY2_PASSWORD=$(random_base64 16)
     HY2_SNI="${HY2_DEFAULT_SNI}"
     HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
@@ -38,6 +42,8 @@ generate_params() {
 generate_tls_cert() {
     local key_file="${CONFIG_DIR}/server.key"
     local cert_file="${CONFIG_DIR}/server.crt"
+
+    is_hy2_enabled || return 0
 
     if [[ -f "$key_file" && -f "$cert_file" ]]; then
         info "TLS 证书已存在，跳过生成"
@@ -271,17 +277,27 @@ validate_service_ports() {
     local should_open_firewall=${4:-true}
 
     validate_port "${REALITY_PORT:-}" "Reality" || return 1
-    validate_port "${WS_PORT:-}" "VLESS-WS" || return 1
+    if argo_fixed_enabled; then
+        validate_port "${WS_PORT:-}" "VLESS-WS" || return 1
+    fi
     if is_hy2_enabled; then
         validate_port "${HY2_PORT:-}" "Hysteria2" || return 1
     fi
-    validate_port "${SUBSCRIPTION_PORT:-}" "订阅服务" || return 1
+    if nat_mode_enabled; then
+        validate_port "${REALITY_PUBLIC_PORT:-}" "NAT Reality 公网映射" || return 1
+        if is_hy2_enabled; then
+            validate_port "${HY2_PUBLIC_PORT:-}" "NAT Hysteria2 公网映射" || return 1
+        fi
+    fi
+    if argo_fixed_enabled; then
+        validate_port "${SUBSCRIPTION_PORT:-}" "订阅服务" || return 1
+    fi
 
-    if [[ "${REALITY_PORT}" == "${WS_PORT}" ]]; then
+    if argo_fixed_enabled && [[ "${REALITY_PORT}" == "${WS_PORT}" ]]; then
         warn "Reality 端口 ${REALITY_PORT}/TCP 与 VLESS-WS 内部端口 ${WS_PORT}/TCP 冲突"
         return 1
     fi
-    if [[ "${SUBSCRIPTION_PORT}" == "${REALITY_PORT}" || "${SUBSCRIPTION_PORT}" == "${WS_PORT}" ]]; then
+    if argo_fixed_enabled && [[ "${SUBSCRIPTION_PORT}" == "${REALITY_PORT}" || "${SUBSCRIPTION_PORT}" == "${WS_PORT}" ]]; then
         warn "订阅服务端口 ${SUBSCRIPTION_PORT}/TCP 与现有 TCP 服务端口冲突"
         return 1
     fi
@@ -298,14 +314,16 @@ validate_service_ports() {
         info "Hysteria2 端口未变化，跳过占用检查"
     fi
 
-    if [[ -z "$old_reality_port" ]]; then
+    if argo_fixed_enabled && [[ -z "$old_reality_port" ]]; then
         assert_port_available "$WS_PORT" "tcp" "VLESS-WS" || return 1
     fi
 
-    if [[ -z "$old_subscription_port" || "$SUBSCRIPTION_PORT" != "$old_subscription_port" ]]; then
-        assert_port_available "$SUBSCRIPTION_PORT" "tcp" "订阅服务" || return 1
-    else
-        info "订阅服务端口未变化，跳过占用检查"
+    if argo_fixed_enabled; then
+        if [[ -z "$old_subscription_port" || "$SUBSCRIPTION_PORT" != "$old_subscription_port" ]]; then
+            assert_port_available "$SUBSCRIPTION_PORT" "tcp" "订阅服务" || return 1
+        else
+            info "订阅服务端口未变化，跳过占用检查"
+        fi
     fi
 
     if [[ "$should_open_firewall" == "true" ]]; then
@@ -343,14 +361,67 @@ show_port_confirmation() {
     else
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
     fi
-    echo -e "  订阅服务:     ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(仅本机/Argo 使用)${NC}"
-    if is_hy2_enabled; then
+    if nat_mode_enabled; then
+        echo -e "  NAT Reality:  ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC}"
+        if is_hy2_enabled; then
+            echo -e "  NAT Hysteria2:${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
+        fi
+    fi
+    if argo_fixed_enabled; then
+        echo -e "  订阅服务:     ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(仅本机/Argo 使用)${NC}"
+    fi
+    if nat_mode_enabled; then
+        echo -e "  本机防火墙:   ${BOLD}${REALITY_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PORT")"
+        echo -e "  服务商面板:   ${BOLD}${REALITY_PUBLIC_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PUBLIC_PORT")"
+    elif is_hy2_enabled; then
         echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}, ${BOLD}${HY2_PORT}/UDP${NC}"
     else
         echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}"
     fi
-    echo -e "  不需要外部放行: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
+    argo_fixed_enabled && echo -e "  不需要外部放行: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
     echo ""
+}
+
+prompt_nat_mapping_config() {
+    local detected_mode input candidate
+
+    detected_mode=$(detect_external_access_mode)
+    if [[ "$detected_mode" != "nat" ]]; then
+        NAT_MODE="false"
+        REALITY_PUBLIC_PORT="${REALITY_PORT}"
+        HY2_PUBLIC_PORT="${HY2_PORT}"
+        return 0
+    fi
+
+    if ! nat_mode_enabled; then
+        REALITY_PUBLIC_PORT="${REALITY_PORT}"
+        HY2_PUBLIC_PORT="${HY2_PORT}"
+    fi
+    NAT_MODE="true"
+    PUBLIC_IPV4_OVERRIDE="${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
+    REALITY_PUBLIC_PORT="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
+    HY2_PUBLIC_PORT="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
+    echo ""
+    echo -e "${CYAN}${BOLD}── NAT 公网映射 ──${NC}"
+    echo -e "  检测到公网 IPv4 不在本机网卡，按 NAT VPS 配置。"
+    echo -e "  公网 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
+    prompt_port_value REALITY_PUBLIC_PORT "NAT Reality 公网映射" "$REALITY_PUBLIC_PORT" \
+        "  面板分配的 Reality 公网 TCP 端口 [${REALITY_PUBLIC_PORT}]: " || return 1
+    if is_hy2_enabled; then
+        while true; do
+            prompt_read input "  面板分配的 Hysteria2 公网 UDP 端口 [${HY2_PUBLIC_PORT}]，输入 0 禁用: " || return 1
+            candidate="${input:-$HY2_PUBLIC_PORT}"
+            if [[ "$candidate" == "0" ]]; then
+                HY2_ENABLED="false"
+                info "NAT 面板未提供 UDP 映射，已禁用 Hysteria2"
+                break
+            fi
+            if validate_port "$candidate" "NAT Hysteria2 公网映射"; then
+                HY2_PUBLIC_PORT="$candidate"
+                break
+            fi
+        done
+    fi
 }
 
 confirm_port_selection() {
@@ -472,14 +543,16 @@ show_external_access_requirements() {
     echo -e "${CYAN}${BOLD}── 外部放行提示 ──${NC}"
     case "$access_mode" in
         ipv6-only)
-            echo -e "  检测到 IPv6-only VPS，当前仅生成 Argo 节点链接。"
-            echo -e "  Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。"
-            echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
+            echo -e "  检测到 IPv6-only VPS；仅在配置固定域名 Argo 后生成外部节点链接。"
+            if argo_fixed_enabled; then
+                echo -e "  Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。"
+                echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
+            fi
             echo ""
             return
             ;;
         dual-stack)
-            echo -e "  检测到 IPv4 + IPv6 双栈 VPS，直连节点仅使用 IPv4，Argo 会分别输出 IPv4 / IPv6 接入链接。"
+            echo -e "  检测到 IPv4 + IPv6 双栈 VPS，Reality/Hysteria2 直连节点使用 IPv4。"
             echo -e "  订阅地址通过 Argo HTTPS 域名访问，本机订阅端口不需要外部放行。"
             ;;
         direct)
@@ -511,10 +584,15 @@ show_external_access_requirements() {
     else
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
     fi
-    echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
-    echo -e "  ${DIM}Argo 和订阅网关均仅供本机回环/隧道使用，一般不需要在外部面板放行。${NC}"
-    if [[ "$access_mode" != "direct" && "$access_mode" != "ipv6-only" && "$access_mode" != "dual-stack" ]]; then
-        echo -e "  ${DIM}注意: 当前脚本默认外部端口与本机监听端口相同；如果面板做了不同端口号的 NAT 映射，生成的节点链接和订阅地址需要按外部端口另行适配。${NC}"
+    if argo_fixed_enabled; then
+        echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
+        echo -e "  ${DIM}Argo 和订阅网关均仅供本机回环/隧道使用，一般不需要在外部面板放行。${NC}"
+    fi
+    if nat_mode_enabled; then
+        echo -e "  NAT Reality: ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC}"
+        if is_hy2_enabled; then
+            echo -e "  NAT Hysteria2: ${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
+        fi
     fi
     echo ""
 }
@@ -528,8 +606,10 @@ write_singbox_config() {
     [[ -z "${REALITY_SNI:-}" ]] && missing+="REALITY_SNI "
     [[ -z "${PRIVATE_KEY:-}" ]] && missing+="PRIVATE_KEY "
     [[ -z "${SHORT_ID:-}" ]]    && missing+="SHORT_ID "
-    [[ -z "${WS_PORT:-}" ]]     && missing+="WS_PORT "
-    [[ -z "${WS_PATH:-}" ]]     && missing+="WS_PATH "
+    if argo_fixed_enabled; then
+        [[ -z "${WS_PORT:-}" ]] && missing+="WS_PORT "
+        [[ -z "${WS_PATH:-}" ]] && missing+="WS_PATH "
+    fi
     if is_hy2_enabled; then
         [[ -z "${HY2_PORT:-}" ]]    && missing+="HY2_PORT "
         [[ -z "${HY2_PASSWORD:-}" ]] && missing+="HY2_PASSWORD "
@@ -540,14 +620,36 @@ write_singbox_config() {
         error "配置生成失败: 以下关键变量为空: ${missing}"
     fi
 
-    local json_uuid json_reality_sni json_private_key json_short_id json_ws_path hy2_inbound
+    local json_uuid json_reality_sni json_private_key json_short_id json_ws_path argo_inbound hy2_inbound
     local json_hy2_password json_hy2_sni json_key_path json_cert_path json_hy2_masquerade_url
 
     json_uuid=$(json_string "$UUID")
     json_reality_sni=$(json_string "$REALITY_SNI")
     json_private_key=$(json_string "$PRIVATE_KEY")
     json_short_id=$(json_string "$SHORT_ID")
-    json_ws_path=$(json_string "$WS_PATH")
+    argo_inbound=""
+    if argo_fixed_enabled; then
+        json_ws_path=$(json_string "$WS_PATH")
+        argo_inbound=$(cat << ARGO_EOF
+,
+        {
+            "type": "vless",
+            "tag": "vless-ws-argo",
+            "listen": "127.0.0.1",
+            "listen_port": ${WS_PORT},
+            "users": [
+                {
+                    "uuid": ${json_uuid}
+                }
+            ],
+            "transport": {
+                "type": "ws",
+                "path": ${json_ws_path}
+            }
+        }
+ARGO_EOF
+)
+    fi
     hy2_inbound=""
     if is_hy2_enabled; then
         json_hy2_password=$(json_string "$HY2_PASSWORD")
@@ -618,24 +720,7 @@ HY2_EOF
                     ]
                 }
             }
-        },
-        {
-            "type": "vless",
-            "tag": "vless-ws-argo",
-            "listen": "127.0.0.1",
-            "listen_port": ${WS_PORT},
-            "users": [
-                {
-                    "uuid": ${json_uuid}
-                }
-            ],
-            "transport": {
-                "type": "ws",
-                "path": ${json_ws_path},
-                "max_early_data": 2048,
-                "early_data_header_name": "Sec-WebSocket-Protocol"
-            }
-        }${hy2_inbound}
+        }${argo_inbound}${hy2_inbound}
     ],
     "outbounds": [
         {

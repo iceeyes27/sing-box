@@ -43,9 +43,6 @@ export SBM_TEST_MODE=1
 # shellcheck source=../install.sh
 source "$SCRIPT"
 
-# 部分用例会就地 stub 函数且不恢复，这里保存原始定义供后续用例还原
-ORIG_RESOLVE_ARGO_BEST_CF_DOMAIN_DEF=$(declare -f resolve_argo_best_cf_domain)
-
 test_service_manager_systemd() {
     local tmp result
     tmp=$(mktemp -d)
@@ -205,6 +202,9 @@ EOF
     assert_eq "24630" "$SUBSCRIPTION_PORT" "legacy subscription port migration"
     assert_eq "cf.example.com" "$ARGO_BEST_CF_DOMAIN_IPV4" "legacy Argo IPv4 cache migration"
     assert_eq "" "$PUBLIC_IPV4_OVERRIDE" "legacy public IPv4 override migration"
+    assert_eq "false" "$NAT_MODE" "legacy NAT mode migration"
+    assert_eq "443" "$REALITY_PUBLIC_PORT" "legacy Reality public port migration"
+    assert_eq "8443" "$HY2_PUBLIC_PORT" "legacy HY2 public port migration"
     rm -rf "$tmp"
 }
 
@@ -256,12 +256,16 @@ EOF
     HY2_SNI="bing.com"
     HY2_MASQUERADE_URL="https://www.bing.com/a b"
     PUBLIC_IPV4_OVERRIDE="198.51.100.99"
+    NAT_MODE="true"
+    REALITY_PUBLIC_PORT="30443"
+    HY2_PUBLIC_PORT="30444"
     save_params
 
     UUID=""; SHORT_ID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; REALITY_PORT=""; REALITY_SNI=""
     WS_PORT=""; WS_PATH=""; NODE_NAME=""; SUB_TOKEN=""; SUBSCRIPTION_PORT=""
     ARGO_DOMAIN=""; ARGO_TOKEN=""; ARGO_BEST_CF_DOMAIN=""; ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""; LINK_IPV4_SELECTION=""; PUBLIC_IPV4_OVERRIDE=""
+    NAT_MODE=""; REALITY_PUBLIC_PORT=""; HY2_PUBLIC_PORT=""
     HY2_PORT=""; HY2_PASSWORD=""; HY2_SNI=""; HY2_MASQUERADE_URL=""
 
     load_params
@@ -272,6 +276,9 @@ EOF
     assert_eq 'sub token $value' "$SUB_TOKEN" "params token round trip"
     assert_eq 'argo token `literal`' "$ARGO_TOKEN" "params argo token round trip"
     assert_eq '198.51.100.99' "$PUBLIC_IPV4_OVERRIDE" "params public IPv4 override round trip"
+    assert_eq 'true' "$NAT_MODE" "params NAT mode round trip"
+    assert_eq '30443' "$REALITY_PUBLIC_PORT" "params Reality public port round trip"
+    assert_eq '30444' "$HY2_PUBLIC_PORT" "params HY2 public port round trip"
     assert_eq 'hy2 pass "quoted"' "$HY2_PASSWORD" "params HY2 password round trip"
 
     rm -rf "$tmp"
@@ -284,6 +291,52 @@ test_ipv4_public_link_validation() {
     if is_valid_public_ipv4_for_link "100.64.1.1"; then fail "CGNAT IPv4 accepted"; fi
     if is_valid_public_ipv4_for_link "127.0.0.1"; then fail "loopback IPv4 accepted"; fi
     if is_valid_public_ipv4_for_link "224.0.0.1"; then fail "multicast IPv4 accepted"; fi
+}
+
+test_external_access_detection_identifies_nat() {
+    local refresh_public_ip_stack_def has_public_ip_on_interface_def result
+    refresh_public_ip_stack_def=$(declare -f refresh_public_ip_stack)
+    has_public_ip_on_interface_def=$(declare -f has_public_ip_on_interface)
+
+    refresh_public_ip_stack() {
+        PUBLIC_IP="198.51.100.10"
+        PUBLIC_IPV4="198.51.100.10"
+        IP_STACK_MODE="ipv4-only"
+        return 0
+    }
+    has_public_ip_on_interface() { return 1; }
+
+    result=$(detect_external_access_mode)
+    assert_eq "nat" "$result" "NAT access detection"
+
+    unset -f refresh_public_ip_stack has_public_ip_on_interface
+    eval "$refresh_public_ip_stack_def"
+    eval "$has_public_ip_on_interface_def"
+}
+
+test_nat_links_use_public_mapped_ports() {
+    UUID="uuid-1"
+    NODE_NAME="nat-node"
+    REALITY_PORT="443"
+    REALITY_PUBLIC_PORT="30443"
+    REALITY_SNI="www.microsoft.com"
+    PUBLIC_KEY="public"
+    SHORT_ID="abcd1234"
+    HY2_PORT="443"
+    HY2_PUBLIC_PORT="30444"
+    HY2_ENABLED="false"
+    NAT_MODE="true"
+    GENERATED_REALITY_LINKS=""
+    GENERATED_HY2_LINKS=""
+    GENERATED_SUBSCRIPTION_RAW=""
+
+    build_direct_share_links_for_ip "198.51.100.10" ""
+    assert_contains "$GENERATED_REALITY_LINKS" "@198.51.100.10:30443?" "NAT Reality public port"
+    assert_eq "443" "$REALITY_PORT" "NAT Reality local port unchanged"
+
+    NAT_MODE="false"
+    REALITY_PUBLIC_PORT="443"
+    HY2_PUBLIC_PORT="443"
 }
 
 test_ipv4_override_takes_priority() {
@@ -355,9 +408,6 @@ test_ip_detection_failure_keeps_argo_link_generation() {
     refresh_public_ip_stack() {
         return 1
     }
-    resolve_argo_best_cf_domain() {
-        ARGO_BEST_CF_DOMAIN="cf.example.com"
-    }
     urlencode() {
         echo "$1"
     }
@@ -365,7 +415,13 @@ test_ip_detection_failure_keeps_argo_link_generation() {
     build_share_links >/dev/null
     assert_eq "unknown" "$IP_STACK_MODE" "IP detection failure stack mode"
     assert_not_contains "$GENERATED_REALITY_LINKS" "vless://" "no direct links after IP failure"
-    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@cf.example.com:443" "Argo link after IP failure"
+    assert_eq "" "$GENERATED_ARGO_LINKS" "Argo disabled without fixed token"
+
+    ARGO_TOKEN="fixed-token"
+    build_share_links >/dev/null
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@argo.example.com:443" "fixed Argo link after IP failure"
+    assert_not_contains "$GENERATED_ARGO_LINKS" "cf.example.com" "fixed Argo ignores third-party CF domain"
+    assert_not_contains "$GENERATED_ARGO_LINKS" "ed%3D2048" "fixed Argo omits early data"
 }
 
 test_ipv6_only_links_are_argo_only() {
@@ -380,6 +436,7 @@ test_ipv6_only_links_are_argo_only() {
     HY2_PASSWORD="hy2"
     HY2_SNI="bing.com"
     ARGO_DOMAIN="argo.example.com"
+    ARGO_TOKEN="fixed-token"
     ARGO_BEST_CF_DOMAIN="cf.example.com"
 
     refresh_public_ip_stack() {
@@ -388,15 +445,12 @@ test_ipv6_only_links_are_argo_only() {
         PUBLIC_IPV4=""
         PUBLIC_IPV6="2001:db8::1"
     }
-    resolve_argo_best_cf_domain() {
-        ARGO_BEST_CF_DOMAIN="cf.example.com"
-    }
     urlencode() {
         echo "$1"
     }
 
     build_share_links >/dev/null
-    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@cf.example.com:443" "IPv6-only Argo link"
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@argo.example.com:443" "IPv6-only fixed Argo link"
     assert_not_contains "$GENERATED_REALITY_LINKS" "vless://" "IPv6-only Reality suppression"
     assert_not_contains "$GENERATED_HY2_LINKS" "hysteria2://" "IPv6-only Hysteria2 suppression"
 }
@@ -508,7 +562,8 @@ test_runtime_param_restore_is_complete() {
         "443" "www.microsoft.com" "18080" "/sid-old" \
         "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
-        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all"
+        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
+        "198.51.100.20" "true" "30443" "30444"
 
     UUID="uuid-new"
     SHORT_ID="sid-new"
@@ -530,13 +585,18 @@ test_runtime_param_restore_is_complete() {
     ARGO_BEST_CF_DOMAIN_IPV4="cf4-new.example.com"
     ARGO_BEST_CF_DOMAIN_IPV6="cf6-new.example.com"
     LINK_IPV4_SELECTION="203.0.113.20"
+    PUBLIC_IPV4_OVERRIDE="203.0.113.30"
+    NAT_MODE="false"
+    REALITY_PUBLIC_PORT="444"
+    HY2_PUBLIC_PORT="8444"
 
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
         "443" "www.microsoft.com" "18080" "/sid-old" \
         "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
-        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all"
+        "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
+        "198.51.100.20" "true" "30443" "30444"
 
     assert_eq "uuid-old" "$UUID" "restore UUID"
     assert_eq "sid-old" "$SHORT_ID" "restore Short ID"
@@ -558,6 +618,10 @@ test_runtime_param_restore_is_complete() {
     assert_eq "cf4-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV4" "restore Argo IPv4 cache"
     assert_eq "cf6-old.example.com" "$ARGO_BEST_CF_DOMAIN_IPV6" "restore Argo IPv6 cache"
     assert_eq "all" "$LINK_IPV4_SELECTION" "restore IPv4 link selection"
+    assert_eq "198.51.100.20" "$PUBLIC_IPV4_OVERRIDE" "restore public IPv4 override"
+    assert_eq "true" "$NAT_MODE" "restore NAT mode"
+    assert_eq "30443" "$REALITY_PUBLIC_PORT" "restore Reality public port"
+    assert_eq "30444" "$HY2_PUBLIC_PORT" "restore HY2 public port"
 }
 
 test_hysteria2_config_uses_masquerade_proxy() {
@@ -584,6 +648,8 @@ test_hysteria2_config_uses_masquerade_proxy() {
     HY2_SNI="bing.com"
     HY2_MASQUERADE_URL="https://www.bing.com"
     HY2_ENABLED="true"
+    ARGO_TOKEN=""
+    ARGO_DOMAIN=""
 
     write_singbox_config >/dev/null
     unset -f chown sing-box
@@ -597,8 +663,8 @@ test_hysteria2_config_uses_masquerade_proxy() {
     assert_contains "$config" '"rewrite_host": true' "HY2 masquerade rewrite host"
 }
 
-test_hysteria2_disabled_omits_inbound() {
-    local tmp config chown_def
+test_optional_inbounds_follow_feature_state() {
+    local tmp config config_with_argo chown_def
     tmp=$(mktemp -d)
 
     chown_def=$(declare -f chown 2>/dev/null || true)
@@ -617,16 +683,25 @@ test_hysteria2_disabled_omits_inbound() {
     WS_PORT="18080"
     WS_PATH="/abcd1234"
     HY2_ENABLED="false"
+    ARGO_TOKEN=""
+    ARGO_DOMAIN=""
 
     write_singbox_config >/dev/null
+    config=$(<"$CONFIG_FILE")
+
+    ARGO_TOKEN="fixed-token"
+    ARGO_DOMAIN="fixed.example.com"
+    write_singbox_config >/dev/null
+    config_with_argo=$(<"$CONFIG_FILE")
     unset -f chown sing-box
     [[ -n "$chown_def" ]] && eval "$chown_def"
-    config=$(<"$CONFIG_FILE")
     rm -rf "$tmp"
 
     assert_not_contains "$config" '"type": "hysteria2"' "HY2 disabled omits inbound"
     assert_contains "$config" '"tag": "vless-reality"' "Reality remains enabled"
-    assert_contains "$config" '"tag": "vless-ws-argo"' "Argo WS remains enabled"
+    assert_not_contains "$config" '"tag": "vless-ws-argo"' "disabled Argo omits WS inbound"
+    assert_contains "$config_with_argo" '"tag": "vless-ws-argo"' "fixed Argo includes WS inbound"
+    assert_not_contains "$config_with_argo" '"max_early_data"' "fixed Argo omits early data"
 }
 
 test_relay_script_generation_uses_argo_upstream() {
@@ -1048,16 +1123,13 @@ test_manager_command_rejects_empty_source() {
     rm -rf "$tmp"
 }
 
-test_refresh_argo_runtime_renews_temporary_domain() {
+test_refresh_argo_runtime_disables_incomplete_config() {
     local tmp
-    local write_argo_service_def service_restart_def service_logs_def sleep_def
-    local quick_alive_def
+    local service_stop_def service_disable_def save_params_def
     tmp=$(mktemp -d)
-    write_argo_service_def=$(declare -f write_argo_service || true)
-    service_restart_def=$(declare -f service_restart || true)
-    service_logs_def=$(declare -f service_logs || true)
-    sleep_def=$(declare -f sleep || true)
-    quick_alive_def=$(declare -f argo_quick_domain_alive || true)
+    service_stop_def=$(declare -f service_stop || true)
+    service_disable_def=$(declare -f service_disable || true)
+    save_params_def=$(declare -f save_params || true)
 
     PARAMS_FILE="${tmp}/params"
     CONFIG_DIR="$tmp"
@@ -1072,8 +1144,8 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     NODE_NAME="node"
     SUB_TOKEN="sub-token"
     SUBSCRIPTION_PORT="24630"
-    ARGO_TOKEN=""
-    ARGO_DOMAIN="old.trycloudflare.com"
+    ARGO_TOKEN="incomplete-token"
+    ARGO_DOMAIN=""
     ARGO_BEST_CF_DOMAIN="cf-old.example.com"
     ARGO_BEST_CF_DOMAIN_IPV4="cf4-old.example.com"
     ARGO_BEST_CF_DOMAIN_IPV6="cf6-old.example.com"
@@ -1081,33 +1153,19 @@ test_refresh_argo_runtime_renews_temporary_domain() {
     HY2_PASSWORD="hy2"
     HY2_SNI="bing.com"
 
-    write_argo_service() {
-        :
-    }
-    service_restart() {
-        [[ "$1" == "argo-tunnel" ]]
-    }
-    service_logs() {
-        echo "https://new.trycloudflare.com"
-    }
-    sleep() {
-        :
-    }
-    argo_quick_domain_alive() {
-        [[ "$1" == "new.trycloudflare.com" ]]
-    }
+    service_stop() { :; }
+    service_disable() { :; }
+    save_params() { printf 'saved\n' > "${tmp}/saved"; }
 
     refresh_argo_runtime >/dev/null
-    assert_eq "new.trycloudflare.com" "$ARGO_DOMAIN" "temporary Argo domain renew"
-    assert_eq "" "$ARGO_BEST_CF_DOMAIN" "temporary Argo cache clear"
-    assert_contains "$(<"$PARAMS_FILE")" 'ARGO_DOMAIN=new.trycloudflare.com' "temporary Argo params save"
+    assert_eq "" "$ARGO_TOKEN" "incomplete Argo token cleared"
+    assert_eq "" "$ARGO_DOMAIN" "incomplete Argo domain cleared"
+    [[ -f "${tmp}/saved" ]] || fail "disabled Argo state was not saved"
 
-    unset -f write_argo_service service_restart service_logs sleep argo_quick_domain_alive
-    eval "$write_argo_service_def"
-    eval "$service_restart_def"
-    eval "$service_logs_def"
-    eval "$sleep_def"
-    eval "$quick_alive_def"
+    unset -f service_stop service_disable save_params
+    eval "$service_stop_def"
+    eval "$service_disable_def"
+    eval "$save_params_def"
     rm -rf "$tmp"
 }
 
@@ -1130,7 +1188,8 @@ test_subscription_gateway_uses_local_https_origin() {
     SUB_TOKEN="sub-token"
     SUBSCRIPTION_PORT="24630"
     WS_PORT="18080"
-    ARGO_TOKEN=""
+    ARGO_TOKEN="fixed-token"
+    ARGO_DOMAIN="sub.example.com"
 
     service_manager() {
         echo "systemd"
@@ -1148,9 +1207,8 @@ test_subscription_gateway_uses_local_https_origin() {
     server_body=$(<"$SUBSCRIPTION_SERVER")
     assert_contains "$service_body" "--listen 127.0.0.1" "subscription local listen"
     assert_contains "$service_body" "--upstream-port 18080" "subscription WS upstream"
-    assert_contains "$argo_body" "--url http://127.0.0.1:24630" "Argo HTTPS origin"
-    assert_not_contains "$argo_body" "--edge-ip-version" "Argo quick tunnel keeps stable edge selection"
-    assert_not_contains "$argo_body" "--retries" "Argo quick tunnel keeps legacy retry behavior"
+    assert_contains "$argo_body" "tunnel --protocol http2 --no-autoupdate run" "fixed Argo tunnel command"
+    assert_not_contains "$argo_body" "--url" "fixed Argo does not create quick tunnel"
     assert_contains "$server_body" "def proxy_to_upstream" "subscription gateway proxy"
 
     unset -f service_manager service_daemon_reload
@@ -1164,6 +1222,7 @@ test_subscription_url_prefers_https_argo() {
 
     GENERATED_SUBSCRIPTION_RAW="vless://uuid@example.com:443"
     ARGO_DOMAIN="sub.example.com"
+    ARGO_TOKEN="fixed-token"
     SUB_TOKEN="sub-token"
     SUBSCRIPTION_PORT="24630"
     PUBLIC_IP="198.51.100.10"
@@ -1173,6 +1232,39 @@ test_subscription_url_prefers_https_argo() {
     assert_contains "$output" "https://sub.example.com/sub/sub-token" "HTTPS subscription URL"
     assert_contains "$output" "http://127.0.0.1:24630/sub/sub-token" "local debug subscription URL"
     assert_not_contains "$output" "http://198.51.100.10:24630" "public HTTP subscription URL"
+}
+
+test_fixed_argo_link_requires_token_and_uses_own_domain() {
+    UUID="uuid-1"
+    NODE_NAME="node"
+    WS_PATH="/stable-path"
+    ARGO_DOMAIN="fixed.example.com"
+    ARGO_TOKEN=""
+    GENERATED_ARGO_LINKS=""
+    GENERATED_SUBSCRIPTION_RAW=""
+
+    build_argo_link_for_domain || true
+    assert_eq "" "$GENERATED_ARGO_LINKS" "Argo link disabled without token"
+
+    ARGO_TOKEN="fixed-token"
+    build_argo_link_for_domain || true
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@fixed.example.com:443" "fixed Argo address"
+    assert_contains "$GENERATED_ARGO_LINKS" "sni=fixed.example.com" "fixed Argo SNI"
+    assert_not_contains "$GENERATED_ARGO_LINKS" "ed%3D2048" "fixed Argo early data disabled"
+
+    ARGO_DOMAIN="https://fixed.example.com/path"
+    GENERATED_ARGO_LINKS=""
+    build_argo_link_for_domain || true
+    assert_eq "" "$GENERATED_ARGO_LINKS" "invalid Argo hostname rejected"
+}
+
+test_default_reality_sni_is_fixed() {
+    local script_body
+    script_body=$(<"$SCRIPT")
+    assert_eq "www.microsoft.com" "$DEFAULT_REALITY_SNI" "default Reality SNI"
+    assert_contains "$script_body" 'REALITY_SNI="${REALITY_SNI:-${DEFAULT_REALITY_SNI}}"' "fixed Reality SNI initialization"
+    assert_not_contains "$script_body" "trycloudflare" "quick tunnel implementation removed"
+    assert_not_contains "$script_body" "BESTCF_DOMAINS_URL" "third-party CF domain source removed"
 }
 
 test_subscription_service_does_not_open_firewall() {
@@ -1336,7 +1428,7 @@ test_subscription_page_is_final_section() {
     PUBLIC_KEY="public"
     SHORT_ID="abcd1234"
     SUBSCRIPTION_PORT="24630"
-    ARGO_TOKEN=""
+    ARGO_TOKEN="fixed-token"
     ARGO_DOMAIN="sub.example.com"
     WS_PATH="/abcd1234"
     HY2_PORT="443"
@@ -1374,233 +1466,6 @@ test_subscription_page_is_final_section() {
     rm -rf "$tmp"
 }
 
-test_cf_edge_code_dead_classification() {
-    local code
-    for code in "" 000 520 525 529 530 533 539; do
-        cf_edge_code_dead "$code" || fail "cf_edge_code_dead should treat '${code}' as dead"
-    done
-    for code in 200 302 400 404 502 503 540 519; do
-        cf_edge_code_dead "$code" && fail "cf_edge_code_dead should treat '${code}' as alive"
-    done
-    return 0
-}
-
-test_argo_cf_domain_verified_uses_connect_to() {
-    local tmp
-    tmp=$(mktemp -d)
-    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
-printf "%s\n" "$*" > "'"${tmp}"'/curl-args"
-printf "404"'
-
-    ARGO_DOMAIN="host.trycloudflare.com"
-    PATH="${tmp}:$PATH" argo_cf_domain_verified "cf.example.com" ipv4 || \
-        fail "argo_cf_domain_verified should pass on origin response"
-    assert_contains "$(<"${tmp}/curl-args")" \
-        "--connect-to host.trycloudflare.com:443:cf.example.com:443" \
-        "strict probe connect-to mapping"
-    assert_contains "$(<"${tmp}/curl-args")" "https://host.trycloudflare.com/" "strict probe keeps Argo host"
-
-    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
-printf "530"'
-    PATH="${tmp}:$PATH" argo_cf_domain_verified "cf.example.com" ipv4 && \
-        fail "argo_cf_domain_verified should reject 530"
-
-    ARGO_DOMAIN=""
-    rm -rf "$tmp"
-}
-
-test_select_cf_domain_prefers_verified() {
-    local tmp result cf_domains_backup=("${CF_DOMAINS[@]}")
-    tmp=$(mktemp -d)
-    # good.example.com 严格验证通过(404)，其余域名仅基础可达
-    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
-args="$*"
-if [[ "$args" == *"--connect-to"* ]]; then
-    if [[ "$args" == *"good.example.com"* ]]; then
-        printf "404"
-        exit 0
-    fi
-    printf "000"
-    exit 28
-fi
-exit 0'
-
-    CF_DOMAINS=("bad.example.com" "good.example.com" "worse.example.com")
-    ARGO_DOMAIN="host.trycloudflare.com"
-    result=$(PATH="${tmp}:$PATH" select_random_cf_domain_by_family ipv4 2>/dev/null)
-    assert_eq "good.example.com" "$result" "verified CF domain preferred"
-
-    CF_DOMAINS=("${cf_domains_backup[@]}")
-    ARGO_DOMAIN=""
-    rm -rf "$tmp"
-}
-
-test_select_cf_domain_falls_back_to_reachable() {
-    local tmp result cf_domains_backup=("${CF_DOMAINS[@]}")
-    tmp=$(mktemp -d)
-    # 所有严格验证均返回 530(如 Argo 域名瞬时陈旧)，但基础可达:
-    # 域名不得被排除，更不得回退到 Argo 域名
-    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
-if [[ "$*" == *"--connect-to"* ]]; then
-    printf "530"
-    exit 0
-fi
-exit 0'
-
-    CF_DOMAINS=("cf-a.example.com" "cf-b.example.com")
-    ARGO_DOMAIN="host.trycloudflare.com"
-    result=$(PATH="${tmp}:$PATH" select_random_cf_domain_by_family ipv4 2>/dev/null)
-    assert_contains "cf-a.example.com cf-b.example.com" "$result" "reachable tier fallback stays in CF list"
-    assert_not_contains "$result" "trycloudflare" "reachable tier fallback never uses Argo domain"
-
-    CF_DOMAINS=("${cf_domains_backup[@]}")
-    ARGO_DOMAIN=""
-    rm -rf "$tmp"
-}
-
-test_resolve_argo_best_cf_domain_never_falls_back_to_argo_domain() {
-    local tmp cf_domains_backup=("${CF_DOMAINS[@]}")
-    # 还原被前序用例 stub 掉的真实实现
-    eval "$ORIG_RESOLVE_ARGO_BEST_CF_DOMAIN_DEF"
-    tmp=$(mktemp -d)
-    # 所有探测彻底失败(VPS 出口连不上任何优选线路)
-    make_cmd "${tmp}/curl" '#!/usr/bin/env bash
-exit 6'
-
-    PARAMS_FILE="${tmp}/params"
-    CONFIG_DIR="$tmp"
-    CF_DOMAINS=("cf-default.example.com" "cf-alt.example.com")
-    ARGO_DOMAIN="host.trycloudflare.com"
-    ARGO_BEST_CF_DOMAIN=""
-    IP_STACK_MODE="dual-stack"
-
-    PATH="${tmp}:$PATH" resolve_argo_best_cf_domain >/dev/null 2>&1 || \
-        fail "resolve_argo_best_cf_domain should not fail"
-    assert_eq "cf-default.example.com" "$ARGO_BEST_CF_DOMAIN" "probe-all-fail falls back to first CF domain"
-
-    # 已有缓存域名时保留缓存，同样不得回退到 Argo 域名
-    ARGO_BEST_CF_DOMAIN="cf-cached.example.com"
-    PATH="${tmp}:$PATH" resolve_argo_best_cf_domain >/dev/null 2>&1 || \
-        fail "resolve_argo_best_cf_domain should not fail with cache"
-    assert_eq "cf-cached.example.com" "$ARGO_BEST_CF_DOMAIN" "probe-all-fail keeps cached CF domain"
-
-    CF_DOMAINS=("${cf_domains_backup[@]}")
-    ARGO_DOMAIN=""
-    ARGO_BEST_CF_DOMAIN=""
-    IP_STACK_MODE=""
-    rm -rf "$tmp"
-}
-
-test_fetch_argo_domain_skips_stale_log_domain() {
-    local tmp
-    local service_logs_def sleep_def quick_alive_def clear_cache_def
-    tmp=$(mktemp -d)
-    service_logs_def=$(declare -f service_logs)
-    sleep_def=$(declare -f sleep || true)
-    quick_alive_def=$(declare -f argo_quick_domain_alive)
-    clear_cache_def=$(declare -f clear_argo_best_cf_cache)
-
-    # 前两次轮询日志里只有重启前遗留的旧域名(已死)，第三次起出现新域名
-    : > "${tmp}/calls"
-    service_logs() {
-        echo x >> "${tmp}/calls"
-        if [[ $(wc -l < "${tmp}/calls") -lt 3 ]]; then
-            echo "https://stale.trycloudflare.com"
-        else
-            echo "https://stale.trycloudflare.com"
-            echo "https://fresh.trycloudflare.com"
-        fi
-    }
-    sleep() {
-        :
-    }
-    argo_quick_domain_alive() {
-        [[ "$1" == "fresh.trycloudflare.com" ]]
-    }
-    clear_argo_best_cf_cache() {
-        :
-    }
-
-    ARGO_TOKEN=""
-    ARGO_DOMAIN="stale.trycloudflare.com"
-    fetch_argo_domain >/dev/null 2>&1 || fail "fetch_argo_domain should succeed"
-    assert_eq "fresh.trycloudflare.com" "$ARGO_DOMAIN" "stale log domain rejected, fresh domain accepted"
-
-    unset -f service_logs sleep argo_quick_domain_alive clear_argo_best_cf_cache
-    eval "$service_logs_def"
-    eval "$sleep_def"
-    eval "$quick_alive_def"
-    eval "$clear_cache_def"
-    ARGO_DOMAIN=""
-    rm -rf "$tmp"
-}
-
-test_refresh_argo_domain_keeps_alive_cached_domain() {
-    local service_is_active_def quick_alive_def fetch_def
-    service_is_active_def=$(declare -f service_is_active)
-    quick_alive_def=$(declare -f argo_quick_domain_alive)
-    fetch_def=$(declare -f fetch_argo_domain)
-
-    service_is_active() {
-        return 0
-    }
-    argo_quick_domain_alive() {
-        return 0
-    }
-    fetch_argo_domain() {
-        fail "fetch_argo_domain should not run while cached domain is alive"
-    }
-
-    ARGO_TOKEN=""
-    ARGO_DOMAIN="alive.trycloudflare.com"
-    refresh_argo_domain_if_needed >/dev/null 2>&1 || fail "refresh_argo_domain_if_needed must return 0"
-    assert_eq "alive.trycloudflare.com" "$ARGO_DOMAIN" "alive cached domain kept"
-
-    unset -f service_is_active argo_quick_domain_alive fetch_argo_domain
-    eval "$service_is_active_def"
-    eval "$quick_alive_def"
-    eval "$fetch_def"
-    ARGO_DOMAIN=""
-}
-
-test_refresh_argo_domain_refetches_dead_cached_domain() {
-    local tmp
-    local service_is_active_def quick_alive_def fetch_def save_params_def
-    tmp=$(mktemp -d)
-    service_is_active_def=$(declare -f service_is_active)
-    quick_alive_def=$(declare -f argo_quick_domain_alive)
-    fetch_def=$(declare -f fetch_argo_domain)
-    save_params_def=$(declare -f save_params)
-
-    service_is_active() {
-        return 0
-    }
-    argo_quick_domain_alive() {
-        return 1
-    }
-    fetch_argo_domain() {
-        ARGO_DOMAIN="renewed.trycloudflare.com"
-        return 0
-    }
-    save_params() {
-        echo saved > "${tmp}/saved"
-    }
-
-    ARGO_TOKEN=""
-    ARGO_DOMAIN="dead.trycloudflare.com"
-    refresh_argo_domain_if_needed >/dev/null 2>&1 || fail "refresh_argo_domain_if_needed must return 0"
-    assert_eq "renewed.trycloudflare.com" "$ARGO_DOMAIN" "dead cached domain refetched"
-    [[ -f "${tmp}/saved" ]] || fail "renewed Argo domain should be persisted"
-
-    unset -f service_is_active argo_quick_domain_alive fetch_argo_domain save_params
-    eval "$service_is_active_def"
-    eval "$quick_alive_def"
-    eval "$fetch_def"
-    eval "$save_params_def"
-    ARGO_DOMAIN=""
-    rm -rf "$tmp"
-}
-
 test_service_manager_systemd
 test_service_manager_openrc
 test_singbox_systemd_override_enables_restart
@@ -1609,6 +1474,8 @@ test_package_manager_alpine
 test_missing_openssl_does_not_block_core_install
 test_generate_tls_cert_without_openssl_disables_hy2
 test_legacy_params_migration
+test_external_access_detection_identifies_nat
+test_nat_links_use_public_mapped_ports
 test_ipv6_only_links_are_argo_only
 test_multiple_ipv4_direct_links_follow_selection
 test_single_ipv4_falls_back_without_candidate_list
@@ -1616,7 +1483,7 @@ test_rtc_epoch_uses_timedatectl_without_hwclock
 test_busybox_ntpd_can_step_system_time
 test_runtime_param_restore_is_complete
 test_hysteria2_config_uses_masquerade_proxy
-test_hysteria2_disabled_omits_inbound
+test_optional_inbounds_follow_feature_state
 test_relay_script_generation_uses_argo_upstream
 test_relay_script_requires_argo_upstream
 test_parse_vless_ws_argo_link_extracts_required_fields
@@ -1638,21 +1505,15 @@ test_alpine_cloudflared_prefers_apk
 test_alpine_cloudflared_falls_back_to_binary
 test_reality_sni_probe_failure_uses_default
 test_manager_command_rejects_empty_source
-test_refresh_argo_runtime_renews_temporary_domain
+test_refresh_argo_runtime_disables_incomplete_config
 test_subscription_gateway_uses_local_https_origin
 test_subscription_url_prefers_https_argo
+test_fixed_argo_link_requires_token_and_uses_own_domain
+test_default_reality_sni_is_fixed
 test_subscription_service_does_not_open_firewall
 test_port_validation_can_skip_firewall_changes
 test_show_relay_troubleshooting_reports_core_hints
 test_show_relay_success_self_check_reports_core_passes
 test_subscription_page_is_final_section
-test_cf_edge_code_dead_classification
-test_argo_cf_domain_verified_uses_connect_to
-test_select_cf_domain_prefers_verified
-test_select_cf_domain_falls_back_to_reachable
-test_resolve_argo_best_cf_domain_never_falls_back_to_argo_domain
-test_fetch_argo_domain_skips_stale_log_domain
-test_refresh_argo_domain_keeps_alive_cached_domain
-test_refresh_argo_domain_refetches_dead_cached_domain
 
 echo "OK: regression tests passed"
