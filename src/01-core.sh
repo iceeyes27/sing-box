@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.10"
+SCRIPT_VERSION="2.7.11"
 DEFAULT_REALITY_SNI="www.microsoft.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"

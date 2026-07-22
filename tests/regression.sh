@@ -1467,29 +1467,37 @@ test_subscription_page_is_final_section() {
     rm -rf "$tmp"
 }
 
-test_reality_sni_reoptimization_skips_xray_managed_server() {
+test_xray_reality_sni_config_update() {
     local tmp
-    local load_params_def service_exists_def select_reality_sni_def
+    local xray_def
 
     tmp=$(mktemp -d)
-    : > "${tmp}/config.json"
+    cat > "${tmp}/config.json" <<'EOF'
+{
+  "inbounds": [
+    {
+      "protocol": "vless",
+      "streamSettings": {
+        "security": "reality",
+        "realitySettings": {
+          "target": "old.example.com:443",
+          "serverNames": ["old.example.com"]
+        }
+      }
+    }
+  ]
+}
+EOF
     XRAY_CONFIG_FILE="${tmp}/config.json"
-    load_params_def=$(declare -f load_params)
-    service_exists_def=$(declare -f service_exists)
-    select_reality_sni_def=$(declare -f select_reality_sni)
+    xray_def=$(declare -f xray 2>/dev/null || true)
+    xray() { return 0; }
 
-    load_params() { return 0; }
-    service_exists() { [[ "$1" == "xray" ]]; }
-    select_reality_sni() { fail "Xray-managed Reality must not run sing-box SNI selection"; }
+    write_xray_reality_sni "new.example.com" || fail "Xray Reality SNI update"
+    assert_contains "$(<"${tmp}/config.json")" '"target": "new.example.com:443"' "Xray Reality target update"
+    assert_contains "$(<"${tmp}/config.json")" '"new.example.com"' "Xray Reality serverNames update"
 
-    if do_reoptimize_reality_sni >/dev/null; then
-        fail "Xray-managed Reality SNI rewrite should be rejected"
-    fi
-
-    unset -f load_params service_exists select_reality_sni
-    eval "$load_params_def"
-    eval "$service_exists_def"
-    eval "$select_reality_sni_def"
+    unset -f xray
+    [[ -n "$xray_def" ]] && eval "$xray_def"
     unset XRAY_CONFIG_FILE
     rm -rf "$tmp"
 }
@@ -1543,6 +1551,6 @@ test_port_validation_can_skip_firewall_changes
 test_show_relay_troubleshooting_reports_core_hints
 test_show_relay_success_self_check_reports_core_passes
 test_subscription_page_is_final_section
-test_reality_sni_reoptimization_skips_xray_managed_server
+test_xray_reality_sni_config_update
 
 echo "OK: regression tests passed"

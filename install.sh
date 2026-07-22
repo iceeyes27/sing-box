@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.10"
+SCRIPT_VERSION="2.7.11"
 DEFAULT_REALITY_SNI="www.microsoft.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
@@ -4896,6 +4896,57 @@ do_restart() {
     press_enter
 }
 
+# ─── Xray Reality 配置更新 ───────────────────────────────────
+write_xray_reality_sni() {
+    local sni="$1"
+    local config="${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
+    local tmp="${config}.new"
+
+    is_valid_hostname "$sni" || return 1
+    [[ -f "$config" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    command -v xray >/dev/null 2>&1 || return 1
+
+    if ! python3 - "$config" "$tmp" "$sni" <<'PY'
+import json
+import os
+import sys
+
+source, target, sni = sys.argv[1:]
+with open(source, "r", encoding="utf-8") as handle:
+    config = json.load(handle)
+
+updated = False
+for inbound in config.get("inbounds", []):
+    stream = inbound.get("streamSettings", {})
+    reality = stream.get("realitySettings")
+    if inbound.get("protocol") != "vless" or stream.get("security") != "reality" or not isinstance(reality, dict):
+        continue
+    reality["target"] = f"{sni}:443"
+    reality["serverNames"] = [sni]
+    updated = True
+
+if not updated:
+    raise SystemExit("Xray Reality inbound not found")
+
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+os.chmod(target, os.stat(source).st_mode & 0o777)
+PY
+    then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if ! xray run -test -format json -config "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv -f "$tmp" "$config"
+}
+
 # ─── 重新优选 Reality 伪装域名 ───────────────────────────────
 do_reoptimize_reality_sni() {
     if ! load_params; then
@@ -4903,19 +4954,19 @@ do_reoptimize_reality_sni() {
         return 1
     fi
 
-    if xray_managed_reality; then
-        warn "当前 Reality 由 Xray 管理，已禁止 sing-box 重写 SNI，避免与 Hysteria2 共用端口冲突"
-        return 1
-    fi
-
     local old_sni="${REALITY_SNI:-}"
     local prev_sni="${REALITY_SNI_PREV:-}"
+    local reality_service="sing-box"
+    xray_managed_reality && reality_service="xray"
     info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选（自动避开当前与上一次域名）..."
 
     # 清空后触发实测筛选；通过 REALITY_SNI_EXCLUDE 排除当前与上一次域名，
     # 确保重新优选的结果一定不同，否则就失去了重新优选的意义。
     REALITY_SNI=""
     REALITY_SNI_EXCLUDE="${old_sni} ${prev_sni}"
+    if [[ "$reality_service" == "xray" ]]; then
+        REALITY_SNI_EXCLUDE+=" www.microsoft.com www.apple.com gateway.icloud.com itunes.apple.com"
+    fi
     select_reality_sni
     REALITY_SNI_EXCLUDE=""
 
@@ -4934,31 +4985,48 @@ do_reoptimize_reality_sni() {
     # 记录上一次域名，下次重新优选时一并避开，避免 A→B→A 往返
     REALITY_SNI_PREV="$old_sni"
 
-    info "新伪装域名: ${REALITY_SNI}，正在写入配置并重启 sing-box..."
-    generate_tls_cert
-    write_singbox_config
-    write_singbox_service
+    info "新伪装域名: ${REALITY_SNI}，正在写入配置并重启 ${reality_service}..."
+    if [[ "$reality_service" == "xray" ]]; then
+        if ! write_xray_reality_sni "$REALITY_SNI"; then
+            warn "Xray Reality 配置更新失败，已保留原伪装域名: ${old_sni}"
+            REALITY_SNI="$old_sni"
+            REALITY_SNI_PREV="$prev_sni"
+            return 1
+        fi
+    else
+        generate_tls_cert
+        write_singbox_config
+        write_singbox_service
+    fi
     save_params
     ensure_time_sync || true
 
-    if ! service_restart sing-box; then
-        warn "sing-box 重启失败，正在回滚到原伪装域名: ${old_sni}"
+    if ! service_restart "$reality_service"; then
+        warn "${reality_service} 重启失败，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
         REALITY_SNI_PREV="$prev_sni"
-        write_singbox_config
+        if [[ "$reality_service" == "xray" ]]; then
+            write_xray_reality_sni "$old_sni" 2>/dev/null || true
+        else
+            write_singbox_config
+        fi
         save_params
-        service_restart sing-box 2>/dev/null || true
+        service_restart "$reality_service" 2>/dev/null || true
         return 1
     fi
 
     sleep 2
-    if ! service_is_active sing-box; then
-        warn "sing-box 未成功启动，正在回滚到原伪装域名: ${old_sni}"
+    if ! service_is_active "$reality_service"; then
+        warn "${reality_service} 未成功启动，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
         REALITY_SNI_PREV="$prev_sni"
-        write_singbox_config
+        if [[ "$reality_service" == "xray" ]]; then
+            write_xray_reality_sni "$old_sni" 2>/dev/null || true
+        else
+            write_singbox_config
+        fi
         save_params
-        service_restart sing-box 2>/dev/null || true
+        service_restart "$reality_service" 2>/dev/null || true
         return 1
     fi
 
