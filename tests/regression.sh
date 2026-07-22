@@ -387,6 +387,7 @@ test_ipv4_override_generates_direct_links() {
     build_share_links >/dev/null
     assert_contains "$GENERATED_REALITY_LINKS" "vless://uuid-1@198.51.100.88:443" "override Reality link"
     assert_contains "$GENERATED_HY2_LINKS" "hysteria2://hy2@198.51.100.88:443" "override Hysteria2 link"
+    assert_contains "$GENERATED_HY2_LINKS" "insecure=1&pinSHA256=" "v2rayN-compatible HY2 self-signed certificate parameters"
 }
 
 test_ip_detection_failure_keeps_argo_link_generation() {

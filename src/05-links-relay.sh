@@ -229,7 +229,7 @@ build_direct_share_links_for_ip() {
         hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
         hy2_pin_sha=$(get_hy2_cert_pin_sha256) || return 0
         hy2_pin_enc=$(urlencode "${hy2_pin_sha}")
-        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:$(hy2_share_port)?sni=${HY2_SNI}&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
+        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:$(hy2_share_port)?sni=${HY2_SNI}&insecure=1&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
     fi
 }
 
@@ -430,7 +430,7 @@ generate_and_show_links() {
     if [[ -n "${GENERATED_HY2_LINKS}" ]]; then
         echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
         echo -e "${YELLOW}${GENERATED_HY2_LINKS}${NC}"
-        echo -e "  ${DIM}提示: 当前 Hysteria2 链接已使用证书固定指纹 pinSHA256，无需再开启跳过证书验证。${NC}"
+        echo -e "  ${DIM}提示: 链接同时提供 insecure=1 与 pinSHA256，以兼容 v2rayN 和支持证书固定的客户端。${NC}"
         echo ""
     elif [[ -n "${HY2_SHARE_LINK_WARNING:-}" ]]; then
         echo -e "${YELLOW}  ${HY2_SHARE_LINK_WARNING}${NC}"

@@ -390,7 +390,7 @@ sh /tmp/sbm-relay-install.xxxxxx.sh
 - 脚本会在确认端口后按系统环境尝试放行 sing-box 入站端口；订阅服务端口不应直接对公网开放。
 - Argo token、订阅 token 和节点密钥均存放在本机配置文件中，请限制文件读取权限并避免公开日志输出。
 - 线路机 / 落地机直装模式会严格校验上游参数，错误或不完整的 `VLESS + WS + Argo` 链接会被拒绝并要求改为手动输入。
-- Hysteria2 直连分享链接默认使用服务器证书的固定指纹 `pinSHA256`，不再依赖 `allowInsecure` / `insecure=1` 跳过证书验证。
+- Hysteria2 直连分享链接同时提供 `insecure=1` 与证书固定指纹 `pinSHA256`：v2rayN 可导入自签证书节点，支持证书固定的客户端仍可校验指纹。
 
 ## 🧩 开发与构建
 
