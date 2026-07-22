@@ -588,6 +588,11 @@ do_reoptimize_reality_sni() {
         return 1
     fi
 
+    if xray_managed_reality; then
+        warn "当前 Reality 由 Xray 管理，已禁止 sing-box 重写 SNI，避免与 Hysteria2 共用端口冲突"
+        return 1
+    fi
+
     local old_sni="${REALITY_SNI:-}"
     local prev_sni="${REALITY_SNI_PREV:-}"
     info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选（自动避开当前与上一次域名）..."

@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.9"
+SCRIPT_VERSION="2.7.10"
 DEFAULT_REALITY_SNI="www.microsoft.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
@@ -209,6 +209,11 @@ service_exists() {
             ;;
         *) return 1 ;;
     esac
+}
+
+xray_managed_reality() {
+    local xray_config="${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
+    [[ -f "$xray_config" ]] && service_exists xray
 }
 
 service_daemon_reload() {

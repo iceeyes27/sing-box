@@ -1467,6 +1467,33 @@ test_subscription_page_is_final_section() {
     rm -rf "$tmp"
 }
 
+test_reality_sni_reoptimization_skips_xray_managed_server() {
+    local tmp
+    local load_params_def service_exists_def select_reality_sni_def
+
+    tmp=$(mktemp -d)
+    : > "${tmp}/config.json"
+    XRAY_CONFIG_FILE="${tmp}/config.json"
+    load_params_def=$(declare -f load_params)
+    service_exists_def=$(declare -f service_exists)
+    select_reality_sni_def=$(declare -f select_reality_sni)
+
+    load_params() { return 0; }
+    service_exists() { [[ "$1" == "xray" ]]; }
+    select_reality_sni() { fail "Xray-managed Reality must not run sing-box SNI selection"; }
+
+    if do_reoptimize_reality_sni >/dev/null; then
+        fail "Xray-managed Reality SNI rewrite should be rejected"
+    fi
+
+    unset -f load_params service_exists select_reality_sni
+    eval "$load_params_def"
+    eval "$service_exists_def"
+    eval "$select_reality_sni_def"
+    unset XRAY_CONFIG_FILE
+    rm -rf "$tmp"
+}
+
 test_service_manager_systemd
 test_service_manager_openrc
 test_singbox_systemd_override_enables_restart
@@ -1516,5 +1543,6 @@ test_port_validation_can_skip_firewall_changes
 test_show_relay_troubleshooting_reports_core_hints
 test_show_relay_success_self_check_reports_core_passes
 test_subscription_page_is_final_section
+test_reality_sni_reoptimization_skips_xray_managed_server
 
 echo "OK: regression tests passed"
