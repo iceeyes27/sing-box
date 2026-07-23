@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.11"
+SCRIPT_VERSION="2.7.12"
 DEFAULT_REALITY_SNI="www.microsoft.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
@@ -31,6 +31,10 @@ CFOPT_SERVICE="/etc/systemd/system/sbm-cfopt.service"
 CFOPT_TIMER="/etc/systemd/system/sbm-cfopt.timer"
 CFOPT_CRON_PERIODIC="/etc/periodic/weekly/sbm-cfopt"
 CFOPT_CRON_D="/etc/cron.d/sbm-cfopt"
+XRAY_CONFIG_DIR="/etc/xray"
+XRAY_CONFIG_FILE="${XRAY_CONFIG_DIR}/config.json"
+XRAY_BIN="/usr/local/bin/xray"
+XRAY_OPENRC_SERVICE="/etc/init.d/xray"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 SINGBOX_SYSTEMD_DROPIN_DIR="/etc/systemd/system/sing-box.service.d"
 SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
@@ -54,6 +58,8 @@ LOW_MEMORY_SWAP_CREATED=false
 # 国内 CDN 落地反而是优点(说明 GFW 不会封)，无需刻意回避。
 REALITY_SNI_LIST=(
     "www.microsoft.com"  # Azure/Akamai 中国 CDN，国内稳定可达
+    "portal.citygrainla.com" # 瓦工严选 Reality SNI
+    "dash.cloudflare.com" # Cloudflare Anycast，优先匹配邻近边缘节点
     "www.apple.com"      # Apple 中国 CDN，国内稳定可达
     "gateway.icloud.com" # iCloud 国内正常使用
     "itunes.apple.com"   # Apple，国内可达
@@ -102,7 +108,26 @@ is_valid_hostname() {
 }
 
 argo_fixed_enabled() {
-    [[ -n "${ARGO_TOKEN:-}" ]] && is_valid_hostname "${ARGO_DOMAIN:-}"
+    [[ "${ARGO_ENABLED:-false}" == "true" ]] && \
+        [[ -n "${ARGO_TOKEN:-}" ]] && is_valid_hostname "${ARGO_DOMAIN:-}"
+}
+
+argo_quick_enabled() {
+    [[ "${ARGO_ENABLED:-false}" == "true" ]] && [[ -z "${ARGO_TOKEN:-}" ]]
+}
+
+argo_enabled() {
+    argo_fixed_enabled || argo_quick_enabled
+}
+
+argo_mode_label() {
+    if argo_fixed_enabled; then
+        echo "固定域名"
+    elif argo_quick_enabled; then
+        echo "临时域名"
+    else
+        echo "未启用"
+    fi
 }
 success() { echo -e "${GREEN}${BOLD}[OK]${NC} $*"; }
 
@@ -179,10 +204,11 @@ detect_os() {
 
     ARCH=$(uname -m)
     case "$ARCH" in
-        x86_64)  ARCH_CF="amd64" ;;
-        aarch64) ARCH_CF="arm64" ;;
-        armv7l)  ARCH_CF="arm"   ;;
-        *) ARCH_CF="amd64" ;;
+        x86_64)  ARCH_CF="amd64"; ARCH_XRAY="64" ;;
+        aarch64) ARCH_CF="arm64"; ARCH_XRAY="arm64-v8a" ;;
+        armv7l)  ARCH_CF="arm";   ARCH_XRAY="arm32-v7a" ;;
+        i386|i686) ARCH_CF="amd64"; ARCH_XRAY="32" ;;
+        *) ARCH_CF="amd64"; ARCH_XRAY="64" ;;
     esac
 }
 
@@ -212,8 +238,10 @@ service_exists() {
 }
 
 xray_managed_reality() {
-    local xray_config="${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
-    [[ -f "$xray_config" ]] && service_exists xray
+    # Reality 是否由 Xray-core 承载：以持久化的 REALITY_BACKEND 为准，
+    # 并要求 Xray 配置与服务实际存在，避免参数与落地状态不一致。
+    [[ "${REALITY_BACKEND:-singbox}" == "xray" ]] || return 1
+    [[ -f "${XRAY_CONFIG_FILE:-/etc/xray/config.json}" ]] && service_exists xray
 }
 
 service_daemon_reload() {
@@ -577,8 +605,8 @@ link_ipv4_selection_label() {
 
 # ─── 参数持久化 ──────────────────────────────────────────────
 PARAM_KEYS=(
-    UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV WS_PORT WS_PATH NODE_NAME
-    SUB_TOKEN SUBSCRIPTION_PORT ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
+    UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV REALITY_BACKEND WS_PORT WS_PATH NODE_NAME
+    SUB_TOKEN SUBSCRIPTION_PORT ARGO_ENABLED ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
     NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT
@@ -689,8 +717,19 @@ save_params() {
 load_params() {
     if [[ -f "$PARAMS_FILE" ]]; then
         load_param_file
-        # 兼容旧版本: 逐字段补齐 Hysteria2 / Argo Token 参数，绝不覆盖已有值
+        # 兼容旧版本:逐字段补齐 Hysteria2 / Argo 参数，绝不覆盖已有值。
         local need_save=false
+        if ! grep -q '^REALITY_BACKEND=' "$PARAMS_FILE" 2>/dev/null; then
+            if [[ -f "${XRAY_CONFIG_FILE:-/etc/xray/config.json}" ]] && service_exists xray; then
+                REALITY_BACKEND="xray"
+            else
+                REALITY_BACKEND="singbox"
+            fi
+            need_save=true
+        elif [[ "${REALITY_BACKEND:-}" != "singbox" && "${REALITY_BACKEND:-}" != "xray" ]]; then
+            REALITY_BACKEND="singbox"
+            need_save=true
+        fi
         if [[ -z "${HY2_PORT:-}" ]]; then
             HY2_PORT=${HY2_DEFAULT_PORT}
             need_save=true
@@ -707,13 +746,30 @@ load_params() {
             HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
             need_save=true
         fi
-        if [[ -z "${HY2_ENABLED:-}" ]]; then
+        if ! grep -q '^HY2_ENABLED=' "$PARAMS_FILE" 2>/dev/null; then
+            HY2_ENABLED="true"
+            need_save=true
+        elif [[ "${HY2_ENABLED:-}" != "true" && "${HY2_ENABLED:-}" != "false" ]]; then
             HY2_ENABLED="true"
             need_save=true
         fi
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
             ARGO_TOKEN=""
             # need_save 不标记，除非有实质性变化
+        fi
+        if ! grep -q '^ARGO_ENABLED=' "$PARAMS_FILE" 2>/dev/null; then
+            # 旧固定域名与旧临时隧道继续启用；v2.7.8+ 的空 Argo 配置保持关闭。
+            if [[ -n "${ARGO_TOKEN:-}" ]] && is_valid_hostname "${ARGO_DOMAIN:-}"; then
+                ARGO_ENABLED="true"
+            elif [[ "${ARGO_DOMAIN:-}" == *.trycloudflare.com ]]; then
+                ARGO_ENABLED="true"
+            else
+                ARGO_ENABLED="false"
+            fi
+            need_save=true
+        elif [[ "${ARGO_ENABLED:-}" != "true" && "${ARGO_ENABLED:-}" != "false" ]]; then
+            ARGO_ENABLED="false"
+            need_save=true
         fi
         if [[ -z "${ARGO_BEST_CF_DOMAIN:-}" ]]; then
             ARGO_BEST_CF_DOMAIN=""
@@ -936,5 +992,7 @@ restore_runtime_params() {
     NAT_MODE="${22:-false}"
     REALITY_PUBLIC_PORT="${23:-${REALITY_PORT}}"
     HY2_PUBLIC_PORT="${24:-${HY2_PORT}}"
+    ARGO_ENABLED="${25:-false}"
+    HY2_ENABLED="${26:-false}"
     reset_public_ip_cache
 }

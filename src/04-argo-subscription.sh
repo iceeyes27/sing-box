@@ -1,16 +1,33 @@
 # ─── Argo 服务 ───────────────────────────────────────────────
+ensure_argo_dependencies() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        info "安装 Argo 订阅网关依赖: python3"
+        install_packages_low_resource python3 || {
+            warn "python3 安装失败，Argo 订阅网关无法运行"
+            return 1
+        }
+    fi
+    install_cloudflared
+}
+
 write_argo_service() {
     local cloudflared_bin exec_cmd argo_origin_url systemd_hardening
-    if ! argo_fixed_enabled; then
-        warn "Argo 未启用：必须同时配置固定域名和 Tunnel Token"
+    if ! argo_enabled; then
+        warn "Argo 未启用"
         return 1
     fi
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
-    info "使用固定域名启动 Argo 隧道"
-    info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
-    write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
-    exec_cmd="tunnel --protocol http2 --no-autoupdate run"
+    if argo_fixed_enabled; then
+        info "使用固定域名启动 Argo 隧道"
+        info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
+        write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
+        exec_cmd="tunnel --protocol http2 --no-autoupdate run"
+    else
+        info "使用 Argo 临时隧道 (trycloudflare.com)"
+        rm -f "$ARGO_ENV_FILE"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
+    fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
         cat > "$ARGO_OPENRC_SERVICE" << EOF
@@ -24,7 +41,8 @@ pidfile="/run/argo-tunnel.pid"
 output_log="/var/log/argo-tunnel.log"
 error_log="/var/log/argo-tunnel.log"
 EOF
-        cat >> "$ARGO_OPENRC_SERVICE" << EOF
+        if argo_fixed_enabled; then
+            cat >> "$ARGO_OPENRC_SERVICE" << EOF
 env_file="${ARGO_ENV_FILE}"
 start_pre() {
     if [ -r "\${env_file}" ]; then
@@ -34,6 +52,7 @@ start_pre() {
     fi
 }
 EOF
+        fi
         cat >> "$ARGO_OPENRC_SERVICE" << 'EOF'
 
 depend() {
@@ -55,9 +74,8 @@ Wants=sing-box.service
 [Service]
 Type=simple
 User=nobody
-Group=nogroup
 EOF
-    printf 'EnvironmentFile=%s\n' "$ARGO_ENV_FILE" >> "$ARGO_SERVICE"
+    argo_fixed_enabled && printf 'EnvironmentFile=%s\n' "$ARGO_ENV_FILE" >> "$ARGO_SERVICE"
     cat >> "$ARGO_SERVICE" << EOF
 ExecStart=${cloudflared_bin} ${exec_cmd}
 Restart=on-failure
@@ -278,33 +296,90 @@ ensure_subscription_service() {
 }
 
 ensure_subscription_service_if_enabled() {
-    argo_fixed_enabled || return 0
+    argo_enabled || return 0
     ensure_subscription_service
 }
 
-# 固定域名不会从日志发现或自动更换。
+argo_quick_domain_alive() {
+    local domain="$1" code
+    is_valid_hostname "$domain" || return 1
+    code=$(curl -so /dev/null --connect-timeout 3 --max-time 6 -w '%{http_code}' \
+        "https://${domain}/" 2>/dev/null || true)
+    case "$code" in
+        ''|000|52[0-9]|53[0-9]) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+fetch_argo_domain() {
+    local max=15 i=0 candidate="" previous_domain="${ARGO_DOMAIN:-}"
+
+    argo_quick_enabled || return 0
+    ARGO_DOMAIN=""
+    while (( i < max )); do
+        candidate=$(service_logs argo-tunnel 1000 2>/dev/null | \
+            grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' | \
+            tail -1 | sed 's|https://||')
+        if [[ -n "$candidate" ]] && argo_quick_domain_alive "$candidate"; then
+            ARGO_DOMAIN="$candidate"
+            [[ "$ARGO_DOMAIN" == "$previous_domain" ]] || clear_argo_best_cf_cache
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 2
+    done
+
+    if [[ -n "$candidate" ]]; then
+        ARGO_DOMAIN="$candidate"
+        warn "Argo 临时域名暂未通过存活验证，已保留日志中的最新域名: ${candidate}"
+        return 0
+    fi
+    ARGO_DOMAIN="$previous_domain"
+    return 1
+}
+
 refresh_argo_domain_if_needed() {
+    argo_quick_enabled || return 0
+    service_is_active argo-tunnel || return 0
+    if [[ -n "${ARGO_DOMAIN:-}" ]] && argo_quick_domain_alive "$ARGO_DOMAIN"; then
+        return 0
+    fi
+    if fetch_argo_domain; then
+        save_params
+    fi
     return 0
 }
 
 refresh_argo_runtime() {
-    if ! argo_fixed_enabled; then
+    if ! argo_enabled; then
         service_stop argo-tunnel 2>/dev/null || true
         service_disable argo-tunnel 2>/dev/null || true
         service_stop sbm-subscription 2>/dev/null || true
         service_disable sbm-subscription 2>/dev/null || true
+        ARGO_ENABLED="false"
         ARGO_TOKEN=""
         ARGO_DOMAIN=""
+        rm -f "$ARGO_ENV_FILE"
         clear_argo_best_cf_cache
         save_params
         return 0
     fi
 
-    install_cloudflared
+    ensure_argo_dependencies || return 1
     write_argo_service || return 1
-    if ! service_enable_now argo-tunnel; then
+    if service_is_active argo-tunnel; then
+        service_restart argo-tunnel || return 1
+    elif ! service_enable_now argo-tunnel; then
         warn "argo-tunnel 重启失败，无法更新 Argo 订阅链接"
         return 1
+    fi
+
+    if argo_quick_enabled; then
+        sleep 3
+        if ! fetch_argo_domain; then
+            warn "未能从 cloudflared 日志取得 Argo 临时域名"
+            return 1
+        fi
     fi
 
     save_params
@@ -312,8 +387,8 @@ refresh_argo_runtime() {
 }
 
 update_argo_subscription_links() {
-    if ! argo_fixed_enabled; then
-        warn "当前未启用固定域名 Argo"
+    if ! argo_enabled; then
+        warn "当前未启用 Argo"
         return 1
     fi
     refresh_argo_runtime || return 1

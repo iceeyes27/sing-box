@@ -22,31 +22,36 @@ reality_curl_supports_h2() {
 
 probe_reality_sni_candidate() {
     local idx="$1" sni="$2" result_file="$3" require_h2="${4:-1}"
-    local out http_ver appconnect ms
+    local out http_ver appconnect ms attempt
+    local success_count=0 total_ms=0 max_ms=0 attempts=3
     # 用 HEAD(-I) 探测：仅取响应头即可拿到协议版本与握手耗时，不下载正文，
     # 对低带宽 / 低配 VPS 更省流量和时间(h2/ALPN 是连接级，与请求方法无关)。
     local curl_opts=(-I --tlsv1.3 --connect-timeout 2 --max-time 4)
     # 仅当本机 curl 支持 h2 时才协商 h2，否则该 flag 会让 curl 直接报错。
     (( require_h2 )) && curl_opts+=(--http2)
 
-    # 一次请求同时拿到 HTTP 协议版本与 TLS 握手耗时:
-    #   --tlsv1.3 强制最低 TLS 1.3(连上即满足 Reality 的 1.3 要求)
-    #   %{http_version}==2 表示目标支持 h2
-    #   %{time_appconnect} 是「TCP+TLS 握手完成」时间，正是 Reality 关心的握手延迟
-    out=$(curl -o /dev/null -s -w '%{http_version} %{time_appconnect}' \
-        "${curl_opts[@]}" "https://${sni}" 2>/dev/null || true)
-    http_ver="${out%% *}"
-    appconnect="${out##* }"
+    for attempt in $(seq 1 "$attempts"); do
+        # 连续取样，优先选择成功率高且平均/最大握手延迟低的目标。
+        out=$(curl -o /dev/null -s -w '%{http_version} %{time_appconnect}' \
+            "${curl_opts[@]}" "https://${sni}" 2>/dev/null || true)
+        http_ver="${out%% *}"
+        appconnect="${out##* }"
 
-    # 能力门槛:支持 h2 的机器要求目标协商出 HTTP/2；并需有效 TLS 握手时间。
-    if (( require_h2 )); then
-        [[ "$http_ver" == "2" ]] || return 0
-    fi
-    [[ "$appconnect" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 0
-    ms=$(awk -v t="$appconnect" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo 0)
-    [[ "$ms" =~ ^[0-9]+$ && "$ms" -gt 0 && "$ms" -lt 9999 ]] || return 0
+        if (( require_h2 )) && [[ "$http_ver" != "2" ]]; then
+            continue
+        fi
+        [[ "$appconnect" =~ ^[0-9]+([.][0-9]+)?$ ]] || continue
+        ms=$(awk -v t="$appconnect" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo 0)
+        [[ "$ms" =~ ^[0-9]+$ && "$ms" -gt 0 && "$ms" -lt 9999 ]] || continue
+        success_count=$((success_count + 1))
+        total_ms=$((total_ms + ms))
+        if (( ms > max_ms )); then
+            max_ms=$ms
+        fi
+    done
 
-    echo "$idx $ms $sni" >> "$result_file"
+    (( success_count >= 2 )) || return 0
+    echo "$idx $success_count $((total_ms / success_count)) $max_ms $sni" >> "$result_file"
     return 0
 }
 
@@ -102,14 +107,16 @@ select_reality_sni() {
     # 两端补空格便于按整词匹配。常规安装时该变量为空，不影响行为。
     local exclude=" ${REALITY_SNI_EXCLUDE:-} "
 
-    local best_sni="" best_time=9999
+    local best_sni="" best_time=9999 best_success=0 best_max=9999
     if [[ -f "${tmp_dir}/results.txt" ]]; then
         local best
-        # 按握手延迟(第 2 列)升序为主，列表顺序(第 1 列)仅作并列时的稳定排序。
-        best=$(awk -v ex="$exclude" 'index(ex, " " $3 " ") == 0' "${tmp_dir}/results.txt" \
-            | sort -k2,2n -k1,1n | head -1)
-        best_time=$(echo "$best" | awk '{print $2}')
-        best_sni=$(echo "$best" | awk '{print $3}')
+        # 成功次数优先，其次平均延迟、最大延迟和候选顺序。
+        best=$(awk -v ex="$exclude" 'index(ex, " " $5 " ") == 0' "${tmp_dir}/results.txt" \
+            | sort -k2,2nr -k3,3n -k4,4n -k1,1n | head -1)
+        best_success=$(echo "$best" | awk '{print $2}')
+        best_time=$(echo "$best" | awk '{print $3}')
+        best_max=$(echo "$best" | awk '{print $4}')
+        best_sni=$(echo "$best" | awk '{print $5}')
     fi
 
     (( errexit_was_set )) && set -e
@@ -118,7 +125,7 @@ select_reality_sni() {
 
     if [[ -n "$best_sni" ]]; then
         REALITY_SNI="$best_sni"
-        success "已选择握手最快的合规 Reality 域名: ${REALITY_SNI} (TLS 握手延迟: ${best_time}ms)"
+        success "已选择连续握手最稳定的 Reality 域名: ${REALITY_SNI} (${best_success}/3，平均 ${best_time}ms，最大 ${best_max}ms)"
     else
         # 无域名通过 TLS1.3+h2 实测时，回退到候选列表中第一个未被排除的域名
         local fallback=""
@@ -131,6 +138,52 @@ select_reality_sni() {
         REALITY_SNI="${fallback:-${REALITY_SNI_LIST[0]}}"
         warn "无域名通过 TLS1.3 + HTTP/2 实测，使用默认伪装域名: ${REALITY_SNI}"
     fi
+}
+
+verify_reality_fallback_sni() {
+    local sni="${1:-${REALITY_SNI:-}}" port="${2:-${REALITY_PORT:-}}" code
+    is_valid_hostname "$sni" || return 1
+    validate_port "$port" "Reality" >/dev/null 2>&1 || return 1
+
+    code=$(curl -k -sS -o /dev/null --connect-timeout 3 --max-time 8 \
+        --resolve "${sni}:${port}:127.0.0.1" -w '%{http_code}' \
+        "https://${sni}:${port}/" 2>/dev/null || true)
+    [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]
+}
+
+verify_or_reselect_reality_sni() {
+    local old_sni="${REALITY_SNI:-}" failed_sni next_sni
+
+    if verify_reality_fallback_sni "$old_sni" "$REALITY_PORT"; then
+        success "Reality 入口到伪装目标的完整 TLS 转发验证通过: ${old_sni}"
+        return 0
+    fi
+
+    failed_sni="$old_sni"
+    warn "Reality 完整 TLS 转发验证失败，正在排除 ${failed_sni} 后重新选择"
+    REALITY_SNI=""
+    REALITY_SNI_EXCLUDE="$failed_sni"
+    select_reality_sni
+    unset REALITY_SNI_EXCLUDE
+    next_sni="$REALITY_SNI"
+    if [[ -z "$next_sni" || "$next_sni" == "$failed_sni" ]]; then
+        REALITY_SNI="$old_sni"
+        return 1
+    fi
+
+    write_singbox_config
+    service_restart sing-box || true
+    sleep 2
+    if service_is_active sing-box && verify_reality_fallback_sni "$next_sni" "$REALITY_PORT"; then
+        success "Reality 已切换到通过完整 TLS 转发验证的 SNI: ${next_sni}"
+        return 0
+    fi
+
+    REALITY_SNI="$old_sni"
+    write_singbox_config
+    service_restart sing-box 2>/dev/null || true
+    warn "新的 SNI 未通过完整验证，已恢复原 SNI: ${old_sni}"
+    return 1
 }
 
 # ─── URL 编码 ────────────────────────────────────────────────
@@ -264,10 +317,11 @@ append_argo_link() {
 build_argo_link_for_domain() {
     local argo_name argo_remark
 
-    argo_fixed_enabled || return
+    argo_enabled || return
+    is_valid_hostname "${ARGO_DOMAIN:-}" || return
     argo_name="${NODE_NAME}-Argo"
     argo_remark=$(urlencode "$argo_name")
-    # 固定域名同时作为连接地址、SNI 和 Host，避免第三方优选域名及早期数据参数造成漂移。
+    # 当前 Argo 域名同时作为连接地址、SNI 和 Host，避免额外地址与早期数据参数造成漂移。
     append_argo_link "vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
 }
 
@@ -296,10 +350,10 @@ build_share_links() {
             build_direct_share_links_for_selected_ipv4s
             ;;
         ipv6-only)
-            if argo_fixed_enabled; then
-                warn "检测到 IPv6-only VPS，仅生成固定域名 Argo 节点链接。"
+            if argo_enabled; then
+                warn "检测到 IPv6-only VPS，仅生成 Argo 节点链接。"
             else
-                warn "检测到 IPv6-only VPS，且未配置固定域名 Argo，无法生成外部节点链接。"
+                warn "检测到 IPv6-only VPS，且未启用 Argo，无法生成外部节点链接。"
             fi
             ;;
         unknown)
@@ -309,7 +363,7 @@ build_share_links() {
             ;;
     esac
 
-    if argo_fixed_enabled; then
+    if argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}"; then
         build_argo_link_for_domain
     fi
 }
@@ -323,7 +377,7 @@ write_subscription_assets() {
 }
 
 subscription_https_url() {
-    argo_fixed_enabled && [[ -n "${SUB_TOKEN:-}" ]] || return 1
+    argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}" && [[ -n "${SUB_TOKEN:-}" ]] || return 1
     echo "https://${ARGO_DOMAIN}/sub/${SUB_TOKEN}"
 }
 
@@ -335,7 +389,7 @@ subscription_local_url() {
 show_subscription_url() {
     local public_subscription_url local_subscription_url
 
-    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_fixed_enabled || return
+    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_enabled || return
 
     echo ""
     echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
@@ -346,7 +400,7 @@ show_subscription_url() {
         echo -e "${GREEN}${BOLD}HTTPS 订阅（导入 v2rayN / v2rayNG）${NC}"
         echo -e "${YELLOW}${BOLD}${public_subscription_url}${NC}"
     else
-        echo -e "${DIM}未启用固定域名 Argo，仅提供本机调试地址。${NC}"
+        echo -e "${DIM}Argo 域名尚未就绪，仅提供本机调试地址。${NC}"
     fi
     if local_subscription_url=$(subscription_local_url); then
         echo ""
@@ -398,9 +452,13 @@ generate_and_show_links() {
         echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
         echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
     fi
-    if argo_fixed_enabled; then
+    if argo_enabled; then
         echo -e "  订阅端口:      ${BOLD}${SUBSCRIPTION_PORT}${NC}"
-        echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC}"
+        if argo_fixed_enabled; then
+            echo -e "  Argo 模式:     ${GREEN}固定域名 (Token)${NC}"
+        else
+            echo -e "  Argo 模式:     ${GREEN}临时域名${NC}"
+        fi
         echo -e "  Argo 域名:     ${BOLD}${ARGO_DOMAIN:-未配置}${NC}"
         echo -e "  WS Path:       ${BOLD}${WS_PATH}${NC}"
     else
@@ -440,7 +498,7 @@ generate_and_show_links() {
         echo -e "${DIM}  可设置直连公网 IPv4 覆盖后执行 sbm links 重新生成。${NC}"
         echo ""
     elif [[ "${IP_STACK_MODE:-}" != "ipv6-only" ]]; then
-        echo -e "${DIM}  Hysteria2: 未启用 (重新安装即可自动启用)${NC}"
+        echo -e "${DIM}  Hysteria2: 未启用${NC}"
         echo ""
     fi
 
@@ -464,7 +522,7 @@ generate_and_show_links() {
             echo "# Hysteria2 (QUIC/UDP 高速)"
             printf '%s\n' "$GENERATED_HY2_LINKS"
         fi
-        if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_fixed_enabled; then
+        if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_enabled; then
             echo ""
             echo "# Subscription"
             local subscription_url

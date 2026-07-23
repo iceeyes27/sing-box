@@ -169,10 +169,12 @@ test_generate_tls_cert_without_openssl_disables_hy2() {
 }
 
 test_legacy_params_migration() {
-    local tmp
+    local tmp old_xray_config
     tmp=$(mktemp -d)
     PARAMS_FILE="${tmp}/params"
     CONFIG_DIR="$tmp"
+    old_xray_config="$XRAY_CONFIG_FILE"
+    XRAY_CONFIG_FILE="${tmp}/missing-xray.json"
     openssl() {
         case "$*" in
             "rand -base64 16") echo "legacy-hy2-password" ;;
@@ -205,6 +207,72 @@ EOF
     assert_eq "false" "$NAT_MODE" "legacy NAT mode migration"
     assert_eq "443" "$REALITY_PUBLIC_PORT" "legacy Reality public port migration"
     assert_eq "8443" "$HY2_PUBLIC_PORT" "legacy HY2 public port migration"
+    assert_eq "true" "$HY2_ENABLED" "legacy HY2 remains enabled"
+    assert_eq "false" "$ARGO_ENABLED" "legacy empty Argo remains disabled"
+    assert_eq "singbox" "$REALITY_BACKEND" "legacy Reality backend defaults to sing-box"
+    XRAY_CONFIG_FILE="$old_xray_config"
+    rm -rf "$tmp"
+}
+
+test_legacy_xray_backend_migration() {
+    local tmp service_exists_def old_xray_config
+    tmp=$(mktemp -d)
+    service_exists_def=$(declare -f service_exists)
+    old_xray_config="$XRAY_CONFIG_FILE"
+    PARAMS_FILE="${tmp}/params"
+    CONFIG_DIR="$tmp"
+    XRAY_CONFIG_FILE="${tmp}/xray.json"
+    printf '{}\n' > "$XRAY_CONFIG_FILE"
+    cat > "$PARAMS_FILE" <<'EOF'
+UUID="uuid-1"
+SHORT_ID="abcd1234"
+PRIVATE_KEY="private"
+PUBLIC_KEY="public"
+REALITY_PORT="443"
+REALITY_SNI="www.microsoft.com"
+WS_PORT="18080"
+WS_PATH="/abcd1234"
+NODE_NAME="node"
+ARGO_ENABLED="false"
+ARGO_DOMAIN=""
+ARGO_TOKEN=""
+HY2_ENABLED="false"
+EOF
+    service_exists() { [[ "$1" == "xray" ]]; }
+
+    load_params
+    assert_eq "xray" "$REALITY_BACKEND" "legacy Xray backend migration"
+    xray_managed_reality || fail "migrated Xray Reality ownership was not detected"
+
+    unset -f service_exists
+    eval "$service_exists_def"
+    XRAY_CONFIG_FILE="$old_xray_config"
+    rm -rf "$tmp"
+}
+
+test_legacy_quick_argo_migration() {
+    local tmp
+    tmp=$(mktemp -d)
+    PARAMS_FILE="${tmp}/params"
+    CONFIG_DIR="$tmp"
+    unset ARGO_ENABLED
+    cat > "$PARAMS_FILE" <<'EOF'
+UUID="uuid-1"
+SHORT_ID="abcd1234"
+PRIVATE_KEY="private"
+PUBLIC_KEY="public"
+REALITY_PORT="443"
+REALITY_SNI="www.microsoft.com"
+WS_PORT="18080"
+WS_PATH="/abcd1234"
+NODE_NAME="node"
+ARGO_DOMAIN="legacy.trycloudflare.com"
+ARGO_TOKEN=""
+EOF
+
+    load_params
+    assert_eq "true" "$ARGO_ENABLED" "legacy quick Argo remains enabled"
+    argo_quick_enabled || fail "legacy quick Argo mode was not restored"
     rm -rf "$tmp"
 }
 
@@ -238,6 +306,7 @@ EOF
     SHORT_ID="sid\\backslash"
     PRIVATE_KEY="private key"
     PUBLIC_KEY="public key"
+    REALITY_BACKEND="xray"
     REALITY_PORT="443"
     REALITY_SNI="www.microsoft.com"
     WS_PORT="18080"
@@ -245,6 +314,7 @@ EOF
     NODE_NAME='node # one'
     SUB_TOKEN='sub token $value'
     SUBSCRIPTION_PORT="24630"
+    ARGO_ENABLED="true"
     ARGO_DOMAIN="argo.example.com"
     ARGO_TOKEN='argo token `literal`'
     ARGO_BEST_CF_DOMAIN="cf.example.com"
@@ -255,31 +325,35 @@ EOF
     HY2_PASSWORD='hy2 pass "quoted"'
     HY2_SNI="bing.com"
     HY2_MASQUERADE_URL="https://www.bing.com/a b"
+    HY2_ENABLED="false"
     PUBLIC_IPV4_OVERRIDE="198.51.100.99"
     NAT_MODE="true"
     REALITY_PUBLIC_PORT="30443"
     HY2_PUBLIC_PORT="30444"
     save_params
 
-    UUID=""; SHORT_ID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; REALITY_PORT=""; REALITY_SNI=""
+    UUID=""; SHORT_ID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; REALITY_PORT=""; REALITY_SNI=""; REALITY_BACKEND=""
     WS_PORT=""; WS_PATH=""; NODE_NAME=""; SUB_TOKEN=""; SUBSCRIPTION_PORT=""
-    ARGO_DOMAIN=""; ARGO_TOKEN=""; ARGO_BEST_CF_DOMAIN=""; ARGO_BEST_CF_DOMAIN_IPV4=""
+    ARGO_ENABLED=""; ARGO_DOMAIN=""; ARGO_TOKEN=""; ARGO_BEST_CF_DOMAIN=""; ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""; LINK_IPV4_SELECTION=""; PUBLIC_IPV4_OVERRIDE=""
     NAT_MODE=""; REALITY_PUBLIC_PORT=""; HY2_PUBLIC_PORT=""
-    HY2_PORT=""; HY2_PASSWORD=""; HY2_SNI=""; HY2_MASQUERADE_URL=""
+    HY2_PORT=""; HY2_PASSWORD=""; HY2_SNI=""; HY2_MASQUERADE_URL=""; HY2_ENABLED=""
 
     load_params
     assert_eq 'uuid "quoted"' "$UUID" "params UUID round trip"
+    assert_eq 'xray' "$REALITY_BACKEND" "params Reality backend round trip"
     assert_eq 'sid\\backslash' "$SHORT_ID" "params short id round trip"
     assert_eq '/path with spaces' "$WS_PATH" "params WS path round trip"
     assert_eq 'node # one' "$NODE_NAME" "params node name round trip"
     assert_eq 'sub token $value' "$SUB_TOKEN" "params token round trip"
+    assert_eq 'true' "$ARGO_ENABLED" "params Argo enabled state round trip"
     assert_eq 'argo token `literal`' "$ARGO_TOKEN" "params argo token round trip"
     assert_eq '198.51.100.99' "$PUBLIC_IPV4_OVERRIDE" "params public IPv4 override round trip"
     assert_eq 'true' "$NAT_MODE" "params NAT mode round trip"
     assert_eq '30443' "$REALITY_PUBLIC_PORT" "params Reality public port round trip"
     assert_eq '30444' "$HY2_PUBLIC_PORT" "params HY2 public port round trip"
     assert_eq 'hy2 pass "quoted"' "$HY2_PASSWORD" "params HY2 password round trip"
+    assert_eq 'false' "$HY2_ENABLED" "params HY2 enabled state round trip"
 
     rm -rf "$tmp"
 }
@@ -564,7 +638,7 @@ test_runtime_param_restore_is_complete() {
         "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
-        "198.51.100.20" "true" "30443" "30444"
+        "198.51.100.20" "true" "30443" "30444" "true" "false"
 
     UUID="uuid-new"
     SHORT_ID="sid-new"
@@ -590,6 +664,8 @@ test_runtime_param_restore_is_complete() {
     NAT_MODE="false"
     REALITY_PUBLIC_PORT="444"
     HY2_PUBLIC_PORT="8444"
+    ARGO_ENABLED="false"
+    HY2_ENABLED="true"
 
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
@@ -597,7 +673,7 @@ test_runtime_param_restore_is_complete() {
         "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
-        "198.51.100.20" "true" "30443" "30444"
+        "198.51.100.20" "true" "30443" "30444" "true" "false"
 
     assert_eq "uuid-old" "$UUID" "restore UUID"
     assert_eq "sid-old" "$SHORT_ID" "restore Short ID"
@@ -623,6 +699,8 @@ test_runtime_param_restore_is_complete() {
     assert_eq "true" "$NAT_MODE" "restore NAT mode"
     assert_eq "30443" "$REALITY_PUBLIC_PORT" "restore Reality public port"
     assert_eq "30444" "$HY2_PUBLIC_PORT" "restore HY2 public port"
+    assert_eq "true" "$ARGO_ENABLED" "restore Argo enabled state"
+    assert_eq "false" "$HY2_ENABLED" "restore HY2 enabled state"
 }
 
 test_hysteria2_config_uses_masquerade_proxy() {
@@ -649,10 +727,13 @@ test_hysteria2_config_uses_masquerade_proxy() {
     HY2_SNI="bing.com"
     HY2_MASQUERADE_URL="https://www.bing.com"
     HY2_ENABLED="true"
+    ARGO_ENABLED="false"
     ARGO_TOKEN=""
     ARGO_DOMAIN=""
+    REALITY_BACKEND="singbox"
 
     write_singbox_config >/dev/null
+    python3 -m json.tool "$CONFIG_FILE" >/dev/null || fail "HY2 config is not valid JSON"
     unset -f chown sing-box
     [[ -n "$chown_def" ]] && eval "$chown_def"
     config=$(<"$CONFIG_FILE")
@@ -665,7 +746,7 @@ test_hysteria2_config_uses_masquerade_proxy() {
 }
 
 test_optional_inbounds_follow_feature_state() {
-    local tmp config config_with_argo chown_def
+    local tmp config config_with_quick_argo config_with_fixed_argo config_with_xray_backend chown_def
     tmp=$(mktemp -d)
 
     chown_def=$(declare -f chown 2>/dev/null || true)
@@ -684,16 +765,30 @@ test_optional_inbounds_follow_feature_state() {
     WS_PORT="18080"
     WS_PATH="/abcd1234"
     HY2_ENABLED="false"
+    ARGO_ENABLED="false"
     ARGO_TOKEN=""
     ARGO_DOMAIN=""
+    REALITY_BACKEND="singbox"
 
     write_singbox_config >/dev/null
+    python3 -m json.tool "$CONFIG_FILE" >/dev/null || fail "Reality-only config is not valid JSON"
     config=$(<"$CONFIG_FILE")
+
+    ARGO_ENABLED="true"
+    write_singbox_config >/dev/null
+    python3 -m json.tool "$CONFIG_FILE" >/dev/null || fail "Reality plus quick Argo config is not valid JSON"
+    config_with_quick_argo=$(<"$CONFIG_FILE")
 
     ARGO_TOKEN="fixed-token"
     ARGO_DOMAIN="fixed.example.com"
     write_singbox_config >/dev/null
-    config_with_argo=$(<"$CONFIG_FILE")
+    python3 -m json.tool "$CONFIG_FILE" >/dev/null || fail "Reality plus fixed Argo config is not valid JSON"
+    config_with_fixed_argo=$(<"$CONFIG_FILE")
+
+    REALITY_BACKEND="xray"
+    write_singbox_config >/dev/null
+    python3 -m json.tool "$CONFIG_FILE" >/dev/null || fail "Xray Reality plus fixed Argo config is not valid JSON"
+    config_with_xray_backend=$(<"$CONFIG_FILE")
     unset -f chown sing-box
     [[ -n "$chown_def" ]] && eval "$chown_def"
     rm -rf "$tmp"
@@ -701,8 +796,13 @@ test_optional_inbounds_follow_feature_state() {
     assert_not_contains "$config" '"type": "hysteria2"' "HY2 disabled omits inbound"
     assert_contains "$config" '"tag": "vless-reality"' "Reality remains enabled"
     assert_not_contains "$config" '"tag": "vless-ws-argo"' "disabled Argo omits WS inbound"
-    assert_contains "$config_with_argo" '"tag": "vless-ws-argo"' "fixed Argo includes WS inbound"
-    assert_not_contains "$config_with_argo" '"max_early_data"' "fixed Argo omits early data"
+    assert_contains "$config_with_quick_argo" '"tag": "vless-reality"' "quick Argo keeps Reality inbound"
+    assert_contains "$config_with_quick_argo" '"tag": "vless-ws-argo"' "quick Argo includes WS inbound"
+    assert_not_contains "$config_with_quick_argo" '"type": "hysteria2"' "default quick Argo profile omits HY2 inbound"
+    assert_contains "$config_with_fixed_argo" '"tag": "vless-ws-argo"' "fixed Argo includes WS inbound"
+    assert_not_contains "$config_with_fixed_argo" '"max_early_data"' "fixed Argo omits early data"
+    assert_not_contains "$config_with_xray_backend" '"tag": "vless-reality"' "Xray backend omits sing-box Reality inbound"
+    assert_contains "$config_with_xray_backend" '"tag": "vless-ws-argo"' "Xray backend keeps sing-box Argo inbound"
 }
 
 test_relay_script_generation_uses_argo_upstream() {
@@ -1052,6 +1152,7 @@ exit 0'
 }
 
 test_reality_sni_probe_failure_uses_default() {
+    local -a old_sni_list=("${REALITY_SNI_LIST[@]}")
     REALITY_SNI=""
     REALITY_SNI_LIST=("www.microsoft.com" "www.apple.com")
     get_reality_probe_parallelism() {
@@ -1063,7 +1164,75 @@ test_reality_sni_probe_failure_uses_default() {
 
     select_reality_sni >/dev/null
     assert_eq "www.microsoft.com" "$REALITY_SNI" "Reality SNI default after probe failure"
+    REALITY_SNI_LIST=("${old_sni_list[@]}")
     unset -f curl get_reality_probe_parallelism
+}
+
+test_reality_sni_probe_requires_two_successes() {
+    local tmp result curl_def
+    tmp=$(mktemp -d)
+    PROBE_COUNTER_FILE="${tmp}/counter"
+    result="${tmp}/result"
+    curl_def=$(declare -f curl 2>/dev/null || true)
+    printf '0\n' > "$PROBE_COUNTER_FILE"
+    curl() {
+        local count
+        count=$(<"$PROBE_COUNTER_FILE")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$PROBE_COUNTER_FILE"
+        if (( count <= 2 )); then
+            printf '2 0.050'
+        else
+            printf '0 0.000'
+        fi
+    }
+
+    probe_reality_sni_candidate 0 "portal.citygrainla.com" "$result" 1
+    assert_contains "$(<"$result")" "0 2 50 50 portal.citygrainla.com" "Reality SNI accepts two of three stable handshakes"
+
+    : > "$result"
+    printf '0\n' > "$PROBE_COUNTER_FILE"
+    curl() {
+        local count
+        count=$(<"$PROBE_COUNTER_FILE")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$PROBE_COUNTER_FILE"
+        if (( count == 1 )); then
+            printf '2 0.050'
+        else
+            printf '0 0.000'
+        fi
+    }
+    probe_reality_sni_candidate 0 "portal.citygrainla.com" "$result" 1
+    [[ ! -s "$result" ]] || fail "Reality SNI accepted fewer than two successful handshakes"
+
+    unset -f curl
+    if [[ -n "$curl_def" ]]; then
+        eval "$curl_def"
+    fi
+    unset PROBE_COUNTER_FILE
+    rm -rf "$tmp"
+}
+
+test_quick_argo_domain_is_read_from_service_logs() {
+    local service_logs_def alive_def clear_cache_def
+    service_logs_def=$(declare -f service_logs)
+    alive_def=$(declare -f argo_quick_domain_alive)
+    clear_cache_def=$(declare -f clear_argo_best_cf_cache)
+    service_logs() { echo "INF Your quick Tunnel has been created https://fresh-quick.trycloudflare.com"; }
+    argo_quick_domain_alive() { [[ "$1" == "fresh-quick.trycloudflare.com" ]]; }
+    clear_argo_best_cf_cache() { :; }
+
+    ARGO_ENABLED="true"
+    ARGO_TOKEN=""
+    ARGO_DOMAIN="old-quick.trycloudflare.com"
+    fetch_argo_domain
+    assert_eq "fresh-quick.trycloudflare.com" "$ARGO_DOMAIN" "quick Argo domain parsed from logs"
+
+    unset -f service_logs argo_quick_domain_alive clear_argo_best_cf_cache
+    eval "$service_logs_def"
+    eval "$alive_def"
+    eval "$clear_cache_def"
 }
 
 test_manager_command_rejects_empty_source() {
@@ -1145,6 +1314,7 @@ test_refresh_argo_runtime_disables_incomplete_config() {
     NODE_NAME="node"
     SUB_TOKEN="sub-token"
     SUBSCRIPTION_PORT="24630"
+    ARGO_ENABLED="true"
     ARGO_TOKEN="incomplete-token"
     ARGO_DOMAIN=""
     ARGO_BEST_CF_DOMAIN="cf-old.example.com"
@@ -1159,6 +1329,7 @@ test_refresh_argo_runtime_disables_incomplete_config() {
     save_params() { printf 'saved\n' > "${tmp}/saved"; }
 
     refresh_argo_runtime >/dev/null
+    assert_eq "false" "$ARGO_ENABLED" "incomplete Argo state disabled"
     assert_eq "" "$ARGO_TOKEN" "incomplete Argo token cleared"
     assert_eq "" "$ARGO_DOMAIN" "incomplete Argo domain cleared"
     [[ -f "${tmp}/saved" ]] || fail "disabled Argo state was not saved"
@@ -1171,7 +1342,7 @@ test_refresh_argo_runtime_disables_incomplete_config() {
 }
 
 test_subscription_gateway_uses_local_https_origin() {
-    local tmp service_body argo_body server_body
+    local tmp service_body argo_body quick_argo_body server_body
     local service_manager_def service_daemon_reload_def
 
     tmp=$(mktemp -d)
@@ -1189,6 +1360,7 @@ test_subscription_gateway_uses_local_https_origin() {
     SUB_TOKEN="sub-token"
     SUBSCRIPTION_PORT="24630"
     WS_PORT="18080"
+    ARGO_ENABLED="true"
     ARGO_TOKEN="fixed-token"
     ARGO_DOMAIN="sub.example.com"
 
@@ -1200,6 +1372,7 @@ test_subscription_gateway_uses_local_https_origin() {
     }
 
     write_subscription_server
+    python3 -m py_compile "$SUBSCRIPTION_SERVER" || fail "subscription gateway Python syntax"
     write_subscription_service
     write_argo_service
 
@@ -1210,7 +1383,15 @@ test_subscription_gateway_uses_local_https_origin() {
     assert_contains "$service_body" "--upstream-port 18080" "subscription WS upstream"
     assert_contains "$argo_body" "tunnel --protocol http2 --no-autoupdate run" "fixed Argo tunnel command"
     assert_not_contains "$argo_body" "--url" "fixed Argo does not create quick tunnel"
+    assert_not_contains "$argo_body" "Group=nogroup" "Argo service uses the nobody user's platform group"
     assert_contains "$server_body" "def proxy_to_upstream" "subscription gateway proxy"
+
+    ARGO_TOKEN=""
+    ARGO_DOMAIN=""
+    write_argo_service
+    quick_argo_body=$(<"$ARGO_SERVICE")
+    assert_contains "$quick_argo_body" "tunnel --url http://127.0.0.1:24630 --no-autoupdate --protocol http2" "quick Argo tunnel command"
+    assert_not_contains "$quick_argo_body" "EnvironmentFile=" "quick Argo has no token environment"
 
     unset -f service_manager service_daemon_reload
     eval "$service_manager_def"
@@ -1222,6 +1403,7 @@ test_subscription_url_prefers_https_argo() {
     local output
 
     GENERATED_SUBSCRIPTION_RAW="vless://uuid@example.com:443"
+    ARGO_ENABLED="true"
     ARGO_DOMAIN="sub.example.com"
     ARGO_TOKEN="fixed-token"
     SUB_TOKEN="sub-token"
@@ -1235,18 +1417,27 @@ test_subscription_url_prefers_https_argo() {
     assert_not_contains "$output" "http://198.51.100.10:24630" "public HTTP subscription URL"
 }
 
-test_fixed_argo_link_requires_token_and_uses_own_domain() {
+test_argo_link_follows_enabled_mode_and_uses_own_domain() {
     UUID="uuid-1"
     NODE_NAME="node"
     WS_PATH="/stable-path"
     ARGO_DOMAIN="fixed.example.com"
     ARGO_TOKEN=""
+    ARGO_ENABLED="false"
     GENERATED_ARGO_LINKS=""
     GENERATED_SUBSCRIPTION_RAW=""
 
     build_argo_link_for_domain || true
-    assert_eq "" "$GENERATED_ARGO_LINKS" "Argo link disabled without token"
+    assert_eq "" "$GENERATED_ARGO_LINKS" "disabled Argo omits link"
 
+    ARGO_ENABLED="true"
+    ARGO_DOMAIN="quick.trycloudflare.com"
+    build_argo_link_for_domain || true
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@quick.trycloudflare.com:443" "quick Argo address"
+
+    GENERATED_ARGO_LINKS=""
+    GENERATED_SUBSCRIPTION_RAW=""
+    ARGO_DOMAIN="fixed.example.com"
     ARGO_TOKEN="fixed-token"
     build_argo_link_for_domain || true
     assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@fixed.example.com:443" "fixed Argo address"
@@ -1259,13 +1450,112 @@ test_fixed_argo_link_requires_token_and_uses_own_domain() {
     assert_eq "" "$GENERATED_ARGO_LINKS" "invalid Argo hostname rejected"
 }
 
-test_default_reality_sni_is_fixed() {
-    local script_body
-    script_body=$(<"$SCRIPT")
-    assert_eq "www.microsoft.com" "$DEFAULT_REALITY_SNI" "default Reality SNI"
-    assert_contains "$script_body" 'REALITY_SNI="${REALITY_SNI:-${DEFAULT_REALITY_SNI}}"' "fixed Reality SNI initialization"
-    assert_not_contains "$script_body" "trycloudflare" "quick tunnel implementation removed"
-    assert_not_contains "$script_body" "BESTCF_DOMAINS_URL" "third-party CF domain source removed"
+test_default_profile_is_reality_and_quick_argo() {
+    local sing_box_def random_hex_def random_base64_def select_port_def
+    sing_box_def=$(declare -f sing-box 2>/dev/null || true)
+    random_hex_def=$(declare -f random_hex)
+    random_base64_def=$(declare -f random_base64)
+    select_port_def=$(declare -f select_random_available_tcp_port)
+
+    sing-box() {
+        case "$*" in
+            "generate uuid") echo "uuid-default" ;;
+            "generate reality-keypair") printf 'PrivateKey: private-default\nPublicKey: public-default\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    random_hex() { echo "abcd1234"; }
+    random_base64() { echo "random-default"; }
+    select_random_available_tcp_port() { echo "28805"; }
+
+    unset REALITY_PORT REALITY_SNI REALITY_BACKEND NODE_NAME SUBSCRIPTION_PORT LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
+    generate_params >/dev/null
+    assert_eq "28805" "$REALITY_PORT" "default Reality high port"
+    assert_eq "" "$REALITY_SNI" "default Reality SNI is selected during install"
+    assert_eq "singbox" "$REALITY_BACKEND" "default Reality backend"
+    assert_eq "true" "$ARGO_ENABLED" "default Argo enabled"
+    argo_quick_enabled || fail "default Argo mode is not quick tunnel"
+    assert_eq "false" "$HY2_ENABLED" "default HY2 disabled"
+    assert_contains " ${REALITY_SNI_LIST[*]} " " portal.citygrainla.com " "vetted Reality SNI candidate"
+
+    unset -f sing-box random_hex random_base64 select_random_available_tcp_port
+    [[ -n "$sing_box_def" ]] && eval "$sing_box_def"
+    eval "$random_hex_def"
+    eval "$random_base64_def"
+    eval "$select_port_def"
+}
+
+test_random_reality_port_is_high_and_available() {
+    local get_port_listeners_def port attempt tmp listener_checks
+    get_port_listeners_def=$(declare -f get_port_listeners)
+    get_port_listeners() { :; }
+
+    for attempt in $(seq 1 20); do
+        port=$(select_random_available_tcp_port)
+        [[ "$port" =~ ^[0-9]+$ ]] || fail "random Reality port is not numeric"
+        (( port >= 10000 && port <= 65535 )) || fail "random Reality port is outside high-port range: $port"
+        [[ "$port" != "24630" ]] || fail "random Reality port conflicts with subscription default"
+    done
+
+    tmp=$(mktemp -d)
+    PORT_LISTENER_COUNTER="${tmp}/counter"
+    printf '0\n' > "$PORT_LISTENER_COUNTER"
+    get_port_listeners() {
+        local count
+        count=$(<"$PORT_LISTENER_COUNTER")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$PORT_LISTENER_COUNTER"
+        (( count == 1 )) && echo "occupied"
+    }
+    port=$(select_random_available_tcp_port)
+    listener_checks=$(<"$PORT_LISTENER_COUNTER")
+    (( listener_checks >= 2 )) || fail "random Reality port did not retry after an occupied port"
+    (( port >= 10000 && port <= 65535 )) || fail "retried Reality port is outside high-port range: $port"
+
+    unset -f get_port_listeners
+    eval "$get_port_listeners_def"
+    unset PORT_LISTENER_COUNTER
+    rm -rf "$tmp"
+}
+
+test_service_firewall_uses_exact_protocols() {
+    local detect_firewall_backend_def open_firewall_def calls
+    detect_firewall_backend_def=$(declare -f detect_firewall_backend)
+    open_firewall_def=$(declare -f open_firewall)
+    detect_firewall_backend() { echo "test"; }
+    open_firewall() { printf '%s/%s\n' "$1" "$3"; }
+
+    REALITY_PORT="28805"
+    HY2_PORT="28805"
+    HY2_ENABLED="false"
+    calls=$(open_service_ports)
+    assert_eq "28805/tcp" "$calls" "Reality opens TCP only"
+
+    HY2_ENABLED="true"
+    calls=$(open_service_ports)
+    assert_contains "$calls" "28805/tcp" "Reality TCP firewall rule"
+    assert_contains "$calls" "28805/udp" "HY2 UDP firewall rule"
+
+    unset -f detect_firewall_backend open_firewall
+    eval "$detect_firewall_backend_def"
+    eval "$open_firewall_def"
+}
+
+test_reality_full_fallback_probe() {
+    local curl_def
+    curl_def=$(declare -f curl 2>/dev/null || true)
+    curl() { printf '204'; }
+    verify_reality_fallback_sni "portal.citygrainla.com" "28805" || fail "Reality full fallback accepted HTTP response was rejected"
+
+    curl() { printf '000'; }
+    if verify_reality_fallback_sni "portal.citygrainla.com" "28805"; then
+        fail "Reality full fallback accepted failed HTTP response"
+    fi
+
+    unset -f curl
+    if [[ -n "$curl_def" ]]; then
+        eval "$curl_def"
+    fi
 }
 
 test_subscription_service_does_not_open_firewall() {
@@ -1510,6 +1800,8 @@ test_package_manager_alpine
 test_missing_openssl_does_not_block_core_install
 test_generate_tls_cert_without_openssl_disables_hy2
 test_legacy_params_migration
+test_legacy_xray_backend_migration
+test_legacy_quick_argo_migration
 test_external_access_detection_identifies_nat
 test_nat_links_use_public_mapped_ports
 test_ipv6_only_links_are_argo_only
@@ -1540,12 +1832,17 @@ test_low_cpu_uses_low_priority_runner
 test_alpine_cloudflared_prefers_apk
 test_alpine_cloudflared_falls_back_to_binary
 test_reality_sni_probe_failure_uses_default
+test_reality_sni_probe_requires_two_successes
+test_quick_argo_domain_is_read_from_service_logs
 test_manager_command_rejects_empty_source
 test_refresh_argo_runtime_disables_incomplete_config
 test_subscription_gateway_uses_local_https_origin
 test_subscription_url_prefers_https_argo
-test_fixed_argo_link_requires_token_and_uses_own_domain
-test_default_reality_sni_is_fixed
+test_argo_link_follows_enabled_mode_and_uses_own_domain
+test_default_profile_is_reality_and_quick_argo
+test_random_reality_port_is_high_and_available
+test_service_firewall_uses_exact_protocols
+test_reality_full_fallback_probe
 test_subscription_service_does_not_open_firewall
 test_port_validation_can_skip_firewall_changes
 test_show_relay_troubleshooting_reports_core_hints

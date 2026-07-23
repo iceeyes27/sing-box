@@ -9,9 +9,11 @@ generate_params() {
     PRIVATE_KEY=$(echo "$keypair" | grep -i "PrivateKey" | awk '{print $NF}')
     PUBLIC_KEY=$(echo "$keypair" | grep -i "PublicKey"  | awk '{print $NF}')
 
-    REALITY_PORT=${REALITY_PORT:-443}
-    # 默认固定 SNI。自动测速只能反映 VPS 到目标站点的路径，不能代表客户端链路。
-    REALITY_SNI="${REALITY_SNI:-${DEFAULT_REALITY_SNI}}"
+    REALITY_PORT=${REALITY_PORT:-$(select_random_available_tcp_port)}
+    # Reality 承载内核：singbox(默认) 或 xray。可通过环境变量 REALITY_BACKEND=xray 选择。
+    REALITY_BACKEND="${REALITY_BACKEND:-singbox}"
+    # 新安装先保持为空，由安装流程按连续握手结果选择；探测失败仍回退默认 SNI。
+    REALITY_SNI="${REALITY_SNI:-}"
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
@@ -19,6 +21,7 @@ generate_params() {
     SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT:-24630}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
+    ARGO_ENABLED="true"
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
@@ -33,7 +36,7 @@ generate_params() {
     HY2_PASSWORD=$(random_base64 16)
     HY2_SNI="${HY2_DEFAULT_SNI}"
     HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
-    HY2_ENABLED="true"
+    HY2_ENABLED="false"
 
     success "参数生成完成"
 }
@@ -70,7 +73,7 @@ generate_tls_cert() {
 }
 
 is_hy2_enabled() {
-    [[ "${HY2_ENABLED:-true}" == "true" ]]
+    [[ "${HY2_ENABLED:-false}" == "true" ]]
 }
 
 # ─── 端口 / 防火墙检查 ───────────────────────────────────────
@@ -122,6 +125,24 @@ get_port_listeners() {
 
     warn "未找到 ss/netstat/lsof，跳过 ${proto^^} 端口占用检查"
     return 0
+}
+
+select_random_available_tcp_port() {
+    local attempt candidate listeners
+
+    for attempt in $(seq 1 100); do
+        candidate=$((10000 + (((RANDOM << 15) | RANDOM) % 55536)))
+        case "$candidate" in
+            24630) continue ;;
+        esac
+        listeners=$(get_port_listeners "$candidate" tcp 2>/dev/null || true)
+        [[ -z "$listeners" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+
+    # 极端环境下无法读取监听表时仍给出稳定的高位默认值，后续端口校验会再次确认。
+    printf '28805\n'
 }
 
 assert_port_available() {
@@ -263,9 +284,9 @@ open_service_ports() {
     local backend
     backend=$(detect_firewall_backend)
 
-    [[ -n "${REALITY_PORT:-}" ]] && open_firewall "$REALITY_PORT" "$backend" || return 1
-    if is_hy2_enabled && [[ -n "${HY2_PORT:-}" && "${HY2_PORT}" != "${REALITY_PORT:-}" ]]; then
-        open_firewall "$HY2_PORT" "$backend" || return 1
+    [[ -n "${REALITY_PORT:-}" ]] && open_firewall "$REALITY_PORT" "$backend" tcp || return 1
+    if is_hy2_enabled && [[ -n "${HY2_PORT:-}" ]]; then
+        open_firewall "$HY2_PORT" "$backend" udp || return 1
     fi
     return 0
 }
@@ -277,7 +298,7 @@ validate_service_ports() {
     local should_open_firewall=${4:-true}
 
     validate_port "${REALITY_PORT:-}" "Reality" || return 1
-    if argo_fixed_enabled; then
+    if argo_enabled; then
         validate_port "${WS_PORT:-}" "VLESS-WS" || return 1
     fi
     if is_hy2_enabled; then
@@ -289,15 +310,15 @@ validate_service_ports() {
             validate_port "${HY2_PUBLIC_PORT:-}" "NAT Hysteria2 公网映射" || return 1
         fi
     fi
-    if argo_fixed_enabled; then
+    if argo_enabled; then
         validate_port "${SUBSCRIPTION_PORT:-}" "订阅服务" || return 1
     fi
 
-    if argo_fixed_enabled && [[ "${REALITY_PORT}" == "${WS_PORT}" ]]; then
+    if argo_enabled && [[ "${REALITY_PORT}" == "${WS_PORT}" ]]; then
         warn "Reality 端口 ${REALITY_PORT}/TCP 与 VLESS-WS 内部端口 ${WS_PORT}/TCP 冲突"
         return 1
     fi
-    if argo_fixed_enabled && [[ "${SUBSCRIPTION_PORT}" == "${REALITY_PORT}" || "${SUBSCRIPTION_PORT}" == "${WS_PORT}" ]]; then
+    if argo_enabled && [[ "${SUBSCRIPTION_PORT}" == "${REALITY_PORT}" || "${SUBSCRIPTION_PORT}" == "${WS_PORT}" ]]; then
         warn "订阅服务端口 ${SUBSCRIPTION_PORT}/TCP 与现有 TCP 服务端口冲突"
         return 1
     fi
@@ -314,11 +335,11 @@ validate_service_ports() {
         info "Hysteria2 端口未变化，跳过占用检查"
     fi
 
-    if argo_fixed_enabled && [[ -z "$old_reality_port" ]]; then
+    if argo_enabled && [[ -z "$old_reality_port" ]]; then
         assert_port_available "$WS_PORT" "tcp" "VLESS-WS" || return 1
     fi
 
-    if argo_fixed_enabled; then
+    if argo_enabled; then
         if [[ -z "$old_subscription_port" || "$SUBSCRIPTION_PORT" != "$old_subscription_port" ]]; then
             assert_port_available "$SUBSCRIPTION_PORT" "tcp" "订阅服务" || return 1
         else
@@ -367,7 +388,7 @@ show_port_confirmation() {
             echo -e "  NAT Hysteria2:${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
         fi
     fi
-    if argo_fixed_enabled; then
+    if argo_enabled; then
         echo -e "  订阅服务:     ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(仅本机/Argo 使用)${NC}"
     fi
     if nat_mode_enabled; then
@@ -378,7 +399,7 @@ show_port_confirmation() {
     else
         echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}"
     fi
-    argo_fixed_enabled && echo -e "  不需要外部放行: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
+    argo_enabled && echo -e "  不需要外部放行: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
     echo ""
 }
 
@@ -499,7 +520,7 @@ prompt_public_ipv4_override() {
 }
 
 prompt_ipv4_link_selection_if_multiple() {
-    local count input index ip selected
+    local count input index ip selected all_option
 
     if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
         warn "当前已设置直连公网 IPv4 覆盖，多 IPv4 链接策略暂不生效。请先清除覆盖值。"
@@ -514,22 +535,29 @@ prompt_ipv4_link_selection_if_multiple() {
     echo ""
     echo -e "${CYAN}${BOLD}── 多 IPv4 链接策略 ──${NC}"
     echo -e "  检测到多个 IPv4: ${BOLD}$(public_ipv4_display)${NC}"
-    echo -e "  1) 全部启用 ${GREEN}推荐${NC}"
-    index=2
+    index=1
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
-        echo -e "  ${index}) 仅启用 ${ip}"
+        if (( index == 1 )); then
+            echo -e "  ${index}) 仅启用 ${ip} ${GREEN}推荐${NC}"
+        else
+            echo -e "  ${index}) 仅启用 ${ip}"
+        fi
         index=$((index + 1))
     done <<< "$PUBLIC_IPV4_LIST"
+    all_option=$index
+    echo -e "  ${all_option}) 全部启用"
 
     prompt_read input "  请选择 [1]: " || input=1
     input=${input:-1}
 
-    if [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 2 && input < index )); then
-        selected=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | sed -n "$((input - 1))p")
+    if [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input < all_option )); then
+        selected=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | sed -n "${input}p")
         LINK_IPV4_SELECTION="$selected"
-    else
+    elif [[ "$input" == "$all_option" ]]; then
         LINK_IPV4_SELECTION="all"
+    else
+        LINK_IPV4_SELECTION=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | sed -n '1p')
     fi
 
     info "已选择 IPv4 链接策略: $(link_ipv4_selection_label)"
@@ -543,8 +571,8 @@ show_external_access_requirements() {
     echo -e "${CYAN}${BOLD}── 外部放行提示 ──${NC}"
     case "$access_mode" in
         ipv6-only)
-            echo -e "  检测到 IPv6-only VPS；仅在配置固定域名 Argo 后生成外部节点链接。"
-            if argo_fixed_enabled; then
+            echo -e "  检测到 IPv6-only VPS；通过 Argo 生成外部节点链接。"
+            if argo_enabled; then
                 echo -e "  Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。"
                 echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
             fi
@@ -584,7 +612,7 @@ show_external_access_requirements() {
     else
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
     fi
-    if argo_fixed_enabled; then
+    if argo_enabled; then
         echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
         echo -e "  ${DIM}Argo 和订阅网关均仅供本机回环/隧道使用，一般不需要在外部面板放行。${NC}"
     fi
@@ -606,7 +634,7 @@ write_singbox_config() {
     [[ -z "${REALITY_SNI:-}" ]] && missing+="REALITY_SNI "
     [[ -z "${PRIVATE_KEY:-}" ]] && missing+="PRIVATE_KEY "
     [[ -z "${SHORT_ID:-}" ]]    && missing+="SHORT_ID "
-    if argo_fixed_enabled; then
+    if argo_enabled; then
         [[ -z "${WS_PORT:-}" ]] && missing+="WS_PORT "
         [[ -z "${WS_PATH:-}" ]] && missing+="WS_PATH "
     fi
@@ -622,16 +650,16 @@ write_singbox_config() {
 
     local json_uuid json_reality_sni json_private_key json_short_id json_ws_path argo_inbound hy2_inbound
     local json_hy2_password json_hy2_sni json_key_path json_cert_path json_hy2_masquerade_url
+    local reality_inbound inbounds_joined inbound_part
 
     json_uuid=$(json_string "$UUID")
     json_reality_sni=$(json_string "$REALITY_SNI")
     json_private_key=$(json_string "$PRIVATE_KEY")
     json_short_id=$(json_string "$SHORT_ID")
     argo_inbound=""
-    if argo_fixed_enabled; then
+    if argo_enabled; then
         json_ws_path=$(json_string "$WS_PATH")
         argo_inbound=$(cat << ARGO_EOF
-,
         {
             "type": "vless",
             "tag": "vless-ws-argo",
@@ -658,7 +686,6 @@ ARGO_EOF
         json_cert_path=$(json_string "${CONFIG_DIR}/server.crt")
         json_hy2_masquerade_url=$(json_string "$HY2_MASQUERADE_URL")
         hy2_inbound=$(cat << HY2_EOF
-,
         {
             "type": "hysteria2",
             "tag": "hysteria2-in",
@@ -687,13 +714,11 @@ HY2_EOF
 )
     fi
 
-    cat > "$CONFIG_FILE" << SINGBOX_EOF
-{
-    "log": {
-        "level": "warn",
-        "timestamp": true
-    },
-    "inbounds": [
+    # Reality 入站：仅当 Reality 由 sing-box 自己承载时才写入。
+    # REALITY_BACKEND=xray 时该入站交给 Xray-core，sing-box 让出该端口。
+    reality_inbound=""
+    if [[ "${REALITY_BACKEND:-singbox}" != "xray" ]]; then
+        reality_inbound=$(cat << REALITY_EOF
         {
             "type": "vless",
             "tag": "vless-reality",
@@ -720,7 +745,30 @@ HY2_EOF
                     ]
                 }
             }
-        }${argo_inbound}${hy2_inbound}
+        }
+REALITY_EOF
+)
+    fi
+
+    # 按顺序拼接非空入站，自动处理逗号，避免首项缺失时产生非法 JSON。
+    inbounds_joined=""
+    for inbound_part in "$reality_inbound" "$argo_inbound" "$hy2_inbound"; do
+        [[ -n "$inbound_part" ]] || continue
+        if [[ -z "$inbounds_joined" ]]; then
+            inbounds_joined="$inbound_part"
+        else
+            inbounds_joined="${inbounds_joined},"$'\n'"$inbound_part"
+        fi
+    done
+
+    cat > "$CONFIG_FILE" << SINGBOX_EOF
+{
+    "log": {
+        "level": "warn",
+        "timestamp": true
+    },
+    "inbounds": [
+${inbounds_joined}
     ],
     "outbounds": [
         {

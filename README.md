@@ -8,11 +8,11 @@
 
 ## ✨ 说明
 
-- 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box；仅在启用固定域名 Argo 时安装 cloudflared。
-- 🔧 **稳定优先链路** — 默认使用固定 SNI 的 VLESS Reality 直连；Hysteria2 和固定域名 Argo 作为附加链路。
+- 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box；启用 Argo 时安装 cloudflared 与本地订阅网关依赖。
+- 🔧 **稳定优先链路** — 新安装默认仅启用 VLESS Reality 与临时域名 Argo；Hysteria2 默认关闭，可在管理面板中启用。
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
 - 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、HTTPS 订阅链接、Argo 订阅链接、重载配置、监控日志与开机自启。
-- 📡 **可选订阅网关** — 仅在配置固定域名 Argo 时启动本地订阅服务并暴露 HTTPS 订阅地址。
+- 📡 **Argo 订阅网关** — 默认创建 `trycloudflare.com` 临时隧道并提供 HTTPS 订阅，也支持切换为固定域名 Tunnel Token 模式。
 - 🧩 **NAT VPS 适配** — 自动识别公网 IPv4 不在本机网卡的环境，分别保存本机监听端口与面板公网映射端口；没有 UDP 映射时可直接禁用 Hysteria2。
 - 🔀 **三种部署路径** — 支持主节点完整部署、当前机器直接部署线路机 / 落地机、以及导出独立线路机脚本。
 
@@ -46,7 +46,7 @@ sbm
 
 **面板概览：**
 ```text
-  sing-box 管理面板  v2.6.34
+  sing-box 管理面板  v2.7.12
   ────────────────────────────────────────
   sing-box: ● 运行中    argo-tunnel: ● 运行中
 
@@ -81,7 +81,7 @@ sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 
 ## 🌐 IPv4 / IPv6 VPS
 
-脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality/Hysteria2 直连链接；IPv6-only VPS 仅在配置固定域名 Argo 后生成外部节点链接。固定域名 Argo 始终直接使用自有域名，不使用第三方 CF 优选域名。
+脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality 直连链接；IPv6-only VPS 通过默认启用的 Argo 生成外部节点链接。固定域名 Argo 始终直接使用自有域名，不使用第三方 CF 优选域名。
 
 NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持 sing-box 使用本机监听端口。映射变化后可在 `sbm` 的“修改 NAT 公网映射”中更新，无需重写协议参数。
 
@@ -89,7 +89,7 @@ NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持
 
 主菜单的 `部署目标选择` 现在提供三种入口：
 
-1. **主节点完整部署** — 默认安装 Reality/Hysteria2；固定域名 Argo 及订阅服务按需启用。
+1. **主节点完整部署** — 默认启用 sing-box Reality 与临时域名 Argo；Hysteria2 默认关闭，固定域名 Argo 可按需配置。
 2. **只搭建线路机 / 落地机** — 直接在当前机器部署 relay，接入现有主节点。
 3. **生成线路机部署脚本** — 读取当前主节点的 Argo 参数，导出独立安装脚本给另一台机器执行。
 
@@ -123,13 +123,12 @@ sudo bash install.sh
 
 脚本会依次引导你：
 
-- 选择单端口或分端口模式
-- NAT VPS 填写面板分配的公网 TCP/UDP 映射端口
-- 启用固定域名 Argo 时设置订阅服务端口
-- 确认固定的 Reality 伪装域名
+- 使用自动生成的高位 Reality TCP 端口，或改为 443/自定义端口
+- NAT VPS 填写面板分配的公网 TCP 映射端口
+- 确认自动探测选出的 Reality 伪装域名；候选列表包含 `portal.citygrainla.com`
 - 设置节点名称
-- 选择不启用 Argo，或配置固定域名和 Tunnel Token
-- 自动生成 UUID、Reality 密钥、Hysteria2 参数
+- 默认使用临时域名 Argo，也可配置固定域名 Tunnel Token 或关闭 Argo
+- 自动生成 UUID、Reality 密钥与订阅凭据
 - 自动写入服务并启动
 
 #### 步骤 4：获取结果
@@ -137,9 +136,10 @@ sudo bash install.sh
 安装完成后，脚本会输出：
 
 - Reality 直连链接
-- 固定域名 Argo 链接（启用时）
-- Hysteria2 链接
-- HTTPS 订阅地址（启用固定域名 Argo 时）
+- Argo 链接（临时域名或固定域名）
+- HTTPS 订阅地址
+
+临时 Argo 域名可能在隧道重建后变化，执行 `sbm links` 会重新读取当前域名并刷新链接。
 
 后续可随时执行：
 
