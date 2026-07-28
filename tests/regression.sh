@@ -631,6 +631,15 @@ printf '\''%s\n'\'' "$*" >> "${NTPD_LOG}"
     rm -rf "$tmp"
 }
 
+test_time_sync_is_only_checked_during_install() {
+    local call_count
+    call_count=$(grep -Ec '^[[:space:]]+ensure_time_sync \|\| true$' "$SCRIPT" || true)
+    assert_eq "2" "$call_count" "time sync install-only call count"
+
+    assert_contains "$(declare -f do_primary_install)" "ensure_time_sync || true" "primary install time sync"
+    assert_contains "$(declare -f do_relay_install)" "ensure_time_sync || true" "relay install time sync"
+}
+
 test_runtime_param_restore_is_complete() {
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
@@ -1809,6 +1818,7 @@ test_multiple_ipv4_direct_links_follow_selection
 test_single_ipv4_falls_back_without_candidate_list
 test_rtc_epoch_uses_timedatectl_without_hwclock
 test_busybox_ntpd_can_step_system_time
+test_time_sync_is_only_checked_during_install
 test_runtime_param_restore_is_complete
 test_hysteria2_config_uses_masquerade_proxy
 test_optional_inbounds_follow_feature_state

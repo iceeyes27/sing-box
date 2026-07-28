@@ -511,7 +511,6 @@ do_modify_config() {
                 write_singbox_config
                 write_singbox_service
                 save_params
-                ensure_time_sync || true
                 info "重启 sing-box..."
                 if ! service_restart sing-box; then
                     restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
@@ -589,7 +588,6 @@ do_modify_config() {
 # ─── 查看链接 ────────────────────────────────────────────────
 do_show_links() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
-    ensure_time_sync || true
 
     refresh_argo_domain_if_needed
 
@@ -602,7 +600,6 @@ do_show_links() {
 # ─── 启动 / 停止 / 重启 ──────────────────────────────────────
 do_start() {
     info "启动服务..."
-    ensure_time_sync || true
     service_start sing-box && success "sing-box 已启动" || warn "sing-box 启动失败"
     if load_params; then
         if argo_enabled; then
@@ -627,7 +624,6 @@ do_stop() {
 
 do_restart() {
     info "重启服务..."
-    ensure_time_sync || true
     service_restart sing-box && success "sing-box 已重启" || warn "sing-box 重启失败"
     if load_params; then
         if argo_enabled; then
@@ -749,7 +745,6 @@ do_reoptimize_reality_sni() {
         write_singbox_service
     fi
     save_params
-    ensure_time_sync || true
 
     if ! service_restart "$reality_service"; then
         warn "${reality_service} 重启失败，正在回滚到原伪装域名: ${old_sni}"
@@ -799,7 +794,6 @@ do_apply_latest() {
     fi
 
     info "正在按 v${SCRIPT_VERSION} 模板重写配置 (UUID / 端口 / 域名 / 密钥保持不变)..."
-    ensure_time_sync || true
     generate_tls_cert
     write_singbox_config
     write_singbox_service
@@ -1088,7 +1082,7 @@ main() {
         install)       do_primary_install ;;
         relay-install) do_relay_install ;;
         relay)         do_generate_relay_script ;;
-        links|sub)   load_params && { ensure_time_sync || true; refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"; show_subscription_url; } || warn "未安装" ;;
+        links|sub)   load_params && { refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"; show_subscription_url; } || warn "未安装" ;;
         start)       do_start ;;
         stop)        do_stop ;;
         restart)     do_restart ;;
