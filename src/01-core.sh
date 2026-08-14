@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.7.13"
+SCRIPT_VERSION="2.8.0"
 DEFAULT_REALITY_SNI="www.microsoft.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
@@ -528,6 +528,14 @@ reality_share_port() {
     fi
 }
 
+socks_share_port() {
+    if nat_mode_enabled; then
+        printf '%s' "${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
+    else
+        printf '%s' "${SOCKS_PORT}"
+    fi
+}
+
 hy2_share_port() {
     if nat_mode_enabled; then
         printf '%s' "${HY2_PUBLIC_PORT:-${HY2_PORT}}"
@@ -609,7 +617,8 @@ PARAM_KEYS=(
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_ENABLED ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
-    NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT
+    SOCKS_PORT SOCKS_USERNAME SOCKS_PASSWORD SOCKS_ENABLED
+    NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT SOCKS_PUBLIC_PORT
 )
 
 is_param_key() {
@@ -643,7 +652,11 @@ write_env_file() {
 write_param() {
     local key="$1"
     local value="${!key-}"
-    printf '%s=%s\n' "$key" "$(shell_quote "$value")"
+    # 参数文件由专用解析器读取，不执行 shell。统一双引号格式可安全保留
+    # 空格、反斜杠、引号和凭据中的 URL 特殊字符。
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '%s="%s"\n' "$key" "$value"
 }
 
 random_hex() {
@@ -717,7 +730,7 @@ save_params() {
 load_params() {
     if [[ -f "$PARAMS_FILE" ]]; then
         load_param_file
-        # 兼容旧版本:逐字段补齐 Hysteria2 / Argo 参数，绝不覆盖已有值。
+        # 兼容旧版本:逐字段补齐 Hysteria2 / Argo / SOCKS5 参数，绝不覆盖已有值。
         local need_save=false
         if ! grep -q '^REALITY_BACKEND=' "$PARAMS_FILE" 2>/dev/null; then
             if [[ -f "${XRAY_CONFIG_FILE:-/etc/xray/config.json}" ]] && service_exists xray; then
@@ -751,6 +764,27 @@ load_params() {
             need_save=true
         elif [[ "${HY2_ENABLED:-}" != "true" && "${HY2_ENABLED:-}" != "false" ]]; then
             HY2_ENABLED="true"
+            need_save=true
+        fi
+        if ! validate_port "${SOCKS_PORT:-}" "SOCKS5" >/dev/null 2>&1; then
+            SOCKS_PORT=$(select_random_available_tcp_port \
+                "${REALITY_PORT:-}" "${WS_PORT:-}" "${SUBSCRIPTION_PORT:-}")
+            need_save=true
+        fi
+        if [[ -z "${SOCKS_USERNAME:-}" ]]; then
+            SOCKS_USERNAME="proxy-${SHORT_ID:-user}"
+            need_save=true
+        fi
+        if [[ -z "${SOCKS_PASSWORD:-}" ]]; then
+            SOCKS_PASSWORD=$(random_hex 16)
+            need_save=true
+        fi
+        if ! grep -q '^SOCKS_ENABLED=' "$PARAMS_FILE" 2>/dev/null; then
+            # 新增能力对旧安装保持关闭，避免升级后意外扩大公网暴露面。
+            SOCKS_ENABLED="false"
+            need_save=true
+        elif [[ "${SOCKS_ENABLED:-}" != "true" && "${SOCKS_ENABLED:-}" != "false" ]]; then
+            SOCKS_ENABLED="false"
             need_save=true
         fi
         if [[ -z "${ARGO_TOKEN:-}" ]]; then
@@ -820,6 +854,10 @@ load_params() {
         fi
         if ! validate_port "${HY2_PUBLIC_PORT:-}" "NAT Hysteria2 公网映射" >/dev/null 2>&1; then
             HY2_PUBLIC_PORT="${HY2_PORT}"
+            need_save=true
+        fi
+        if ! validate_port "${SOCKS_PUBLIC_PORT:-}" "NAT SOCKS5 公网映射" >/dev/null 2>&1; then
+            SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
             need_save=true
         fi
         [[ "$need_save" == "true" ]] && save_params
@@ -994,5 +1032,10 @@ restore_runtime_params() {
     HY2_PUBLIC_PORT="${24:-${HY2_PORT}}"
     ARGO_ENABLED="${25:-false}"
     HY2_ENABLED="${26:-false}"
+    SOCKS_PORT="${27:-}"
+    SOCKS_USERNAME="${28:-}"
+    SOCKS_PASSWORD="${29:-}"
+    SOCKS_ENABLED="${30:-false}"
+    SOCKS_PUBLIC_PORT="${31:-${SOCKS_PORT}}"
     reset_public_ip_cache
 }

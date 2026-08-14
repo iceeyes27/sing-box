@@ -37,7 +37,7 @@
 | 场景 | 行为 |
 |---|---|
 | 公网 IPv4 不在本机网卡 | 自动启用 NAT 模式并保存检测到的公网 IPv4 |
-| 公网端口与本机端口不同 | Reality/Hysteria2 链接使用公网映射端口，sing-box 配置继续使用本机监听端口 |
+| 公网端口与本机端口不同 | Reality/Hysteria2/SOCKS5 链接使用各自公网映射端口，sing-box 配置继续使用本机监听端口 |
 | 面板不提供 UDP 映射 | 安装时输入 `0` 禁用 Hysteria2，仅部署 Reality |
 | 映射端口后续变化 | 通过管理面板“修改 NAT 公网映射”更新，不重启 sing-box |
 
@@ -48,6 +48,7 @@
 | VLESS Reality | 公网端口 | 用户确认后尝试放行防火墙 |
 | VLESS WebSocket | `127.0.0.1:${WS_PORT}` | 作为 Argo / 订阅网关上游 |
 | Hysteria2 | 公网 UDP 端口 | 用户确认后尝试放行防火墙；NAT 无 UDP 映射时可禁用 |
+| SOCKS5 | 默认关闭；启用后监听公网 TCP 端口 | 强制用户名密码认证；建议在外部防火墙中限制来源 IP |
 | 订阅服务 | `127.0.0.1:24630` | 只供 Argo 本地回源，不直接开放公网 |
 | Argo Tunnel | Cloudflare HTTPS 入口 | 仅支持固定域名与 Tunnel Token，默认关闭 |
 | 线路机 / 落地机 | 公网 Reality 监听端口 | 仅开放用户确认的 relay 监听端口，出站回源到上游 Argo / CF 入口 |

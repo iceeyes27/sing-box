@@ -9,7 +9,7 @@
 ## ✨ 说明
 
 - 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box；启用 Argo 时安装 cloudflared 与本地订阅网关依赖。
-- 🔧 **稳定优先链路** — 新安装默认仅启用 VLESS Reality 与临时域名 Argo；Hysteria2 默认关闭，可在管理面板中启用。
+- 🔧 **稳定优先链路** — 新安装默认仅启用 VLESS Reality 与临时域名 Argo；Hysteria2 和带认证 SOCKS5 默认关闭，可在管理面板中启用。
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
 - 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、HTTPS 订阅链接、Argo 订阅链接、重载配置、监控日志与开机自启。
 - 📡 **Argo 订阅网关** — 默认创建 `trycloudflare.com` 临时隧道并提供 HTTPS 订阅，也支持切换为固定域名 Tunnel Token 模式。
@@ -46,13 +46,13 @@ sbm
 
 **面板概览：**
 ```text
-  sing-box 管理面板  v2.7.13
+  sing-box 管理面板  v2.8.0
   ────────────────────────────────────────
   sing-box: ● 运行中    argo-tunnel: ● 运行中
 
   部署 & 配置
    1) 部署 / 安装节点
-   2) 修改配置 (端口 / 域名 / UUID / SNI)
+   2) 修改配置 (端口 / 域名 / UUID / SNI / SOCKS5)
    3) 节点链接与订阅
 
   服务管理
@@ -83,13 +83,24 @@ sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 
 脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality 直连链接；IPv6-only VPS 通过默认启用的 Argo 生成外部节点链接。固定域名 Argo 始终直接使用自有域名，不使用第三方 CF 优选域名。
 
-NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持 sing-box 使用本机监听端口。映射变化后可在 `sbm` 的“修改 NAT 公网映射”中更新，无需重写协议参数。
+NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持 sing-box 使用本机监听端口。Reality、Hysteria2 和已启用的 SOCKS5 分别保存公网映射端口；映射变化后可在 `sbm` 的“修改 NAT 公网映射”中更新。
+
+## 🔌 可选 SOCKS5 代理
+
+主节点安装完成后运行 `sbm`，进入“修改配置”并选择“管理 SOCKS5 代理”。启用后脚本会：
+
+- 使用独立随机高位 TCP 端口和强随机密码；
+- 写入带用户名密码认证的 sing-box SOCKS 入站；
+- 放行对应 TCP 端口并重启 sing-box；
+- 输出可直接粘贴到代理池的 `socks5://用户名:密码@IP:端口` 链接。
+
+SOCKS5 不会加入 VLESS/Hysteria2 订阅内容，只写入终端输出和 `/etc/sing-box/share-links.txt`。公网使用时应在 VPS 安全组中把 SOCKS5 端口限制为业务服务器的固定出口 IP。
 
 ## 🧭 部署目标
 
 主菜单的 `部署目标选择` 现在提供三种入口：
 
-1. **主节点完整部署** — 默认启用 sing-box Reality 与临时域名 Argo；Hysteria2 默认关闭，固定域名 Argo 可按需配置。
+1. **主节点完整部署** — 默认启用 sing-box Reality 与临时域名 Argo；Hysteria2 和 SOCKS5 默认关闭，固定域名 Argo 可按需配置。
 2. **只搭建线路机 / 落地机** — 直接在当前机器部署 relay，接入现有主节点。
 3. **生成线路机部署脚本** — 读取当前主节点的 Argo 参数，导出独立安装脚本给另一台机器执行。
 
@@ -363,7 +374,7 @@ sh /tmp/sbm-relay-install.xxxxxx.sh
 - 旧的 `sbm relay` 仍然保留，继续用于 **从主节点导出线路机脚本**。
 - 新增的 `sbm relay-install` 是 **增量能力**，不会替代旧命令。
 - 现有 `/etc/sing-box/.params` 参数文件继续兼容，升级后无需手动迁移。
-- 原有订阅、Argo、Reality、Hysteria2 相关流程不需要重装即可继续使用。
+- 原有订阅、Argo、Reality、Hysteria2 相关流程不需要重装即可继续使用；旧安装升级后 SOCKS5 保持关闭。
 
 如果你是旧用户，通常只需要更新到新脚本版本，然后按需使用新增的 `relay-install` 功能即可。
 
@@ -388,6 +399,7 @@ sh /tmp/sbm-relay-install.xxxxxx.sh
 - 订阅服务默认只监听 `127.0.0.1`，公网订阅地址通过 Argo HTTPS 入口访问。
 - 订阅地址包含随机 token；如怀疑泄露，建议重新生成 UUID / token / Reality key。
 - 脚本会在确认端口后按系统环境尝试放行 sing-box 入站端口；订阅服务端口不应直接对公网开放。
+- SOCKS5 强制配置用户名密码；仍建议通过云安全组或厂商防火墙限制允许访问该端口的来源 IP。
 - Argo token、订阅 token 和节点密钥均存放在本机配置文件中，请限制文件读取权限并避免公开日志输出。
 - 线路机 / 落地机直装模式会严格校验上游参数，错误或不完整的 `VLESS + WS + Argo` 链接会被拒绝并要求改为手动输入。
 - Hysteria2 直连分享链接同时提供 `insecure=1` 与证书固定指纹 `pinSHA256`：v2rayN 可导入自签证书节点，支持证书固定的客户端仍可校验指纹。

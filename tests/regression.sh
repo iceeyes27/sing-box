@@ -208,6 +208,10 @@ EOF
     assert_eq "443" "$REALITY_PUBLIC_PORT" "legacy Reality public port migration"
     assert_eq "8443" "$HY2_PUBLIC_PORT" "legacy HY2 public port migration"
     assert_eq "true" "$HY2_ENABLED" "legacy HY2 remains enabled"
+    assert_eq "false" "$SOCKS_ENABLED" "legacy SOCKS5 remains disabled"
+    assert_eq "proxy-abcd1234" "$SOCKS_USERNAME" "legacy SOCKS5 username migration"
+    assert_eq "legacy-sub-token" "$SOCKS_PASSWORD" "legacy SOCKS5 password migration"
+    assert_eq "$SOCKS_PORT" "$SOCKS_PUBLIC_PORT" "legacy SOCKS5 public port migration"
     assert_eq "false" "$ARGO_ENABLED" "legacy empty Argo remains disabled"
     assert_eq "singbox" "$REALITY_BACKEND" "legacy Reality backend defaults to sing-box"
     XRAY_CONFIG_FILE="$old_xray_config"
@@ -326,6 +330,11 @@ EOF
     HY2_SNI="bing.com"
     HY2_MASQUERADE_URL="https://www.bing.com/a b"
     HY2_ENABLED="false"
+    SOCKS_PORT="10808"
+    SOCKS_USERNAME='proxy user'
+    SOCKS_PASSWORD='socks pass:@/quoted'
+    SOCKS_ENABLED="true"
+    SOCKS_PUBLIC_PORT="31080"
     PUBLIC_IPV4_OVERRIDE="198.51.100.99"
     NAT_MODE="true"
     REALITY_PUBLIC_PORT="30443"
@@ -338,11 +347,12 @@ EOF
     ARGO_BEST_CF_DOMAIN_IPV6=""; LINK_IPV4_SELECTION=""; PUBLIC_IPV4_OVERRIDE=""
     NAT_MODE=""; REALITY_PUBLIC_PORT=""; HY2_PUBLIC_PORT=""
     HY2_PORT=""; HY2_PASSWORD=""; HY2_SNI=""; HY2_MASQUERADE_URL=""; HY2_ENABLED=""
+    SOCKS_PORT=""; SOCKS_USERNAME=""; SOCKS_PASSWORD=""; SOCKS_ENABLED=""; SOCKS_PUBLIC_PORT=""
 
     load_params
     assert_eq 'uuid "quoted"' "$UUID" "params UUID round trip"
     assert_eq 'xray' "$REALITY_BACKEND" "params Reality backend round trip"
-    assert_eq 'sid\\backslash' "$SHORT_ID" "params short id round trip"
+    assert_eq 'sid\backslash' "$SHORT_ID" "params short id round trip"
     assert_eq '/path with spaces' "$WS_PATH" "params WS path round trip"
     assert_eq 'node # one' "$NODE_NAME" "params node name round trip"
     assert_eq 'sub token $value' "$SUB_TOKEN" "params token round trip"
@@ -354,7 +364,16 @@ EOF
     assert_eq '30444' "$HY2_PUBLIC_PORT" "params HY2 public port round trip"
     assert_eq 'hy2 pass "quoted"' "$HY2_PASSWORD" "params HY2 password round trip"
     assert_eq 'false' "$HY2_ENABLED" "params HY2 enabled state round trip"
+    assert_eq '10808' "$SOCKS_PORT" "params SOCKS5 port round trip"
+    assert_eq 'proxy user' "$SOCKS_USERNAME" "params SOCKS5 username round trip"
+    assert_eq 'socks pass:@/quoted' "$SOCKS_PASSWORD" "params SOCKS5 password round trip"
+    assert_eq 'true' "$SOCKS_ENABLED" "params SOCKS5 enabled state round trip"
+    assert_eq '31080' "$SOCKS_PUBLIC_PORT" "params SOCKS5 public port round trip"
 
+    PUBLIC_IPV4_OVERRIDE=""
+    NAT_MODE="false"
+    SOCKS_ENABLED="false"
+    reset_public_ip_cache
     rm -rf "$tmp"
 }
 
@@ -399,18 +418,50 @@ test_nat_links_use_public_mapped_ports() {
     HY2_PORT="443"
     HY2_PUBLIC_PORT="30444"
     HY2_ENABLED="false"
+    SOCKS_PORT="10808"
+    SOCKS_PUBLIC_PORT="31080"
+    SOCKS_USERNAME="proxy-user"
+    SOCKS_PASSWORD="proxy-pass"
+    SOCKS_ENABLED="true"
     NAT_MODE="true"
     GENERATED_REALITY_LINKS=""
     GENERATED_HY2_LINKS=""
+    GENERATED_SOCKS_LINKS=""
     GENERATED_SUBSCRIPTION_RAW=""
 
     build_direct_share_links_for_ip "198.51.100.10" ""
     assert_contains "$GENERATED_REALITY_LINKS" "@198.51.100.10:30443?" "NAT Reality public port"
+    assert_eq "socks5://proxy-user:proxy-pass@198.51.100.10:31080" "$GENERATED_SOCKS_LINKS" "NAT SOCKS5 public port"
     assert_eq "443" "$REALITY_PORT" "NAT Reality local port unchanged"
 
     NAT_MODE="false"
     REALITY_PUBLIC_PORT="443"
     HY2_PUBLIC_PORT="443"
+    SOCKS_ENABLED="false"
+}
+
+test_urlencode_fallback_and_socks5_link_credentials() {
+    local tmp encoded
+    tmp=$(mktemp -d)
+    make_cmd "${tmp}/python3" '#!/usr/bin/env bash
+exit 1'
+
+    encoded=$(PATH="$tmp" urlencode 'user name:@/')
+    assert_eq "user%20name%3A%40%2F" "$encoded" "URL encoding fallback"
+
+    SOCKS_PORT="10808"
+    SOCKS_PUBLIC_PORT="10808"
+    SOCKS_USERNAME="user name"
+    SOCKS_PASSWORD='p@ss:/word'
+    SOCKS_ENABLED="true"
+    NAT_MODE="false"
+    GENERATED_SOCKS_LINKS=""
+    PATH="$tmp" build_socks_link_for_ip "198.51.100.10"
+    assert_eq "socks5://user%20name:p%40ss%3A%2Fword@198.51.100.10:10808" \
+        "$GENERATED_SOCKS_LINKS" "SOCKS5 credentials are URL encoded"
+
+    SOCKS_ENABLED="false"
+    rm -rf "$tmp"
 }
 
 test_ipv4_override_takes_priority() {
@@ -499,7 +550,7 @@ test_ip_detection_failure_keeps_argo_link_generation() {
     assert_not_contains "$GENERATED_ARGO_LINKS" "ed%3D2048" "fixed Argo omits early data"
 }
 
-test_ipv6_only_links_are_argo_only() {
+test_ipv6_only_links_include_socks5() {
     UUID="uuid-1"
     NODE_NAME="node"
     REALITY_PORT="443"
@@ -513,6 +564,11 @@ test_ipv6_only_links_are_argo_only() {
     ARGO_DOMAIN="argo.example.com"
     ARGO_TOKEN="fixed-token"
     ARGO_BEST_CF_DOMAIN="cf.example.com"
+    SOCKS_PORT="10808"
+    SOCKS_PUBLIC_PORT="10808"
+    SOCKS_USERNAME="proxy"
+    SOCKS_PASSWORD="secret"
+    SOCKS_ENABLED="true"
 
     refresh_public_ip_stack() {
         IP_STACK_MODE="ipv6-only"
@@ -528,6 +584,8 @@ test_ipv6_only_links_are_argo_only() {
     assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@argo.example.com:443" "IPv6-only fixed Argo link"
     assert_not_contains "$GENERATED_REALITY_LINKS" "vless://" "IPv6-only Reality suppression"
     assert_not_contains "$GENERATED_HY2_LINKS" "hysteria2://" "IPv6-only Hysteria2 suppression"
+    assert_eq "socks5://proxy:secret@[2001:db8::1]:10808" "$GENERATED_SOCKS_LINKS" "IPv6-only SOCKS5 link"
+    SOCKS_ENABLED="false"
 }
 
 test_multiple_ipv4_direct_links_follow_selection() {
@@ -647,7 +705,8 @@ test_runtime_param_restore_is_complete() {
         "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
-        "198.51.100.20" "true" "30443" "30444" "true" "false"
+        "198.51.100.20" "true" "30443" "30444" "true" "false" \
+        "10808" "proxy-old" "socks-old" "true" "31080"
 
     UUID="uuid-new"
     SHORT_ID="sid-new"
@@ -675,6 +734,11 @@ test_runtime_param_restore_is_complete() {
     HY2_PUBLIC_PORT="8444"
     ARGO_ENABLED="false"
     HY2_ENABLED="true"
+    SOCKS_PORT="10809"
+    SOCKS_USERNAME="proxy-new"
+    SOCKS_PASSWORD="socks-new"
+    SOCKS_ENABLED="false"
+    SOCKS_PUBLIC_PORT="31081"
 
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
@@ -682,7 +746,8 @@ test_runtime_param_restore_is_complete() {
         "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
-        "198.51.100.20" "true" "30443" "30444" "true" "false"
+        "198.51.100.20" "true" "30443" "30444" "true" "false" \
+        "10808" "proxy-old" "socks-old" "true" "31080"
 
     assert_eq "uuid-old" "$UUID" "restore UUID"
     assert_eq "sid-old" "$SHORT_ID" "restore Short ID"
@@ -710,6 +775,11 @@ test_runtime_param_restore_is_complete() {
     assert_eq "30444" "$HY2_PUBLIC_PORT" "restore HY2 public port"
     assert_eq "true" "$ARGO_ENABLED" "restore Argo enabled state"
     assert_eq "false" "$HY2_ENABLED" "restore HY2 enabled state"
+    assert_eq "10808" "$SOCKS_PORT" "restore SOCKS5 port"
+    assert_eq "proxy-old" "$SOCKS_USERNAME" "restore SOCKS5 username"
+    assert_eq "socks-old" "$SOCKS_PASSWORD" "restore SOCKS5 password"
+    assert_eq "true" "$SOCKS_ENABLED" "restore SOCKS5 enabled state"
+    assert_eq "31080" "$SOCKS_PUBLIC_PORT" "restore SOCKS5 public port"
 }
 
 test_hysteria2_config_uses_masquerade_proxy() {
@@ -755,7 +825,7 @@ test_hysteria2_config_uses_masquerade_proxy() {
 }
 
 test_optional_inbounds_follow_feature_state() {
-    local tmp config config_with_quick_argo config_with_fixed_argo config_with_xray_backend chown_def
+    local tmp config config_with_quick_argo config_with_fixed_argo config_with_xray_backend config_with_socks chown_def
     tmp=$(mktemp -d)
 
     chown_def=$(declare -f chown 2>/dev/null || true)
@@ -774,6 +844,10 @@ test_optional_inbounds_follow_feature_state() {
     WS_PORT="18080"
     WS_PATH="/abcd1234"
     HY2_ENABLED="false"
+    SOCKS_PORT="10808"
+    SOCKS_USERNAME='proxy "quoted"'
+    SOCKS_PASSWORD='pass\word'
+    SOCKS_ENABLED="false"
     ARGO_ENABLED="false"
     ARGO_TOKEN=""
     ARGO_DOMAIN=""
@@ -798,11 +872,18 @@ test_optional_inbounds_follow_feature_state() {
     write_singbox_config >/dev/null
     python3 -m json.tool "$CONFIG_FILE" >/dev/null || fail "Xray Reality plus fixed Argo config is not valid JSON"
     config_with_xray_backend=$(<"$CONFIG_FILE")
+
+    REALITY_BACKEND="singbox"
+    SOCKS_ENABLED="true"
+    write_singbox_config >/dev/null
+    python3 -m json.tool "$CONFIG_FILE" >/dev/null || fail "Reality plus SOCKS5 config is not valid JSON"
+    config_with_socks=$(<"$CONFIG_FILE")
     unset -f chown sing-box
     [[ -n "$chown_def" ]] && eval "$chown_def"
     rm -rf "$tmp"
 
     assert_not_contains "$config" '"type": "hysteria2"' "HY2 disabled omits inbound"
+    assert_not_contains "$config" '"tag": "socks5-in"' "SOCKS5 disabled omits inbound"
     assert_contains "$config" '"tag": "vless-reality"' "Reality remains enabled"
     assert_not_contains "$config" '"tag": "vless-ws-argo"' "disabled Argo omits WS inbound"
     assert_contains "$config_with_quick_argo" '"tag": "vless-reality"' "quick Argo keeps Reality inbound"
@@ -812,6 +893,12 @@ test_optional_inbounds_follow_feature_state() {
     assert_not_contains "$config_with_fixed_argo" '"max_early_data"' "fixed Argo omits early data"
     assert_not_contains "$config_with_xray_backend" '"tag": "vless-reality"' "Xray backend omits sing-box Reality inbound"
     assert_contains "$config_with_xray_backend" '"tag": "vless-ws-argo"' "Xray backend keeps sing-box Argo inbound"
+    assert_contains "$config_with_socks" '"type": "socks"' "SOCKS5 enabled includes socks inbound"
+    assert_contains "$config_with_socks" '"tag": "socks5-in"' "SOCKS5 inbound tag"
+    assert_contains "$config_with_socks" '"listen_port": 10808' "SOCKS5 listen port"
+    assert_contains "$config_with_socks" '"username": "proxy \"quoted\""' "SOCKS5 username JSON escaping"
+    assert_contains "$config_with_socks" '"password": "pass\\word"' "SOCKS5 password JSON escaping"
+    SOCKS_ENABLED="false"
 }
 
 test_relay_script_generation_uses_argo_upstream() {
@@ -1478,6 +1565,7 @@ test_default_profile_is_reality_and_quick_argo() {
     select_random_available_tcp_port() { echo "28805"; }
 
     unset REALITY_PORT REALITY_SNI REALITY_BACKEND NODE_NAME SUBSCRIPTION_PORT LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
+    unset SOCKS_PORT SOCKS_PUBLIC_PORT SOCKS_USERNAME SOCKS_PASSWORD SOCKS_ENABLED
     generate_params >/dev/null
     assert_eq "28805" "$REALITY_PORT" "default Reality high port"
     assert_eq "" "$REALITY_SNI" "default Reality SNI is selected during install"
@@ -1485,6 +1573,9 @@ test_default_profile_is_reality_and_quick_argo() {
     assert_eq "true" "$ARGO_ENABLED" "default Argo enabled"
     argo_quick_enabled || fail "default Argo mode is not quick tunnel"
     assert_eq "false" "$HY2_ENABLED" "default HY2 disabled"
+    assert_eq "false" "$SOCKS_ENABLED" "default SOCKS5 disabled"
+    assert_eq "proxy-abcd1234" "$SOCKS_USERNAME" "default SOCKS5 username"
+    assert_eq "abcd1234" "$SOCKS_PASSWORD" "default SOCKS5 password"
     assert_contains " ${REALITY_SNI_LIST[*]} " " portal.citygrainla.com " "vetted Reality SNI candidate"
 
     unset -f sing-box random_hex random_base64 select_random_available_tcp_port
@@ -1537,6 +1628,8 @@ test_service_firewall_uses_exact_protocols() {
     REALITY_PORT="28805"
     HY2_PORT="28805"
     HY2_ENABLED="false"
+    SOCKS_PORT="10808"
+    SOCKS_ENABLED="false"
     calls=$(open_service_ports)
     assert_eq "28805/tcp" "$calls" "Reality opens TCP only"
 
@@ -1544,6 +1637,12 @@ test_service_firewall_uses_exact_protocols() {
     calls=$(open_service_ports)
     assert_contains "$calls" "28805/tcp" "Reality TCP firewall rule"
     assert_contains "$calls" "28805/udp" "HY2 UDP firewall rule"
+
+    SOCKS_ENABLED="true"
+    calls=$(open_service_ports)
+    assert_contains "$calls" "10808/tcp" "SOCKS5 TCP firewall rule"
+    assert_not_contains "$calls" "10808/udp" "SOCKS5 does not open UDP firewall rule"
+    SOCKS_ENABLED="false"
 
     unset -f detect_firewall_backend open_firewall
     eval "$detect_firewall_backend_def"
@@ -1619,6 +1718,7 @@ test_port_validation_can_skip_firewall_changes() {
     WS_PORT="18080"
     HY2_PORT="443"
     SUBSCRIPTION_PORT="24630"
+    SOCKS_ENABLED="false"
 
     assert_port_available() {
         :
@@ -1632,6 +1732,45 @@ test_port_validation_can_skip_firewall_changes() {
     unset -f assert_port_available open_service_ports
     eval "$assert_port_available_def"
     eval "$open_service_ports_def"
+}
+
+test_socks5_port_conflicts_are_rejected() {
+    local assert_port_available_def
+    assert_port_available_def=$(declare -f assert_port_available)
+    assert_port_available() { :; }
+
+    REALITY_PORT="443"
+    WS_PORT="18080"
+    SUBSCRIPTION_PORT="24630"
+    HY2_PORT="8443"
+    HY2_ENABLED="false"
+    ARGO_ENABLED="true"
+    NAT_MODE="false"
+    REALITY_PUBLIC_PORT="443"
+    SOCKS_ENABLED="true"
+    SOCKS_PORT="443"
+    SOCKS_PUBLIC_PORT="443"
+
+    if validate_service_ports "443" "" "24630" false "" >/dev/null 2>&1; then
+        fail "SOCKS5 accepted a local TCP port shared with Reality"
+    fi
+
+    SOCKS_PORT="10808"
+    NAT_MODE="true"
+    SOCKS_PUBLIC_PORT="30443"
+    REALITY_PUBLIC_PORT="30443"
+    if validate_service_ports "443" "" "24630" false "10808" >/dev/null 2>&1; then
+        fail "SOCKS5 accepted a NAT public TCP port shared with Reality"
+    fi
+
+    SOCKS_PUBLIC_PORT="31080"
+    validate_service_ports "443" "" "24630" false "10808" >/dev/null || \
+        fail "valid SOCKS5 ports were rejected"
+
+    SOCKS_ENABLED="false"
+    NAT_MODE="false"
+    unset -f assert_port_available
+    eval "$assert_port_available_def"
 }
 
 test_show_relay_troubleshooting_reports_core_hints() {
@@ -1809,11 +1948,13 @@ test_package_manager_alpine
 test_missing_openssl_does_not_block_core_install
 test_generate_tls_cert_without_openssl_disables_hy2
 test_legacy_params_migration
+test_params_parser_is_safe_and_round_trips
 test_legacy_xray_backend_migration
 test_legacy_quick_argo_migration
 test_external_access_detection_identifies_nat
 test_nat_links_use_public_mapped_ports
-test_ipv6_only_links_are_argo_only
+test_urlencode_fallback_and_socks5_link_credentials
+test_ipv6_only_links_include_socks5
 test_multiple_ipv4_direct_links_follow_selection
 test_single_ipv4_falls_back_without_candidate_list
 test_rtc_epoch_uses_timedatectl_without_hwclock
@@ -1855,6 +1996,7 @@ test_service_firewall_uses_exact_protocols
 test_reality_full_fallback_probe
 test_subscription_service_does_not_open_firewall
 test_port_validation_can_skip_firewall_changes
+test_socks5_port_conflicts_are_rejected
 test_show_relay_troubleshooting_reports_core_hints
 test_show_relay_success_self_check_reports_core_passes
 test_subscription_page_is_final_section

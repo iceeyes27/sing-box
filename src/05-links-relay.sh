@@ -188,7 +188,25 @@ verify_or_reselect_reality_sni() {
 
 # ─── URL 编码 ────────────────────────────────────────────────
 urlencode() {
-    python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
+    local value="$1" output="" char encoded i
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$value" 2>/dev/null && return 0
+    fi
+
+    # 生成的 SOCKS5 凭据即使在精简系统缺少 python3 时也必须保持 URL 有效。
+    local LC_ALL=C
+    for ((i = 0; i < ${#value}; i++)); do
+        char="${value:i:1}"
+        case "$char" in
+            [a-zA-Z0-9.~_-]) output+="$char" ;;
+            *)
+                printf -v encoded '%%%02X' "'$char"
+                output+="$encoded"
+                ;;
+        esac
+    done
+    printf '%s\n' "$output"
 }
 
 append_subscription_link() {
@@ -218,6 +236,15 @@ append_hy2_link() {
         GENERATED_HY2_LINKS+=$'\n'"$link"
     fi
     append_subscription_link "$link"
+}
+
+append_socks_link() {
+    local link="$1"
+    if [[ -z "$GENERATED_SOCKS_LINKS" ]]; then
+        GENERATED_SOCKS_LINKS="$link"
+    else
+        GENERATED_SOCKS_LINKS+=$'\n'"$link"
+    fi
 }
 
 get_hy2_cert_pin_sha256() {
@@ -254,6 +281,21 @@ hy2_share_link_available() {
     get_hy2_cert_pin_sha256 >/dev/null
 }
 
+socks_share_link_available() {
+    is_socks_enabled && [[ -n "${SOCKS_PORT:-}" && -n "${SOCKS_USERNAME:-}" && -n "${SOCKS_PASSWORD:-}" ]]
+}
+
+build_socks_link_for_ip() {
+    local ip="$1" host username_enc password_enc
+
+    socks_share_link_available || return 0
+    [[ -n "$ip" ]] || return 0
+    host=$(format_url_host "$ip")
+    username_enc=$(urlencode "$SOCKS_USERNAME")
+    password_enc=$(urlencode "$SOCKS_PASSWORD")
+    append_socks_link "socks5://${username_enc}:${password_enc}@${host}:$(socks_share_port)"
+}
+
 build_direct_share_links_for_ip() {
     local ip="$1"
     local family_label="$2"
@@ -270,6 +312,8 @@ build_direct_share_links_for_ip() {
 
     remark=$(urlencode "$reality_name")
     append_reality_link "vless://${UUID}@${host}:$(reality_share_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${remark}"
+
+    build_socks_link_for_ip "$ip"
 
     if hy2_share_link_available; then
         local hy2_remark hy2_pass_enc hy2_name hy2_pin_sha hy2_pin_enc
@@ -330,6 +374,7 @@ build_share_links() {
     GENERATED_REALITY_LINKS=""
     GENERATED_ARGO_LINKS=""
     GENERATED_HY2_LINKS=""
+    GENERATED_SOCKS_LINKS=""
     GENERATED_SUBSCRIPTION_RAW=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
@@ -350,10 +395,11 @@ build_share_links() {
             build_direct_share_links_for_selected_ipv4s
             ;;
         ipv6-only)
+            build_socks_link_for_ip "${PUBLIC_IPV6:-${PUBLIC_IP:-}}"
             if argo_enabled; then
-                warn "检测到 IPv6-only VPS，仅生成 Argo 节点链接。"
+                warn "检测到 IPv6-only VPS，Reality/Hysteria2 仅生成 Argo 节点链接。"
             else
-                warn "检测到 IPv6-only VPS，且未启用 Argo，无法生成外部节点链接。"
+                warn "检测到 IPv6-only VPS，且未启用 Argo，无法生成 Reality/Hysteria2 外部节点链接。"
             fi
             ;;
         unknown)
@@ -452,6 +498,10 @@ generate_and_show_links() {
         echo -e "  Public Key:    ${BOLD}${PUBLIC_KEY}${NC}"
         echo -e "  Short ID:      ${BOLD}${SHORT_ID}${NC}"
     fi
+    if is_socks_enabled; then
+        echo -e "  SOCKS5 端口:   ${BOLD}$(socks_share_port)${NC}$(nat_mode_enabled && printf ' (本机监听 %s)' "$SOCKS_PORT")"
+        echo -e "  SOCKS5 用户名: ${BOLD}${SOCKS_USERNAME}${NC}"
+    fi
     if argo_enabled; then
         echo -e "  订阅端口:      ${BOLD}${SUBSCRIPTION_PORT}${NC}"
         if argo_fixed_enabled; then
@@ -502,6 +552,15 @@ generate_and_show_links() {
         echo ""
     fi
 
+    if [[ -n "${GENERATED_SOCKS_LINKS}" ]]; then
+        echo -e "${CYAN}${BOLD}── SOCKS5 代理 ──${NC}"
+        echo -e "${YELLOW}${GENERATED_SOCKS_LINKS}${NC}"
+        echo ""
+    elif is_socks_enabled; then
+        echo -e "${YELLOW}  未获取可用于 SOCKS5 链接的公网 IP。${NC}"
+        echo ""
+    fi
+
     show_external_access_requirements
     write_subscription_assets
 
@@ -521,6 +580,11 @@ generate_and_show_links() {
             echo ""
             echo "# Hysteria2 (QUIC/UDP 高速)"
             printf '%s\n' "$GENERATED_HY2_LINKS"
+        fi
+        if [[ -n "$GENERATED_SOCKS_LINKS" ]]; then
+            echo ""
+            echo "# SOCKS5"
+            printf '%s\n' "$GENERATED_SOCKS_LINKS"
         fi
         if [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_enabled; then
             echo ""

@@ -214,6 +214,13 @@ do_modify_config() {
         local old_reality_public_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
         local old_hy2_public_port="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
         local old_hy2_enabled="${HY2_ENABLED:-false}"
+        local old_socks_port="${SOCKS_PORT}"
+        local old_socks_username="${SOCKS_USERNAME}"
+        local old_socks_password="${SOCKS_PASSWORD}"
+        local old_socks_enabled="${SOCKS_ENABLED:-false}"
+        local old_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
+        local old_socks_active_port=""
+        [[ "$old_socks_enabled" == "true" ]] && old_socks_active_port="$old_socks_port"
         clear
         echo -e "${CYAN}${BOLD}"
         echo "  ── 修改配置 ──"
@@ -234,9 +241,10 @@ do_modify_config() {
         echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
         echo -e "  15) 修改 NAT 公网映射       ${DIM}(当前: $(nat_mode_enabled && echo '已启用' || echo '未启用'))${NC}"
         echo -e "  16) 启用/关闭 Hysteria2     ${DIM}(当前: $(is_hy2_enabled && echo '已启用' || echo '未启用'))${NC}"
+        echo -e "  17) 管理 SOCKS5 代理        ${DIM}(当前: $(is_socks_enabled && echo "已启用 ${SOCKS_PORT}/TCP" || echo '未启用'))${NC}"
         echo -e "  0) 返回主菜单"
         echo ""
-        prompt_read choice "  请选择 [0-16]: "
+        prompt_read choice "  请选择 [0-17]: "
 
         local changed=false
         local ports_changed=false
@@ -414,14 +422,17 @@ do_modify_config() {
                     NAT_MODE="false"
                     REALITY_PUBLIC_PORT="${REALITY_PORT}"
                     HY2_PUBLIC_PORT="${HY2_PORT}"
+                    SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
                 else
-                    local nat_public_ip nat_reality_port nat_hy2_port
+                    local nat_public_ip nat_reality_port nat_hy2_port nat_socks_port
                     nat_public_ip="${PUBLIC_IPV4_OVERRIDE:-${PUBLIC_IPV4:-}}"
                     nat_reality_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
                     nat_hy2_port="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
+                    nat_socks_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
                     if ! nat_mode_enabled; then
                         nat_reality_port="${REALITY_PORT}"
                         nat_hy2_port="${HY2_PORT}"
+                        nat_socks_port="${SOCKS_PORT}"
                     fi
                     prompt_read input "  NAT 公网 IPv4 [${nat_public_ip}]: " || continue
                     [[ -n "$input" ]] && nat_public_ip="$input"
@@ -438,10 +449,21 @@ do_modify_config() {
                             "$nat_hy2_port" \
                             "  Hysteria2 公网 UDP 端口 [${nat_hy2_port}]: " || continue
                     fi
+                    if is_socks_enabled; then
+                        prompt_port_value nat_socks_port "NAT SOCKS5 公网映射" \
+                            "$nat_socks_port" \
+                            "  SOCKS5 公网 TCP 端口 [${nat_socks_port}]: " || continue
+                        if [[ "$nat_socks_port" == "$nat_reality_port" ]]; then
+                            warn "NAT SOCKS5 公网 TCP 端口不能与 Reality 公网 TCP 端口相同"
+                            press_enter
+                            continue
+                        fi
+                    fi
                     NAT_MODE="true"
                     PUBLIC_IPV4_OVERRIDE="$nat_public_ip"
                     REALITY_PUBLIC_PORT="$nat_reality_port"
                     HY2_PUBLIC_PORT="$nat_hy2_port"
+                    SOCKS_PUBLIC_PORT="$nat_socks_port"
                     LINK_IPV4_SELECTION="all"
                     reset_public_ip_cache
                 fi
@@ -460,12 +482,76 @@ do_modify_config() {
                 ports_changed=true
                 restart_singbox=true
                 ;;
+            17)
+                if is_socks_enabled; then
+                    echo -e "  当前 SOCKS5: ${BOLD}${SOCKS_USERNAME}@${SOCKS_PORT}/TCP${NC}"
+                    echo -e "  1) 修改端口"
+                    echo -e "  2) 修改用户名"
+                    echo -e "  3) 重新生成密码"
+                    echo -e "  4) 关闭 SOCKS5"
+                    echo -e "  0) 取消"
+                    prompt_read sub_choice "  请选择 [0]: " || continue
+                    sub_choice=${sub_choice:-0}
+                    case "$sub_choice" in
+                        1)
+                            local new_socks_port new_socks_public_port
+                            prompt_port_value new_socks_port "SOCKS5" "$SOCKS_PORT" \
+                                "  新 SOCKS5 TCP 端口 [${SOCKS_PORT}]: " || continue
+                            SOCKS_PORT="$new_socks_port"
+                            if nat_mode_enabled; then
+                                new_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
+                                prompt_port_value new_socks_public_port "NAT SOCKS5 公网映射" "$new_socks_public_port" \
+                                    "  SOCKS5 公网 TCP 端口 [${new_socks_public_port}]: " || continue
+                                SOCKS_PUBLIC_PORT="$new_socks_public_port"
+                            else
+                                SOCKS_PUBLIC_PORT="$SOCKS_PORT"
+                            fi
+                            ports_changed=true
+                            ;;
+                        2)
+                            prompt_read input "  新 SOCKS5 用户名: " || continue
+                            if [[ -z "$input" || ${#input} -gt 255 ]]; then
+                                warn "SOCKS5 用户名长度必须为 1-255 个字符"
+                                press_enter
+                                continue
+                            fi
+                            SOCKS_USERNAME="$input"
+                            ;;
+                        3)
+                            SOCKS_PASSWORD=$(random_hex 16)
+                            info "SOCKS5 密码已重新生成"
+                            ;;
+                        4)
+                            SOCKS_ENABLED="false"
+                            info "SOCKS5 已关闭"
+                            ports_changed=true
+                            ;;
+                        *) continue ;;
+                    esac
+                else
+                    prompt_read input "  启用 SOCKS5 代理？(y/N): " || continue
+                    [[ "$input" =~ ^[Yy]$ ]] || continue
+                    prompt_port_value SOCKS_PORT "SOCKS5" "$SOCKS_PORT" \
+                        "  SOCKS5 TCP 端口 [${SOCKS_PORT}]: " || continue
+                    SOCKS_PUBLIC_PORT="$SOCKS_PORT"
+                    if nat_mode_enabled; then
+                        prompt_port_value SOCKS_PUBLIC_PORT "NAT SOCKS5 公网映射" "$SOCKS_PUBLIC_PORT" \
+                            "  SOCKS5 公网 TCP 端口 [${SOCKS_PUBLIC_PORT}]: " || continue
+                    fi
+                    SOCKS_ENABLED="true"
+                    info "SOCKS5 将启用在 ${SOCKS_PORT}/TCP"
+                    ports_changed=true
+                fi
+                changed=true
+                restart_singbox=true
+                ;;
             0) return ;;
             *) continue ;;
         esac
 
         if [[ "$changed" == "true" ]]; then
-            if [[ "$links_only_changed" != "true" ]] && ! validate_service_ports "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false; then
+            if [[ "$links_only_changed" != "true" ]] && ! validate_service_ports \
+                "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false "$old_socks_active_port"; then
                 restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
                     "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
                     "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
@@ -473,7 +559,8 @@ do_modify_config() {
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                     "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
+                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
+                    "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
                 warn "端口检查未通过，已保留原配置"
                 press_enter
                 continue
@@ -486,7 +573,8 @@ do_modify_config() {
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                     "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
+                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
+                    "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
                 warn "已取消端口修改"
                 press_enter
                 continue
@@ -499,7 +587,8 @@ do_modify_config() {
                     "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                     "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                     "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
+                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
+                    "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
                 warn "端口放行失败，已保留原配置"
                 press_enter
                 continue
@@ -520,7 +609,8 @@ do_modify_config() {
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                         "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
+                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
+                        "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -540,7 +630,8 @@ do_modify_config() {
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                         "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
+                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
+                        "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
                     write_singbox_config
                     write_singbox_service
                     save_params
@@ -563,7 +654,8 @@ do_modify_config() {
                         "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
                         "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
                         "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
+                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
+                        "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
                     save_params
                     if argo_enabled; then
                         write_argo_service
