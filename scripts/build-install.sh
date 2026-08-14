@@ -11,7 +11,7 @@ modules=(
     02-install.sh
     03-config.sh
     04-argo-subscription.sh
-    05-links-relay.sh
+    05-links.sh
     06-actions-menu.sh
 )
 

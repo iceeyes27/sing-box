@@ -165,9 +165,9 @@ def build_handler(token: str, data_file: str, upstream_host: str, upstream_port:
                 request_lines.append("Connection: Upgrade\r\n" if is_upgrade else "Connection: close\r\n")
                 request_lines.append("\r\n")
                 upstream.sendall("".join(request_lines).encode("iso-8859-1"))
-                self.relay(upstream)
+                self.forward_streams(upstream)
 
-        def relay(self, upstream):
+        def forward_streams(self, upstream):
             sockets = [self.connection, upstream]
             while True:
                 readable, _, _ = select.select(sockets, [], [], 60)

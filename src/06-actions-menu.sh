@@ -164,25 +164,6 @@ do_primary_install() {
     press_enter
 }
 
-do_install() {
-    echo ""
-    echo -e "${CYAN}${BOLD}── 部署目标 ──${NC}"
-    echo -e "  1) 主节点完整部署 ${GREEN}推荐${NC}"
-    echo -e "  2) 只搭建线路机 / 落地机"
-    echo -e "  3) 生成线路机部署脚本"
-    echo -e "  0) 返回"
-    prompt_read target "  请选择 [1]: "
-    target=${target:-1}
-
-    case "$target" in
-        1) do_primary_install ;;
-        2) do_relay_install ;;
-        3) do_generate_relay_script ;;
-        0) return ;;
-        *) warn "无效选项"; sleep 0.5 ;;
-    esac
-}
-
 # ─── 修改配置 ────────────────────────────────────────────────
 do_modify_config() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
@@ -1112,7 +1093,7 @@ show_banner() {
 show_menu() {
     echo -e "  ${CYAN}部署 & 配置${NC}"
     echo -e "   ${BOLD}1)${NC} 部署 / 安装节点"
-    echo -e "   ${BOLD}2)${NC} 修改配置 ${DIM}(端口 / 域名 / UUID / SNI)${NC}"
+    echo -e "   ${BOLD}2)${NC} 修改配置 ${DIM}(端口 / 域名 / UUID / SNI / SOCKS5)${NC}"
     echo -e "   ${BOLD}3)${NC} 节点链接与订阅"
     echo ""
     echo -e "  ${CYAN}服务管理${NC}"
@@ -1136,7 +1117,7 @@ main_menu() {
             exit 1
         fi
         case "$choice" in
-            1)  do_install ;;
+            1)  do_primary_install ;;
             2)  do_modify_config ;;
             3)  do_show_links ;;
             4)  do_start ;;
@@ -1171,9 +1152,7 @@ main() {
     fi
 
     case "${1:-}" in
-        install)       do_primary_install ;;
-        relay-install) do_relay_install ;;
-        relay)         do_generate_relay_script ;;
+        install)     do_primary_install ;;
         links|sub)   load_params && { refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"; show_subscription_url; } || warn "未安装" ;;
         start)       do_start ;;
         stop)        do_stop ;;
@@ -1189,8 +1168,6 @@ main() {
             echo "命令:"
             echo "  (无参数)        交互式管理菜单"
             echo "  install         直接安装主节点"
-            echo "  relay-install   直接部署当前机器为线路机 / 落地机"
-            echo "  relay           生成线路机部署脚本"
             echo "  links           显示分享链接与订阅地址"
             echo "  sub             同 links"
             echo "  start           启动服务"
@@ -1202,7 +1179,12 @@ main() {
             echo "  uninstall       卸载"
             exit 0
             ;;
-        *)  main_menu ;;
+        "") main_menu ;;
+        *)
+            error "未知命令: ${1}"
+            echo "执行 'sbm --help' 查看可用命令"
+            return 1
+            ;;
     esac
 }
 

@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="2.8.0"
+SCRIPT_VERSION="3.0.0"
 DEFAULT_REALITY_SNI="www.microsoft.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
@@ -15,7 +15,6 @@ SUBSCRIPTION_SERVER="/usr/local/bin/sbm-subscription-server.py"
 SUBSCRIPTION_SERVICE="/etc/systemd/system/sbm-subscription.service"
 SUBSCRIPTION_OPENRC_SERVICE="/etc/init.d/sbm-subscription"
 SUBSCRIPTION_PORT=24630
-RELAY_SCRIPT_TEMPLATE="${TMPDIR:-/tmp}/sbm-relay-install.XXXXXX.sh"
 SCRIPT_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
 MANAGER_COMMAND="/usr/local/bin/sbm"
 MANAGER_ALIAS_COMMAND="/usr/local/bin/sing-box-manager"
