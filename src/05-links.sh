@@ -397,9 +397,9 @@ build_share_links() {
         ipv6-only)
             build_socks_link_for_ip "${PUBLIC_IPV6:-${PUBLIC_IP:-}}"
             if argo_enabled; then
-                warn "检测到 IPv6-only VPS，Reality/Hysteria2 仅生成 Argo 节点链接。"
+                warn "检测到 IPv6-only VPS，IPv4 客户端请使用 Argo 节点；Reality 为独立直连入口。"
             else
-                warn "检测到 IPv6-only VPS，且未启用 Argo，无法生成 Reality/Hysteria2 外部节点链接。"
+                warn "检测到 IPv6-only VPS，且未启用 Argo；本地 IPv4 无法连接，未生成 Reality/Hysteria2 直连链接。"
             fi
             ;;
         unknown)

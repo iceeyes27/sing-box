@@ -50,7 +50,7 @@
 | Hysteria2 | 公网 UDP 端口 | 用户确认后尝试放行防火墙；NAT 无 UDP 映射时可禁用 |
 | SOCKS5 | 默认关闭；启用后监听公网 TCP 端口 | 强制用户名密码认证；建议在外部防火墙中限制来源 IP |
 | 订阅服务 | `127.0.0.1:24630` | 只供 Argo 本地回源，不直接开放公网 |
-| Argo Tunnel | Cloudflare HTTPS 入口 | 仅支持固定域名与 Tunnel Token，默认关闭 |
+| Argo Tunnel | Cloudflare HTTPS 入口 | 支持临时域名和固定域名 Token；IPv4/双栈默认关闭，IPv6-only 默认开启，安装时可切换 |
 
 ## Alpine 兼容性
 

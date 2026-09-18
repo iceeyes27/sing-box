@@ -9,10 +9,10 @@
 ## ✨ 说明
 
 - 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box；启用 Argo 时安装 cloudflared 与本地订阅网关依赖。
-- 🔧 **稳定优先链路** — 新安装默认仅启用 VLESS Reality 与临时域名 Argo；Hysteria2 和带认证 SOCKS5 默认关闭，可在管理面板中启用。
+- 🔧 **稳定优先链路** — 新安装 IPv4-only / 双栈默认启用 VLESS Reality；IPv6-only 默认启用 Reality 与 Argo。安装时可直接勾选 Argo 和带认证 SOCKS5，Hysteria2 保持默认关闭。
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
 - 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、HTTPS 订阅链接、Argo 订阅链接、重载配置、监控日志与开机自启。
-- 📡 **Argo 订阅网关** — 默认创建 `trycloudflare.com` 临时隧道并提供 HTTPS 订阅，也支持切换为固定域名 Tunnel Token 模式。
+- 📡 **Argo 订阅网关** — 勾选 Argo 后默认创建 `trycloudflare.com` 临时隧道并提供 HTTPS 订阅，也支持切换为固定域名 Tunnel Token 模式。
 - 🧩 **NAT VPS 适配** — 自动识别公网 IPv4 不在本机网卡的环境，分别保存本机监听端口与面板公网映射端口；没有 UDP 映射时可直接禁用 Hysteria2。
 - 🎯 **单一部署路径** — 仅提供主节点完整部署，主菜单安装入口直接开始主节点配置。
 
@@ -79,7 +79,7 @@ sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 
 ## 🌐 IPv4 / IPv6 VPS
 
-脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality 直连链接；IPv6-only VPS 通过默认启用的 Argo 生成外部节点链接。固定域名 Argo 始终直接使用自有域名，不使用第三方 CF 优选域名。
+脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality 直连链接；IPv6-only VPS 通过默认启用的 Argo 生成外部节点链接。Reality 与 Argo 是独立入口：本地只有 IPv4 时使用 Argo 节点，IPv6-only 的默认订阅不包含 Reality IPv6 直连链接。隧道在纯 IPv6 安装时指定 IPv6 边缘连接，其他场景自动选择。固定域名 Argo 始终直接使用自有域名，不使用第三方 CF 优选域名。
 
 NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持 sing-box 使用本机监听端口。Reality、Hysteria2 和已启用的 SOCKS5 分别保存公网映射端口；映射变化后可在 `sbm` 的“修改 NAT 公网映射”中更新。
 
@@ -115,11 +115,11 @@ sbm install
 
 ### 步骤 2：按提示完成安装
 
-脚本会引导确认 Reality 端口、NAT 公网映射、Reality 伪装域名、节点名称和 Argo 模式，并自动生成 UUID、Reality 密钥与订阅凭据。
+脚本先检测网络类型并显示协议勾选页，输入 1/2 切换 Argo/SOCKS5，按 Enter 确认；随后配置 Reality/SOCKS5 端口、NAT 公网映射、Reality 伪装域名、节点名称，以及已勾选的 Argo 模式，并自动生成 UUID、Reality 密钥与订阅凭据。
 
 ### 步骤 3：查看链接
 
-安装完成后会输出 Reality、Argo 和 HTTPS 订阅地址。SOCKS5 默认关闭，可在主菜单 `2) 修改配置` 的 `17) 管理 SOCKS5 代理` 中启用。
+安装完成后按已启用功能输出节点链接；启用 Argo 时提供 HTTPS 订阅地址。SOCKS5 可在安装时勾选，也可在主菜单 `2) 修改配置` 的 `17) 管理 SOCKS5 代理` 中启用。
 
 ```bash
 sbm links

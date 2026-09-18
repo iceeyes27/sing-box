@@ -1770,7 +1770,7 @@ generate_params() {
     SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT:-24630}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
-    ARGO_ENABLED="true"
+    ARGO_ENABLED="false"
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
@@ -1796,6 +1796,54 @@ generate_params() {
     SOCKS_ENABLED="false"
 
     success "参数生成完成"
+}
+
+# 仅供新安装使用；旧配置加载不应用这些默认值。
+prompt_install_protocols() {
+    local network_mode="$1" choice argo_mark socks_mark
+    case "$network_mode" in
+        ipv4-only|dual-stack) ARGO_ENABLED="false" ;;
+        ipv6-only) ARGO_ENABLED="true" ;;
+        *) warn "未确认网络类型，无法设置安装默认协议"; return 1 ;;
+    esac
+    SOCKS_ENABLED="false"
+    while true; do
+        argo_mark=" "; socks_mark=" "
+        argo_enabled && argo_mark="✓"
+        is_socks_enabled && socks_mark="✓"
+        echo "  网络类型: ${network_mode}"
+        echo "  [✓] Reality (基础功能)"
+        echo "  1) [${argo_mark}] Argo"
+        echo "  2) [${socks_mark}] SOCKS5"
+        [[ "$network_mode" == "ipv6-only" ]] && echo "  本地只有 IPv4 时需启用 Argo，并使用 Argo 节点。"
+        prompt_read choice "  输入 1/2 切换勾选，Enter 确认: " || return 1
+        case "$choice" in
+            1) if argo_enabled; then ARGO_ENABLED="false"; else ARGO_ENABLED="true"; fi ;;
+            2) if is_socks_enabled; then SOCKS_ENABLED="false"; else SOCKS_ENABLED="true"; fi ;;
+            "") return 0 ;;
+            *) warn "请输入 1、2 或直接按 Enter" ;;
+        esac
+    done
+}
+
+detect_install_network() {
+    local choice
+    while true; do
+        reset_public_ip_cache
+        if refresh_public_ip_stack; then
+            INSTALL_NETWORK_MODE="$IP_STACK_MODE"
+            return 0
+        fi
+        warn "公网网络检测失败，请重试或手动指定类型。"
+        prompt_read choice "  1) 重试  2) IPv4-only  3) IPv6-only  4) 双栈: " || return 1
+        case "$choice" in
+            1) continue ;;
+            2) INSTALL_NETWORK_MODE="ipv4-only"; return 0 ;;
+            3) INSTALL_NETWORK_MODE="ipv6-only"; return 0 ;;
+            4) INSTALL_NETWORK_MODE="dual-stack"; return 0 ;;
+            *) warn "请输入 1-4" ;;
+        esac
+    done
 }
 
 # ─── TLS 证书生成 (Hysteria2) ────────────────────────────────
@@ -2677,22 +2725,26 @@ ensure_argo_dependencies() {
 }
 
 write_argo_service() {
-    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening
+    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening edge_ip_version="auto"
     if ! argo_enabled; then
         warn "Argo 未启用"
         return 1
     fi
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
+    # auto 同时适配旧配置刷新与双栈；纯 IPv6 安装显式使用 IPv6。
+    if [[ "${IP_STACK_MODE:-${INSTALL_NETWORK_MODE:-}}" == "ipv6-only" ]]; then
+        edge_ip_version="6"
+    fi
     if argo_fixed_enabled; then
         info "使用固定域名启动 Argo 隧道"
         info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
         write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
-        exec_cmd="tunnel --protocol http2 --no-autoupdate run"
+        exec_cmd="tunnel --protocol http2 --no-autoupdate --edge-ip-version ${edge_ip_version} run"
     else
         info "使用 Argo 临时隧道 (trycloudflare.com)"
         rm -f "$ARGO_ENV_FILE"
-        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2 --edge-ip-version ${edge_ip_version}"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
@@ -3462,9 +3514,9 @@ build_share_links() {
         ipv6-only)
             build_socks_link_for_ip "${PUBLIC_IPV6:-${PUBLIC_IP:-}}"
             if argo_enabled; then
-                warn "检测到 IPv6-only VPS，Reality/Hysteria2 仅生成 Argo 节点链接。"
+                warn "检测到 IPv6-only VPS，IPv4 客户端请使用 Argo 节点；Reality 为独立直连入口。"
             else
-                warn "检测到 IPv6-only VPS，且未启用 Argo，无法生成 Reality/Hysteria2 外部节点链接。"
+                warn "检测到 IPv6-only VPS，且未启用 Argo；本地 IPv4 无法连接，未生成 Reality/Hysteria2 直连链接。"
             fi
             ;;
         unknown)
@@ -3688,6 +3740,7 @@ json_string() {
 
 # ─── 完整安装 ────────────────────────────────────────────────
 do_primary_install() {
+    local INSTALL_NETWORK_MODE="" argo_ready=true subscription_ready=true
     echo ""
     info "开始完整安装..."
     separator
@@ -3696,6 +3749,11 @@ do_primary_install() {
     ensure_time_sync || true
     install_singbox
     generate_params
+    detect_install_network || error "网络类型确认失败"
+    prompt_install_protocols "$INSTALL_NETWORK_MODE" || error "协议选择未完成"
+    if is_socks_enabled; then
+        info "SOCKS5 已生成随机用户名和密码，安装后随节点链接显示。"
+    fi
     select_reality_sni
 
     while true; do
@@ -3717,6 +3775,10 @@ do_primary_install() {
             prompt_port_value REALITY_PORT "Reality" "$REALITY_PORT" "  Reality 端口 [${REALITY_PORT}]: " || error "端口读取失败"
         fi
         REALITY_PUBLIC_PORT="$REALITY_PORT"
+        if is_socks_enabled; then
+            prompt_port_value SOCKS_PORT "SOCKS5" "$SOCKS_PORT" "  SOCKS5 端口 [${SOCKS_PORT}]: " || error "SOCKS5 端口读取失败"
+            SOCKS_PUBLIC_PORT="$SOCKS_PORT"
+        fi
 
         reset_public_ip_cache
         refresh_public_ip_stack || true
@@ -3751,47 +3813,41 @@ do_primary_install() {
     # 生成 TLS 自签证书 (Hysteria2 需要)
     generate_tls_cert
 
-    # 默认启用临时 Argo；固定域名 Token 与完全关闭仍可选。
-    echo ""
-    echo -e "${CYAN}${BOLD}── Argo 隧道配置 ──${NC}"
-    echo -e "  1) 临时域名模式 (trycloudflare.com) ${GREEN}推荐${NC}"
-    echo -e "  2) 固定域名模式 (需提供 Cloudflare Tunnel Token)"
-    echo -e "  3) 不启用 Argo"
-    prompt_read argo_choice "  请选择 [1]: "
-    argo_choice=${argo_choice:-1}
-    if [[ "$argo_choice" == "2" ]]; then
-        ARGO_ENABLED="true"
-        prompt_port_value SUBSCRIPTION_PORT "订阅服务" "$SUBSCRIPTION_PORT" "  订阅服务端口 [${SUBSCRIPTION_PORT}]: " || error "端口读取失败"
-        echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
-        echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${SUBSCRIPTION_PORT}${NC}"
-        echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
-        echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
-        prompt_read ARGO_TOKEN "  请输入 Tunnel Token: "
-        prompt_read ARGO_DOMAIN "  请输入该隧道绑定的域名 (如 v2.example.com): "
-        # 清除用户可能误输入的 http://, https:// 以及结尾的 /
-        ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
-        ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
-        ARGO_DOMAIN="${ARGO_DOMAIN%/}"
-        if ! argo_fixed_enabled; then
-            warn "Token 或域名无效，改用临时 Argo"
+    # 仅为已勾选 Argo 的安装配置隧道模式。
+    if argo_enabled; then
+        echo ""
+        echo -e "${CYAN}${BOLD}── Argo 隧道配置 ──${NC}"
+        echo -e "  1) 临时域名模式 (trycloudflare.com) ${GREEN}推荐${NC}"
+        echo -e "  2) 固定域名模式 (需提供 Cloudflare Tunnel Token)"
+        prompt_read argo_choice "  请选择 [1]: "
+        argo_choice=${argo_choice:-1}
+        if [[ "$argo_choice" == "2" ]]; then
+            ARGO_ENABLED="true"
+            prompt_port_value SUBSCRIPTION_PORT "订阅服务" "$SUBSCRIPTION_PORT" "  订阅服务端口 [${SUBSCRIPTION_PORT}]: " || error "端口读取失败"
+            echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
+            echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${SUBSCRIPTION_PORT}${NC}"
+            echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
+            echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
+            prompt_read ARGO_TOKEN "  请输入 Tunnel Token: "
+            prompt_read ARGO_DOMAIN "  请输入该隧道绑定的域名 (如 v2.example.com): "
+            # 清除用户可能误输入的 http://, https:// 以及结尾的 /
+            ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
+            ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
+            ARGO_DOMAIN="${ARGO_DOMAIN%/}"
+            if ! argo_fixed_enabled; then
+                warn "Token 或域名无效，改用临时 Argo"
+                ARGO_TOKEN=""
+                ARGO_DOMAIN=""
+            fi
+        else
+            ARGO_ENABLED="true"
             ARGO_TOKEN=""
             ARGO_DOMAIN=""
         fi
-    elif [[ "$argo_choice" == "3" ]]; then
-        ARGO_ENABLED="false"
-        ARGO_TOKEN=""
-        ARGO_DOMAIN=""
-    else
-        ARGO_ENABLED="true"
-        ARGO_TOKEN=""
-        ARGO_DOMAIN=""
     fi
     if argo_enabled; then
         if ! ensure_argo_dependencies; then
-            warn "Argo 依赖安装失败，本次仅部署 Reality"
-            ARGO_ENABLED="false"
-            ARGO_TOKEN=""
-            ARGO_DOMAIN=""
+            error "Argo 依赖安装失败，所选协议组合未完成部署"
         fi
     fi
     if argo_enabled; then
@@ -3814,17 +3870,18 @@ do_primary_install() {
 
     verify_or_reselect_reality_sni || warn "Reality 完整 TLS 转发验证未通过，已保留可恢复配置"
 
-    ensure_subscription_service_if_enabled || warn "订阅服务启动失败，可稍后执行 sbm restart 重试"
+    ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅网关启动失败，可稍后执行 sbm restart 重试"; }
 
     if argo_enabled; then
         info "启动 Argo 隧道..."
         if service_enable_now argo-tunnel; then
             if argo_quick_enabled; then
                 sleep 3
-                fetch_argo_domain || warn "Argo 已启动，但尚未取得临时域名"
+                fetch_argo_domain || { argo_ready=false; warn "Argo 已启动，但尚未取得临时域名"; }
             fi
             [[ -n "${ARGO_DOMAIN:-}" ]] && success "Argo 域名: $ARGO_DOMAIN"
         else
+            argo_ready=false
             warn "Argo 隧道启动失败，可稍后执行 sbm restart 重试"
         fi
     fi
@@ -3833,10 +3890,13 @@ do_primary_install() {
     save_params
 
     echo ""
-    if argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}"; then
-        echo -e "${GREEN}${BOLD}✅ 部署完成！HTTPS 订阅地址可导入 v2rayN / v2rayNG。${NC}"
+    if argo_enabled && { [[ "$argo_ready" != "true" || "$subscription_ready" != "true" ]] || ! service_is_active argo-tunnel || ! service_is_active sbm-subscription || ! is_valid_hostname "${ARGO_DOMAIN:-}"; }; then
+        warn "所选协议组合尚未完成部署：Argo 或订阅网关未就绪。"
+        return 1
     elif argo_enabled; then
-        echo -e "${GREEN}${BOLD}✅ Reality 部署完成；Argo 已启用但域名尚未就绪。${NC}"
+        echo -e "${GREEN}${BOLD}✅ 所选服务已启动，节点连接仍需客户端验证。${NC}"
+    elif [[ "$INSTALL_NETWORK_MODE" == "ipv6-only" ]]; then
+        success "Reality 服务已部署；未启用 Argo，本地 IPv4 无法连接，未生成 Reality 直连链接。"
     else
         echo -e "${GREEN}${BOLD}✅ 部署完成！请导入下方 Reality 直连链接。${NC}"
     fi

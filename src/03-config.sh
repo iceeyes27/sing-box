@@ -21,7 +21,7 @@ generate_params() {
     SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT:-24630}
     ARGO_DOMAIN=""
     ARGO_TOKEN=""
-    ARGO_ENABLED="true"
+    ARGO_ENABLED="false"
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
@@ -47,6 +47,54 @@ generate_params() {
     SOCKS_ENABLED="false"
 
     success "参数生成完成"
+}
+
+# 仅供新安装使用；旧配置加载不应用这些默认值。
+prompt_install_protocols() {
+    local network_mode="$1" choice argo_mark socks_mark
+    case "$network_mode" in
+        ipv4-only|dual-stack) ARGO_ENABLED="false" ;;
+        ipv6-only) ARGO_ENABLED="true" ;;
+        *) warn "未确认网络类型，无法设置安装默认协议"; return 1 ;;
+    esac
+    SOCKS_ENABLED="false"
+    while true; do
+        argo_mark=" "; socks_mark=" "
+        argo_enabled && argo_mark="✓"
+        is_socks_enabled && socks_mark="✓"
+        echo "  网络类型: ${network_mode}"
+        echo "  [✓] Reality (基础功能)"
+        echo "  1) [${argo_mark}] Argo"
+        echo "  2) [${socks_mark}] SOCKS5"
+        [[ "$network_mode" == "ipv6-only" ]] && echo "  本地只有 IPv4 时需启用 Argo，并使用 Argo 节点。"
+        prompt_read choice "  输入 1/2 切换勾选，Enter 确认: " || return 1
+        case "$choice" in
+            1) if argo_enabled; then ARGO_ENABLED="false"; else ARGO_ENABLED="true"; fi ;;
+            2) if is_socks_enabled; then SOCKS_ENABLED="false"; else SOCKS_ENABLED="true"; fi ;;
+            "") return 0 ;;
+            *) warn "请输入 1、2 或直接按 Enter" ;;
+        esac
+    done
+}
+
+detect_install_network() {
+    local choice
+    while true; do
+        reset_public_ip_cache
+        if refresh_public_ip_stack; then
+            INSTALL_NETWORK_MODE="$IP_STACK_MODE"
+            return 0
+        fi
+        warn "公网网络检测失败，请重试或手动指定类型。"
+        prompt_read choice "  1) 重试  2) IPv4-only  3) IPv6-only  4) 双栈: " || return 1
+        case "$choice" in
+            1) continue ;;
+            2) INSTALL_NETWORK_MODE="ipv4-only"; return 0 ;;
+            3) INSTALL_NETWORK_MODE="ipv6-only"; return 0 ;;
+            4) INSTALL_NETWORK_MODE="dual-stack"; return 0 ;;
+            *) warn "请输入 1-4" ;;
+        esac
+    done
 }
 
 # ─── TLS 证书生成 (Hysteria2) ────────────────────────────────

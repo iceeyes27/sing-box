@@ -1359,7 +1359,7 @@ test_subscription_gateway_uses_local_https_origin() {
     server_body=$(<"$SUBSCRIPTION_SERVER")
     assert_contains "$service_body" "--listen 127.0.0.1" "subscription local listen"
     assert_contains "$service_body" "--upstream-port 18080" "subscription WS upstream"
-    assert_contains "$argo_body" "tunnel --protocol http2 --no-autoupdate run" "fixed Argo tunnel command"
+    assert_contains "$argo_body" "tunnel --protocol http2 --no-autoupdate --edge-ip-version" "fixed Argo tunnel command"
     assert_not_contains "$argo_body" "--url" "fixed Argo does not create quick tunnel"
     assert_not_contains "$argo_body" "Group=nogroup" "Argo service uses the nobody user's platform group"
     assert_contains "$server_body" "def proxy_to_upstream" "subscription gateway proxy"
@@ -1428,7 +1428,7 @@ test_argo_link_follows_enabled_mode_and_uses_own_domain() {
     assert_eq "" "$GENERATED_ARGO_LINKS" "invalid Argo hostname rejected"
 }
 
-test_default_profile_is_reality_and_quick_argo() {
+test_base_profile_is_reality_only() {
     local sing_box_def random_hex_def random_base64_def select_port_def
     sing_box_def=$(declare -f sing-box 2>/dev/null || true)
     random_hex_def=$(declare -f random_hex)
@@ -1452,8 +1452,7 @@ test_default_profile_is_reality_and_quick_argo() {
     assert_eq "28805" "$REALITY_PORT" "default Reality high port"
     assert_eq "" "$REALITY_SNI" "default Reality SNI is selected during install"
     assert_eq "singbox" "$REALITY_BACKEND" "default Reality backend"
-    assert_eq "true" "$ARGO_ENABLED" "default Argo enabled"
-    argo_quick_enabled || fail "default Argo mode is not quick tunnel"
+    assert_eq "false" "$ARGO_ENABLED" "base parameters do not enable optional Argo"
     assert_eq "false" "$HY2_ENABLED" "default HY2 disabled"
     assert_eq "false" "$SOCKS_ENABLED" "default SOCKS5 disabled"
     assert_eq "proxy-abcd1234" "$SOCKS_USERNAME" "default SOCKS5 username"
@@ -1744,6 +1743,127 @@ EOF
     rm -rf "$tmp"
 }
 
+test_install_protocol_choices() (
+    prompt_read() { read -r "$1"; }
+    ARGO_TOKEN=""; ARGO_DOMAIN=""
+    local mode
+    for mode in ipv4-only dual-stack; do
+        prompt_install_protocols "$mode" <<< '' >/dev/null
+        assert_eq false "$ARGO_ENABLED" "$mode Argo default"
+        assert_eq false "$SOCKS_ENABLED" "$mode SOCKS default"
+    done
+    prompt_install_protocols ipv6-only <<< '' >/dev/null
+    assert_eq true "$ARGO_ENABLED" "IPv6 Argo default"
+    assert_eq false "$SOCKS_ENABLED" "IPv6 SOCKS default"
+    prompt_install_protocols ipv4-only <<< $'invalid\n1\n2\n' >/dev/null
+    assert_eq true "$ARGO_ENABLED" "selected Argo"
+    assert_eq true "$SOCKS_ENABLED" "selected SOCKS"
+    prompt_install_protocols ipv6-only <<< $'1\n2\n2\n' >/dev/null
+    assert_eq false "$ARGO_ENABLED" "IPv6 Argo deselected"
+    assert_eq false "$SOCKS_ENABLED" "SOCKS toggle twice"
+    if prompt_install_protocols unknown <<< '' >/dev/null; then fail "unknown network accepted"; fi
+    if prompt_install_protocols ipv4-only </dev/null >/dev/null; then fail "protocol EOF accepted"; fi
+)
+
+test_install_network_failure_selection() (
+    prompt_read() { read -r "$1"; }
+    refresh_public_ip_stack() { return 1; }
+    detect_install_network <<< $'invalid\n3' >/dev/null
+    assert_eq ipv6-only "$INSTALL_NETWORK_MODE" "manual network selection"
+    if detect_install_network </dev/null >/dev/null; then fail "network EOF accepted"; fi
+    local attempts=0
+    refresh_public_ip_stack() {
+        attempts=$((attempts + 1))
+        if (( attempts == 1 )); then return 1; fi
+        IP_STACK_MODE=dual-stack
+    }
+    detect_install_network <<< '1' >/dev/null
+    assert_eq dual-stack "$INSTALL_NETWORK_MODE" "network retry"
+)
+
+test_argo_edge_family_services() (
+    local tmp manager mode token body expected
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    ARGO_SERVICE="$tmp/argo.service"; ARGO_OPENRC_SERVICE="$tmp/argo"
+    ARGO_ENV_FILE="$tmp/env"; ARGO_ENABLED=true; SUBSCRIPTION_PORT=24630
+    service_manager() { echo "$manager"; }
+    service_daemon_reload() { :; }
+    for manager in systemd openrc; do
+        for mode in ipv4-only dual-stack ipv6-only unknown; do
+            IP_STACK_MODE="$mode"
+            expected=auto
+            [[ "$mode" == ipv6-only ]] && expected=6
+            for token in '' fixed-token; do
+                ARGO_TOKEN="$token"; ARGO_DOMAIN=argo.example.com
+                write_argo_service >/dev/null
+                if [[ "$manager" == systemd ]]; then body=$(<"$ARGO_SERVICE"); else body=$(<"$ARGO_OPENRC_SERVICE"); fi
+                assert_contains "$body" "--edge-ip-version $expected" "$manager $mode edge family"
+            done
+        done
+    done
+    IP_STACK_MODE=""; INSTALL_NETWORK_MODE=ipv6-only
+    write_argo_service >/dev/null
+    assert_contains "$(<"$ARGO_OPENRC_SERVICE")" '--edge-ip-version 6' "manual IPv6 edge family"
+)
+
+test_install_selected_services_and_failure() (
+    local tmp output failed_service
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    # Exercise install orchestration without changing services, packages or firewall.
+    install_deps() { :; }; ensure_time_sync() { :; }; install_singbox() { :; }
+    generate_params() {
+        REALITY_PORT=28000; SOCKS_PORT=28001; REALITY_SNI=example.com
+        NODE_NAME=test; ARGO_TOKEN=""; ARGO_DOMAIN=""; ARGO_ENABLED=false
+    }
+    detect_install_network() { INSTALL_NETWORK_MODE=ipv4-only; }
+    select_reality_sni() { :; }
+    prompt_read() {
+        case "$2" in
+            *切换勾选*) read -r "$1" ;;
+            *) printf -v "$1" '%s' '' ;;
+        esac
+    }
+    prompt_port_value() { :; }
+    refresh_public_ip_stack() { IP_STACK_MODE=ipv4-only; PUBLIC_IP=198.51.100.1; }
+    prompt_nat_mapping_config() {
+        [[ "$ARGO_ENABLED" == true && "$SOCKS_ENABLED" == true ]] || fail "selection reached NAT too late"
+        echo nat >> "$tmp/events"
+    }
+    validate_service_ports() { :; }; confirm_port_selection() { return 0; }
+    open_service_ports() {
+        [[ "$SOCKS_ENABLED" == true ]] || fail "SOCKS missing at firewall"
+        echo firewall >> "$tmp/events"
+    }
+    prompt_ipv4_link_selection_if_multiple() { :; }; generate_tls_cert() { :; }
+    ensure_argo_dependencies() { return 0; }
+    write_singbox_config() { :; }; write_singbox_service() { :; }; write_argo_service() { :; }
+    service_enable_now() { [[ "$failed_service" != argo-tunnel || "$1" != argo-tunnel ]]; }
+    service_is_active() { [[ "$failed_service" != sbm-subscription || "$1" != sbm-subscription ]]; }
+    fetch_argo_domain() { ARGO_DOMAIN=quick.trycloudflare.com; }
+    sleep() { :; }
+    verify_or_reselect_reality_sni() { return 0; }
+    ensure_subscription_service_if_enabled() { return 0; }
+    save_params() { echo saved >> "$tmp/events"; }
+    generate_and_show_links() { [[ "$failed_service" == none ]] || fail "failed service reported successful install"; }
+    show_subscription_url() { :; }; press_enter() { :; }
+    for failed_service in argo-tunnel sbm-subscription; do
+        if do_primary_install <<< $'1\n2\n' >"$tmp/output"; then fail "failed $failed_service returned success"; fi
+        output=$(<"$tmp/output")
+        assert_contains "$output" '所选协议组合尚未完成部署' "incomplete install message"
+        assert_not_contains "$output" '所选服务已启动' "no false success"
+        assert_contains "$(<"$tmp/events")" saved "failure state saved for recovery"
+    done
+    failed_service=none
+    do_primary_install <<< $'1\n2\n' >"$tmp/output" || fail "healthy selected services rejected"
+    assert_contains "$(<"$tmp/output")" '所选服务已启动' "healthy install"
+)
+
+test_install_protocol_choices
+test_install_network_failure_selection
+test_argo_edge_family_services
+test_install_selected_services_and_failure
 test_service_manager_systemd
 test_service_manager_openrc
 test_singbox_systemd_override_enables_restart
@@ -1783,7 +1903,7 @@ test_refresh_argo_runtime_disables_incomplete_config
 test_subscription_gateway_uses_local_https_origin
 test_subscription_url_prefers_https_argo
 test_argo_link_follows_enabled_mode_and_uses_own_domain
-test_default_profile_is_reality_and_quick_argo
+test_base_profile_is_reality_only
 test_random_reality_port_is_high_and_available
 test_service_firewall_uses_exact_protocols
 test_reality_full_fallback_probe

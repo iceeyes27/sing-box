@@ -11,22 +11,26 @@ ensure_argo_dependencies() {
 }
 
 write_argo_service() {
-    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening
+    local cloudflared_bin exec_cmd argo_origin_url systemd_hardening edge_ip_version="auto"
     if ! argo_enabled; then
         warn "Argo 未启用"
         return 1
     fi
     cloudflared_bin=$(command -v cloudflared 2>/dev/null || echo "/usr/local/bin/cloudflared")
     argo_origin_url="http://127.0.0.1:${SUBSCRIPTION_PORT}"
+    # auto 同时适配旧配置刷新与双栈；纯 IPv6 安装显式使用 IPv6。
+    if [[ "${IP_STACK_MODE:-${INSTALL_NETWORK_MODE:-}}" == "ipv6-only" ]]; then
+        edge_ip_version="6"
+    fi
     if argo_fixed_enabled; then
         info "使用固定域名启动 Argo 隧道"
         info "Cloudflare Public Hostname 需转发至 ${argo_origin_url}"
         write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
-        exec_cmd="tunnel --protocol http2 --no-autoupdate run"
+        exec_cmd="tunnel --protocol http2 --no-autoupdate --edge-ip-version ${edge_ip_version} run"
     else
         info "使用 Argo 临时隧道 (trycloudflare.com)"
         rm -f "$ARGO_ENV_FILE"
-        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2"
+        exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2 --edge-ip-version ${edge_ip_version}"
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
