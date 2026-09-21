@@ -44,8 +44,8 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.0.0"
-DEFAULT_REALITY_SNI="www.microsoft.com"
+SCRIPT_VERSION="3.1.1"
+DEFAULT_REALITY_SNI="www.nazhumi.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -84,43 +84,40 @@ SINGBOX_SYSTEMD_DROPIN_DIR="/etc/systemd/system/sing-box.service.d"
 SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
-HY2_DEFAULT_MASQUERADE_URL="https://www.bing.com"
+HY2_DEFAULT_MASQUERADE_URL=""
 TIME_SKEW_THRESHOLD=30
 LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
 LOW_MEMORY_SWAP_CREATED=false
 
-# Reality 伪装域名候选列表
-# Reality 客户端在「国内→VPS」这条连接上，线路里声称访问的就是这个 SNI。
-# 一旦该域名被 GFW 按 SNI 封锁 / 限速 / 偶发重置(即「半被墙」，如 amazon.com)，
-# 你的 Reality 隧道会一并继承同样的命运。挑选标准(第 1 条是硬性底线):
-#   1) 「国内一定能通」——GFW 不按 SNI 封锁/限速，国内可稳定握手;
-#   2) 稳定支持 TLS 1.3 + HTTP/2(Reality 转发所需);
-#   3) 境外高信誉大厂站点，封锁代价高，借用其 TLS 身份更可信。
-# 注意:select_reality_sni 的实测跑在「境外 VPS」上，只能验证 TLS1.3+h2 与握手
-# 延迟，无法发现「国内是否被墙」。因此本列表必须人工保证全部「国内可达」，
-# 不要把半被墙站点(amazon / mozilla / swift 等)放进来——服务端测不出来。
-# 国内 CDN 落地反而是优点(说明 GFW 不会封)，无需刻意回避。
-REALITY_SNI_LIST=(
-    "www.microsoft.com"  # Azure/Akamai 中国 CDN，国内稳定可达
-    "portal.citygrainla.com" # 瓦工严选 Reality SNI
-    "dash.cloudflare.com" # Cloudflare Anycast，优先匹配邻近边缘节点
-    "www.apple.com"      # Apple 中国 CDN，国内稳定可达
-    "gateway.icloud.com" # iCloud 国内正常使用
-    "itunes.apple.com"   # Apple，国内可达
-    "www.tesla.com"      # 特斯拉在华运营，国内可达
-    "www.intel.com"      # Intel，国内可达
-    "www.nvidia.com"     # NVIDIA，国内可达
-    "www.amd.com"        # AMD，国内可达
-    "www.ibm.com"        # IBM，国内可达
-    "www.cisco.com"      # Cisco，在华运营，国内可达
-    "www.dell.com"       # Dell，在华运营，国内可达
-    "www.hp.com"         # HP/惠普，在华运营，国内可达
-    "www.qualcomm.com"   # 高通，在华运营，国内可达
-    "www.samsung.com"    # 三星，在华运营，国内可达
-    "www.sony.com"       # 索尼，在华运营，国内可达
-    "www.oracle.com"     # Oracle，在华运营，国内可达
-    "www.vmware.com"     # VMware，企业级站点，国内可达
+# Argo 连接地址候选。它们只用于 URI 的地址部分；SNI 和 Host 始终使用
+# ARGO_DOMAIN，不能把这些地址当作 Reality 伪装域名。
+ARGO_CF_DOMAIN_LIST_VERSION="2026-09-21.1"
+ARGO_CF_DOMAINS=(
+    "cf.090227.xyz"
+    "cf.877774.xyz"
+    "cf.130519.xyz"
+    "cf.008500.xyz"
+    "store.ubi.com"
+    "saas.sin.fan"
 )
+
+# Reality 候选必须是人工审核的直连站点。共享 CDN 域名（尤其 Cloudflare）
+# 不得加入。运行时会拒绝 Cloudflare 地址段；更新列表前必须重新核查 DNS、
+# 证书、TLS 1.3 和 HTTP/2。
+REALITY_SNI_LIST=(
+    "www.nazhumi.com"
+    "portal.citygrainla.com"
+)
+
+# 审核时记录的直连站点 ASN。运行时要求域名仍为单一 IPv4、无 CNAME/AAAA，
+# 且 Team Cymru 返回的起源 ASN 与记录一致；任一条件漂移即拒绝启用 Reality。
+reality_sni_expected_asn() {
+    case "${1:-}" in
+        www.nazhumi.com) echo "132203" ;;
+        portal.citygrainla.com) echo "25820" ;;
+        *) return 1 ;;
+    esac
+}
 
 # ─── 颜色 ─────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -659,7 +656,8 @@ link_ipv4_selection_label() {
 PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV REALITY_BACKEND WS_PORT WS_PATH NODE_NAME
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_ENABLED ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
-    ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
+    ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 ARGO_CF_CACHE_DOMAIN ARGO_CF_CACHE_VERSION
+    LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
     SOCKS_PORT SOCKS_USERNAME SOCKS_PASSWORD SOCKS_ENABLED
     NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT SOCKS_PUBLIC_PORT
@@ -799,7 +797,7 @@ load_params() {
             HY2_SNI="${HY2_DEFAULT_SNI}"
             need_save=true
         fi
-        if [[ -z "${HY2_MASQUERADE_URL:-}" ]]; then
+        if ! grep -q '^HY2_MASQUERADE_URL=' "$PARAMS_FILE" 2>/dev/null; then
             HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
             need_save=true
         fi
@@ -858,6 +856,14 @@ load_params() {
         fi
         if [[ ! ${ARGO_BEST_CF_DOMAIN_IPV6+x} ]]; then
             ARGO_BEST_CF_DOMAIN_IPV6=""
+            need_save=true
+        fi
+        if [[ ! ${ARGO_CF_CACHE_DOMAIN+x} ]]; then
+            ARGO_CF_CACHE_DOMAIN=""
+            need_save=true
+        fi
+        if [[ ! ${ARGO_CF_CACHE_VERSION+x} ]]; then
+            ARGO_CF_CACHE_VERSION=""
             need_save=true
         fi
         if [[ -z "${LINK_IPV4_SELECTION:-}" ]]; then
@@ -1047,6 +1053,8 @@ clear_argo_best_cf_cache() {
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
+    ARGO_CF_CACHE_DOMAIN=""
+    ARGO_CF_CACHE_VERSION=""
 }
 
 restore_runtime_params() {
@@ -1761,7 +1769,7 @@ generate_params() {
     REALITY_PORT=${REALITY_PORT:-$(select_random_available_tcp_port)}
     # Reality 承载内核：singbox(默认) 或 xray。可通过环境变量 REALITY_BACKEND=xray 选择。
     REALITY_BACKEND="${REALITY_BACKEND:-singbox}"
-    # 新安装先保持为空，由安装流程按连续握手结果选择；探测失败仍回退默认 SNI。
+    # 新安装先保持为空，由安装流程按连续握手结果选择；探测失败不回退默认 SNI。
     REALITY_SNI="${REALITY_SNI:-}"
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
@@ -1774,6 +1782,8 @@ generate_params() {
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
+    ARGO_CF_CACHE_DOMAIN=""
+    ARGO_CF_CACHE_VERSION=""
     LINK_IPV4_SELECTION="all"
     PUBLIC_IPV4_OVERRIDE=""
     NAT_MODE="false"
@@ -2519,7 +2529,6 @@ write_singbox_config() {
         [[ -z "${HY2_PORT:-}" ]]    && missing+="HY2_PORT "
         [[ -z "${HY2_PASSWORD:-}" ]] && missing+="HY2_PASSWORD "
         [[ -z "${HY2_SNI:-}" ]]     && missing+="HY2_SNI "
-        [[ -z "${HY2_MASQUERADE_URL:-}" ]] && missing+="HY2_MASQUERADE_URL "
     fi
     if is_socks_enabled; then
         [[ -z "${SOCKS_PORT:-}" ]]     && missing+="SOCKS_PORT "
@@ -2531,7 +2540,7 @@ write_singbox_config() {
     fi
 
     local json_uuid json_reality_sni json_private_key json_short_id json_ws_path argo_inbound hy2_inbound
-    local json_hy2_password json_hy2_sni json_key_path json_cert_path json_hy2_masquerade_url
+    local json_hy2_password json_hy2_sni json_key_path json_cert_path
     local json_socks_username json_socks_password socks_inbound
     local reality_inbound inbounds_joined inbound_part
 
@@ -2567,7 +2576,6 @@ ARGO_EOF
         json_hy2_sni=$(json_string "$HY2_SNI")
         json_key_path=$(json_string "${CONFIG_DIR}/server.key")
         json_cert_path=$(json_string "${CONFIG_DIR}/server.crt")
-        json_hy2_masquerade_url=$(json_string "$HY2_MASQUERADE_URL")
         hy2_inbound=$(cat << HY2_EOF
         {
             "type": "hysteria2",
@@ -2588,9 +2596,13 @@ ARGO_EOF
                 "certificate_path": ${json_cert_path}
             },
             "masquerade": {
-                "type": "proxy",
-                "url": ${json_hy2_masquerade_url},
-                "rewrite_host": true
+                "type": "string",
+                "status_code": 404,
+                "headers": {
+                    "content-type": "text/plain; charset=utf-8",
+                    "cache-control": "no-store"
+                },
+                "content": "Not Found\n"
             }
         }
 HY2_EOF
@@ -3047,11 +3059,6 @@ fetch_argo_domain() {
         sleep 2
     done
 
-    if [[ -n "$candidate" ]]; then
-        ARGO_DOMAIN="$candidate"
-        warn "Argo 临时域名暂未通过存活验证，已保留日志中的最新域名: ${candidate}"
-        return 0
-    fi
     ARGO_DOMAIN="$previous_domain"
     return 1
 }
@@ -3116,6 +3123,17 @@ update_argo_subscription_links() {
     show_subscription_url
 }
 # ─── Reality 优选 SNI ────────────────────────────────────────
+ensure_reality_probe_dependencies() {
+    command -v dig >/dev/null 2>&1 && return 0
+    local dns_package="dnsutils"
+    case "$(package_manager)" in
+        dnf|yum) dns_package="bind-utils" ;;
+        apk) dns_package="bind-tools" ;;
+    esac
+    install_packages_low_resource "$dns_package" || return 1
+    command -v dig >/dev/null 2>&1
+}
+
 get_reality_probe_parallelism() {
     local cpu_count profile
     cpu_count=$(get_cpu_count)
@@ -3137,9 +3155,68 @@ reality_curl_supports_h2() {
     curl --version 2>/dev/null | grep -qiw HTTP2
 }
 
+reality_sni_is_approved() {
+    local requested="${1:-}" candidate
+    is_valid_hostname "$requested" || return 1
+    for candidate in "${REALITY_SNI_LIST[@]}"; do
+        [[ "$requested" == "$candidate" ]] && return 0
+    done
+    return 1
+}
+
+reality_sni_dns_metadata_valid() {
+    local sni="${1:-}" expected_asn cname aaaa origin_record origin_asn
+    local a b c d
+    local -a ipv4_addresses=()
+
+    reality_sni_is_approved "$sni" || return 1
+    command -v dig >/dev/null 2>&1 || return 1
+    expected_asn=$(reality_sni_expected_asn "$sni") || return 1
+
+    cname=$(dig +time=2 +tries=1 +short CNAME "$sni" 2>/dev/null) || return 1
+    [[ -z "$cname" ]] || return 1
+    mapfile -t ipv4_addresses < <(dig +time=2 +tries=1 +short A "$sni" 2>/dev/null | awk '/^[0-9]+([.][0-9]+){3}$/')
+    [[ ${#ipv4_addresses[@]} -eq 1 ]] || return 1
+    is_valid_public_ipv4_for_link "${ipv4_addresses[0]}" || return 1
+    aaaa=$(dig +time=2 +tries=1 +short AAAA "$sni" 2>/dev/null) || return 1
+    [[ -z "$aaaa" ]] || return 1
+    is_cloudflare_address "${ipv4_addresses[0]}" && return 1
+
+    IFS=. read -r a b c d <<< "${ipv4_addresses[0]}"
+    origin_record=$(dig +time=2 +tries=1 +short TXT "${d}.${c}.${b}.${a}.origin.asn.cymru.com" 2>/dev/null | head -1)
+    origin_asn=$(printf '%s\n' "$origin_record" | tr -d '"' | awk -F'|' '{gsub(/[[:space:]]/, "", $1); print $1}')
+    [[ "$origin_asn" == "$expected_asn" ]]
+}
+
+is_cloudflare_address() {
+    local ip="${1:-}" a b c d
+    case "${ip,,}" in
+        2400:cb00:*|2606:4700:*|2803:f800:*|2405:b500:*|2405:8100:*|2a06:98c[0-7]:*|2c0f:f248:*) return 0 ;;
+    esac
+    is_valid_ipv4 "$ip" || return 1
+    IFS=. read -r a b c d <<< "$ip"
+    case "$a.$b" in
+        173.245) (( c >= 48 && c <= 63 )) ;;
+        103.21)  (( c >= 244 && c <= 247 )) ;;
+        103.22)  (( c >= 200 && c <= 203 )) ;;
+        103.31)  (( c >= 4 && c <= 7 )) ;;
+        141.101) (( c >= 64 && c <= 127 )) ;;
+        108.162) (( c >= 192 )) ;;
+        190.93)  (( c >= 240 )) ;;
+        188.114) (( c >= 96 && c <= 111 )) ;;
+        197.234) (( c >= 240 && c <= 243 )) ;;
+        198.41)  (( c >= 128 )) ;;
+        162.158|162.159) return 0 ;;
+        104.*)   (( b >= 16 && b <= 27 )) ;;
+        172.*)   (( b >= 64 && b <= 71 )) ;;
+        131.0)   (( c >= 72 && c <= 75 )) ;;
+        *)       return 1 ;;
+    esac
+}
+
 probe_reality_sni_candidate() {
     local idx="$1" sni="$2" result_file="$3" require_h2="${4:-1}"
-    local out http_ver appconnect ms attempt
+    local out http_ver appconnect remote_ip ms attempt
     local success_count=0 total_ms=0 max_ms=0 attempts=3
     # 用 HEAD(-I) 探测：仅取响应头即可拿到协议版本与握手耗时，不下载正文，
     # 对低带宽 / 低配 VPS 更省流量和时间(h2/ALPN 是连接级，与请求方法无关)。
@@ -3149,15 +3226,16 @@ probe_reality_sni_candidate() {
 
     for attempt in $(seq 1 "$attempts"); do
         # 连续取样，优先选择成功率高且平均/最大握手延迟低的目标。
-        out=$(curl -o /dev/null -s -w '%{http_version} %{time_appconnect}' \
-            "${curl_opts[@]}" "https://${sni}" 2>/dev/null || true)
-        http_ver="${out%% *}"
-        appconnect="${out##* }"
+        out=$(curl --noproxy '*' -o /dev/null -s -w '%{http_version} %{time_appconnect} %{remote_ip}' \
+            "${curl_opts[@]}" "https://${sni}" 2>/dev/null) || continue
+        read -r http_ver appconnect remote_ip <<< "$out"
 
         if (( require_h2 )) && [[ "$http_ver" != "2" ]]; then
             continue
         fi
         [[ "$appconnect" =~ ^[0-9]+([.][0-9]+)?$ ]] || continue
+        [[ -n "$remote_ip" ]] || continue
+        is_cloudflare_address "$remote_ip" && continue
         ms=$(awk -v t="$appconnect" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo 0)
         [[ "$ms" =~ ^[0-9]+$ && "$ms" -gt 0 && "$ms" -lt 9999 ]] || continue
         success_count=$((success_count + 1))
@@ -3172,32 +3250,54 @@ probe_reality_sni_candidate() {
     return 0
 }
 
+reality_sni_runtime_usable() {
+    local sni="$1" tmp
+    reality_sni_is_approved "$sni" || return 1
+    reality_sni_dns_metadata_valid "$sni" || return 1
+    reality_curl_supports_h2 || return 1
+    tmp=$(mktemp) || return 1
+    probe_reality_sni_candidate 0 "$sni" "$tmp" 1
+    local result=1
+    [[ -s "$tmp" ]] && result=0
+    rm -f "$tmp"
+    return "$result"
+}
+
 select_reality_sni() {
     if [[ -n "${REALITY_SNI:-}" ]]; then
-        info "当前已设定伪装域名: $REALITY_SNI，跳过测速"
-        return
+        if ! reality_sni_is_approved "$REALITY_SNI"; then
+            warn "Reality 伪装域名不在审核列表中: $REALITY_SNI"
+            REALITY_SNI=""
+            return 1
+        fi
+        if reality_sni_runtime_usable "$REALITY_SNI"; then
+            info "当前已设定审核域名并通过运行时检查: $REALITY_SNI"
+            return 0
+        fi
+        warn "Reality 伪装域名未通过运行时检查: $REALITY_SNI"
+        REALITY_SNI=""
+        return 1
     fi
     local probe_parallelism
     probe_parallelism=$(get_reality_probe_parallelism)
 
-    # 本机 curl 支持 h2 时把 HTTP/2 作为硬门槛；不支持则降级为仅 TLS1.3。
-    local require_h2=0 gate_desc="TLS1.3"
-    if reality_curl_supports_h2; then
-        require_h2=1
-        gate_desc="TLS1.3 + HTTP/2"
+    if ! command -v dig >/dev/null 2>&1 || ! reality_curl_supports_h2; then
+        REALITY_SNI=""
+        warn "Reality 审核需要 dig 与支持 HTTP/2 的 curl，当前环境不满足"
+        return 1
     fi
-    info "正在实测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名 (要求 ${gate_desc}，按握手延迟择优)，并发数: ${probe_parallelism}"
+    info "正在实测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名 (要求 DNS/ASN 未漂移、TLS1.3 + HTTP/2，按握手延迟择优)，并发数: ${probe_parallelism}"
 
     local tmp_dir
     if ! tmp_dir=$(mktemp -d); then
-        REALITY_SNI="${REALITY_SNI_LIST[0]}"
-        warn "创建临时目录失败，使用默认伪装域名: ${REALITY_SNI}"
-        return 0
+        REALITY_SNI=""
+        warn "创建临时目录失败，未选择 Reality 域名"
+        return 1
     fi
 
     # 探测过程允许个别命令失败：在低内存/无 swap 机器上，后台任务 fork 失败、
     # wait 返回非零或管道 SIGPIPE 都会在 set -euo pipefail 下误终止整个脚本。
-    # 本函数已有「全部失败时使用列表首项」的保护逻辑，这里临时关闭 errexit 即可。
+    # 本函数会在全部失败时返回失败，这里只避免后台探测受 errexit 干扰。
     local errexit_was_set=0
     [[ $- == *e* ]] && errexit_was_set=1
     set +e
@@ -3207,10 +3307,11 @@ select_reality_sni() {
     local active_jobs=0
     for idx in "${!REALITY_SNI_LIST[@]}"; do
         local sni="${REALITY_SNI_LIST[$idx]}"
+        reality_sni_dns_metadata_valid "$sni" || continue
         if (( probe_parallelism <= 1 )); then
-            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" "$require_h2"
+            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" 1
         else
-            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" "$require_h2" &
+            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" 1 &
             active_jobs=$((active_jobs + 1))
             if (( active_jobs >= probe_parallelism )); then
                 wait
@@ -3243,26 +3344,21 @@ select_reality_sni() {
     if [[ -n "$best_sni" ]]; then
         REALITY_SNI="$best_sni"
         success "已选择连续握手最稳定的 Reality 域名: ${REALITY_SNI} (${best_success}/3，平均 ${best_time}ms，最大 ${best_max}ms)"
+        return 0
     else
-        # 无域名通过 TLS1.3+h2 实测时，回退到候选列表中第一个未被排除的域名
-        local fallback=""
-        local cand
-        for cand in "${REALITY_SNI_LIST[@]}"; do
-            [[ "$exclude" == *" $cand "* ]] && continue
-            fallback="$cand"
-            break
-        done
-        REALITY_SNI="${fallback:-${REALITY_SNI_LIST[0]}}"
-        warn "无域名通过 TLS1.3 + HTTP/2 实测，使用默认伪装域名: ${REALITY_SNI}"
+        REALITY_SNI=""
+        warn "无审核域名通过运行时检查，未选择 Reality 域名"
+        return 1
     fi
 }
 
 verify_reality_fallback_sni() {
     local sni="${1:-${REALITY_SNI:-}}" port="${2:-${REALITY_PORT:-}}" code
+    reality_sni_is_approved "$sni" || return 1
     is_valid_hostname "$sni" || return 1
     validate_port "$port" "Reality" >/dev/null 2>&1 || return 1
 
-    code=$(curl -k -sS -o /dev/null --connect-timeout 3 --max-time 8 \
+    code=$(curl --noproxy '*' -k -sS -o /dev/null --connect-timeout 3 --max-time 8 \
         --resolve "${sni}:${port}:127.0.0.1" -w '%{http_code}' \
         "https://${sni}:${port}/" 2>/dev/null || true)
     [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]
@@ -3272,7 +3368,7 @@ verify_or_reselect_reality_sni() {
     local old_sni="${REALITY_SNI:-}" failed_sni next_sni
 
     if verify_reality_fallback_sni "$old_sni" "$REALITY_PORT"; then
-        success "Reality 入口到伪装目标的完整 TLS 转发验证通过: ${old_sni}"
+        success "Reality TLS 转发验证通过: ${old_sni}"
         return 0
     fi
 
@@ -3280,7 +3376,7 @@ verify_or_reselect_reality_sni() {
     warn "Reality 完整 TLS 转发验证失败，正在排除 ${failed_sni} 后重新选择"
     REALITY_SNI=""
     REALITY_SNI_EXCLUDE="$failed_sni"
-    select_reality_sni
+    select_reality_sni || true
     unset REALITY_SNI_EXCLUDE
     next_sni="$REALITY_SNI"
     if [[ -z "$next_sni" || "$next_sni" == "$failed_sni" ]]; then
@@ -3475,15 +3571,123 @@ append_argo_link() {
     append_subscription_link "$link"
 }
 
+argo_cf_domain_is_candidate() {
+    local requested="${1:-}" candidate
+    for candidate in "${ARGO_CF_DOMAINS[@]}"; do
+        [[ "$requested" == "$candidate" ]] && return 0
+    done
+    return 1
+}
+
+probe_argo_cf_domain() {
+    local idx="$1" domain="$2" family="$3" result_file="$4" attempts="${5:-3}"
+    local output code appconnect ms attempt
+    local -a family_args=()
+    local success_count=0 total_ms=0 max_ms=0
+    [[ "$family" == "4" ]] && family_args=(-4)
+    [[ "$family" == "6" ]] && family_args=(-6)
+    argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}" && is_valid_hostname "$domain" || return 0
+
+    for attempt in $(seq 1 "$attempts"); do
+        output=$(curl --noproxy '*' "${family_args[@]}" --http1.1 -sS -o /dev/null \
+            --connect-timeout 3 --max-time 8 \
+            --connect-to "${ARGO_DOMAIN}:443:${domain}:443" \
+            -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+            -H 'Sec-WebSocket-Version: 13' \
+            -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+            -w '%{http_code} %{time_appconnect}' \
+            "https://${ARGO_DOMAIN}${WS_PATH:-/}" 2>/dev/null || true)
+        read -r code appconnect <<< "$output"
+        [[ "$code" == "101" ]] || continue
+        [[ "$appconnect" =~ ^[0-9]+([.][0-9]+)?$ ]] || continue
+        ms=$(awk -v t="$appconnect" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo 0)
+        [[ "$ms" =~ ^[0-9]+$ && "$ms" -gt 0 && "$ms" -lt 9999 ]] || continue
+        success_count=$((success_count + 1))
+        total_ms=$((total_ms + ms))
+        (( ms > max_ms )) && max_ms=$ms
+    done
+
+    (( success_count >= 2 )) || return 0
+    printf '%s %s %s %s %s\n' "$idx" "$success_count" "$((total_ms / success_count))" "$max_ms" "$domain" >> "$result_file"
+}
+
+select_argo_cf_domain_for_family() {
+    local family="$1" tmp_dir result_file idx domain best
+    tmp_dir=$(mktemp -d) || return 1
+    result_file="${tmp_dir}/results"
+
+    for idx in "${!ARGO_CF_DOMAINS[@]}"; do
+        domain="${ARGO_CF_DOMAINS[$idx]}"
+        probe_argo_cf_domain "$idx" "$domain" "$family" "$result_file" 3 &
+    done
+    wait 2>/dev/null || true
+
+    if [[ -s "$result_file" ]]; then
+        best=$(sort -k2,2nr -k3,3n -k4,4n -k1,1n "$result_file" | head -1)
+        domain=$(printf '%s\n' "$best" | awk '{print $5}')
+        rm -rf "$tmp_dir"
+        printf '%s\n' "$domain"
+        return 0
+    fi
+    rm -rf "$tmp_dir"
+    return 1
+}
+
+resolve_argo_best_cf_domains() {
+    local changed=false selected=""
+    argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}" || return 1
+
+    if [[ "${ARGO_CF_CACHE_DOMAIN:-}" != "$ARGO_DOMAIN" || "${ARGO_CF_CACHE_VERSION:-}" != "$ARGO_CF_DOMAIN_LIST_VERSION" ]]; then
+        clear_argo_best_cf_cache
+        changed=true
+    fi
+
+    if [[ -n "${ARGO_BEST_CF_DOMAIN_IPV4:-}" ]] && argo_cf_domain_is_candidate "$ARGO_BEST_CF_DOMAIN_IPV4"; then
+        local verify4
+        verify4=$(mktemp) || return 1
+        probe_argo_cf_domain 0 "$ARGO_BEST_CF_DOMAIN_IPV4" 4 "$verify4" 2
+        [[ -s "$verify4" ]] || ARGO_BEST_CF_DOMAIN_IPV4=""
+        rm -f "$verify4"
+    else
+        ARGO_BEST_CF_DOMAIN_IPV4=""
+    fi
+    if [[ -z "$ARGO_BEST_CF_DOMAIN_IPV4" ]] && selected=$(select_argo_cf_domain_for_family 4); then
+        ARGO_BEST_CF_DOMAIN_IPV4="$selected"
+        changed=true
+    fi
+
+    if [[ -n "${ARGO_BEST_CF_DOMAIN_IPV6:-}" ]] && argo_cf_domain_is_candidate "$ARGO_BEST_CF_DOMAIN_IPV6"; then
+        local verify6
+        verify6=$(mktemp) || return 1
+        probe_argo_cf_domain 0 "$ARGO_BEST_CF_DOMAIN_IPV6" 6 "$verify6" 2
+        [[ -s "$verify6" ]] || ARGO_BEST_CF_DOMAIN_IPV6=""
+        rm -f "$verify6"
+    else
+        ARGO_BEST_CF_DOMAIN_IPV6=""
+    fi
+    if [[ -z "$ARGO_BEST_CF_DOMAIN_IPV6" ]] && selected=$(select_argo_cf_domain_for_family 6); then
+        ARGO_BEST_CF_DOMAIN_IPV6="$selected"
+        changed=true
+    fi
+
+    ARGO_BEST_CF_DOMAIN="${ARGO_BEST_CF_DOMAIN_IPV4:-${ARGO_BEST_CF_DOMAIN_IPV6:-}}"
+    ARGO_CF_CACHE_DOMAIN="$ARGO_DOMAIN"
+    ARGO_CF_CACHE_VERSION="$ARGO_CF_DOMAIN_LIST_VERSION"
+    if [[ "$changed" == "true" && -f "$PARAMS_FILE" ]]; then
+        save_params
+    fi
+    [[ -n "$ARGO_BEST_CF_DOMAIN_IPV4" || -n "$ARGO_BEST_CF_DOMAIN_IPV6" ]]
+}
+
 build_argo_link_for_domain() {
-    local argo_name argo_remark
+    local address="${1:-${ARGO_DOMAIN:-}}" family_label="${2:-}" argo_name argo_remark
 
     argo_enabled || return
     is_valid_hostname "${ARGO_DOMAIN:-}" || return
-    argo_name="${NODE_NAME}-Argo"
+    is_valid_hostname "$address" || return
+    argo_name="${NODE_NAME}-Argo${family_label:+-${family_label}}"
     argo_remark=$(urlencode "$argo_name")
-    # 当前 Argo 域名同时作为连接地址、SNI 和 Host，避免额外地址与早期数据参数造成漂移。
-    append_argo_link "vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
+    append_argo_link "vless://${UUID}@${address}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}&fp=chrome#${argo_remark}"
 }
 
 # ─── 链接与订阅生成 ──────────────────────────────────────────
@@ -3493,8 +3697,6 @@ build_share_links() {
     GENERATED_HY2_LINKS=""
     GENERATED_SOCKS_LINKS=""
     GENERATED_SUBSCRIPTION_RAW=""
-    ARGO_BEST_CF_DOMAIN_IPV4=""
-    ARGO_BEST_CF_DOMAIN_IPV6=""
     HY2_SHARE_LINK_WARNING=""
     HY2_CERT_PIN_SHA256=""
 
@@ -3527,7 +3729,14 @@ build_share_links() {
     esac
 
     if argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}"; then
-        build_argo_link_for_domain
+        if resolve_argo_best_cf_domains; then
+            [[ -n "${ARGO_BEST_CF_DOMAIN_IPV4:-}" ]] && build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV4" "IPv4"
+            if [[ -n "${ARGO_BEST_CF_DOMAIN_IPV6:-}" && "$ARGO_BEST_CF_DOMAIN_IPV6" != "$ARGO_BEST_CF_DOMAIN_IPV4" ]]; then
+                build_argo_link_for_domain "$ARGO_BEST_CF_DOMAIN_IPV6" "IPv6"
+            fi
+        else
+            warn "CF 优选地址未通过 Argo 域名实测，未生成 Argo 节点链接"
+        fi
     fi
 }
 
@@ -3754,7 +3963,8 @@ do_primary_install() {
     if is_socks_enabled; then
         info "SOCKS5 已生成随机用户名和密码，安装后随节点链接显示。"
     fi
-    select_reality_sni
+    ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖安装失败，安装已停止"
+    select_reality_sni || error "未找到通过运行时检查的 Reality 伪装域名，安装已停止"
 
     while true; do
         # Reality 默认使用随机高位 TCP 端口，降低标准 443 端口的无效扫描压力。
@@ -3798,7 +4008,14 @@ do_primary_install() {
     done
 
     prompt_read input "  Reality 伪装域名 [${REALITY_SNI}]: "
-    [[ -n "$input" ]] && REALITY_SNI="$input"
+    if [[ -n "$input" ]]; then
+        ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖不可用，安装已停止"
+        if reality_sni_runtime_usable "$input"; then
+            REALITY_SNI="$input"
+        else
+            warn "该域名未通过 Reality 运行时检查，保留自动优选域名: ${REALITY_SNI}"
+        fi
+    fi
 
     prompt_read input "  节点名称 [${NODE_NAME}]: "
     [[ -n "$input" ]] && NODE_NAME="$input"
@@ -3868,7 +4085,11 @@ do_primary_install() {
         error "sing-box 启动失败，请查看服务日志"
     fi
 
-    verify_or_reselect_reality_sni || warn "Reality 完整 TLS 转发验证未通过，已保留可恢复配置"
+    if ! verify_or_reselect_reality_sni; then
+        warn "Reality 完整 TLS 转发验证未通过，已保留当前运行配置"
+        save_params
+        return 1
+    fi
 
     ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅网关启动失败，可稍后执行 sbm restart 重试"; }
 
@@ -3884,6 +4105,11 @@ do_primary_install() {
             argo_ready=false
             warn "Argo 隧道启动失败，可稍后执行 sbm restart 重试"
         fi
+    fi
+
+    if argo_enabled && [[ "$argo_ready" == "true" ]] && ! resolve_argo_best_cf_domains; then
+        argo_ready=false
+        warn "CF 优选地址未通过当前 Argo 域名的实测"
     fi
 
     # 保存参数
@@ -3990,9 +4216,17 @@ do_modify_config() {
             2)
                 prompt_read input "  新伪装域名: "
                 if [[ -n "$input" ]]; then
-                    REALITY_SNI="$input"
-                    changed=true
-                    restart_singbox=true
+                    if ! ensure_reality_probe_dependencies; then
+                        warn "Reality 域名安全检查依赖不可用，未修改配置"
+                        continue
+                    fi
+                    if reality_sni_runtime_usable "$input"; then
+                        REALITY_SNI="$input"
+                        changed=true
+                        restart_singbox=true
+                    else
+                        warn "该域名未通过 Reality 运行时检查，未修改配置"
+                    fi
                 fi
                 ;;
             3)
@@ -4523,6 +4757,11 @@ do_reoptimize_reality_sni() {
     xray_managed_reality && reality_service="xray"
     info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选（自动避开当前与上一次域名）..."
 
+    if ! ensure_reality_probe_dependencies; then
+        warn "Reality 域名安全检查依赖不可用，已保留原配置"
+        return 1
+    fi
+
     # 清空后触发实测筛选；通过 REALITY_SNI_EXCLUDE 排除当前与上一次域名，
     # 确保重新优选的结果一定不同，否则就失去了重新优选的意义。
     REALITY_SNI=""
@@ -4530,7 +4769,12 @@ do_reoptimize_reality_sni() {
     if [[ "$reality_service" == "xray" ]]; then
         REALITY_SNI_EXCLUDE+=" www.microsoft.com www.apple.com gateway.icloud.com itunes.apple.com"
     fi
-    select_reality_sni
+    if ! select_reality_sni; then
+        REALITY_SNI="$old_sni"
+        REALITY_SNI_EXCLUDE=""
+        warn "未能优选到可用域名，已保留原伪装域名: ${old_sni:-未设置}"
+        return 1
+    fi
     REALITY_SNI_EXCLUDE=""
 
     if [[ -z "${REALITY_SNI:-}" ]]; then
@@ -4610,6 +4854,15 @@ do_apply_latest() {
         return 1
     fi
 
+    if ! ensure_reality_probe_dependencies; then
+        warn "Reality 域名安全检查依赖不可用，未执行配置更新"
+        return 1
+    fi
+    if ! reality_sni_runtime_usable "${REALITY_SNI:-}"; then
+        warn "当前 Reality 伪装域名未通过运行时检查，未执行配置更新"
+        return 1
+    fi
+
     info "正在按 v${SCRIPT_VERSION} 模板重写配置 (UUID / 端口 / 域名 / 密钥保持不变)..."
     generate_tls_cert
     write_singbox_config
@@ -4626,6 +4879,12 @@ do_apply_latest() {
         warn "sing-box 未成功启动，请查看日志排查"
         return 1
     fi
+
+    if ! verify_or_reselect_reality_sni; then
+        warn "Reality 完整 TLS 转发验证未通过，已保留可恢复配置"
+        return 1
+    fi
+    save_params
 
     success "配置已按 v${SCRIPT_VERSION} 同步并重启"
     refresh_argo_runtime || return 1
@@ -4903,7 +5162,7 @@ main() {
         restart)     do_restart ;;
         resni|reality-sni) do_reoptimize_reality_sni || warn "Reality 伪装域名优选未完成" ;;
         apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
-        cfopt|refresh-cf|cfopt-auto) warn "固定域名 Argo 不再使用第三方 CF 优选域名" ;;
+        cfopt|refresh-cf|cfopt-auto) warn "CF 优选现已在 links/sub 命令中自动执行" ;;
         status)      do_status ;;
         uninstall)   do_uninstall ;;
         --help|-h)

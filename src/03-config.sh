@@ -12,7 +12,7 @@ generate_params() {
     REALITY_PORT=${REALITY_PORT:-$(select_random_available_tcp_port)}
     # Reality 承载内核：singbox(默认) 或 xray。可通过环境变量 REALITY_BACKEND=xray 选择。
     REALITY_BACKEND="${REALITY_BACKEND:-singbox}"
-    # 新安装先保持为空，由安装流程按连续握手结果选择；探测失败仍回退默认 SNI。
+    # 新安装先保持为空，由安装流程按连续握手结果选择；探测失败不回退默认 SNI。
     REALITY_SNI="${REALITY_SNI:-}"
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
@@ -25,6 +25,8 @@ generate_params() {
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
+    ARGO_CF_CACHE_DOMAIN=""
+    ARGO_CF_CACHE_VERSION=""
     LINK_IPV4_SELECTION="all"
     PUBLIC_IPV4_OVERRIDE=""
     NAT_MODE="false"
@@ -770,7 +772,6 @@ write_singbox_config() {
         [[ -z "${HY2_PORT:-}" ]]    && missing+="HY2_PORT "
         [[ -z "${HY2_PASSWORD:-}" ]] && missing+="HY2_PASSWORD "
         [[ -z "${HY2_SNI:-}" ]]     && missing+="HY2_SNI "
-        [[ -z "${HY2_MASQUERADE_URL:-}" ]] && missing+="HY2_MASQUERADE_URL "
     fi
     if is_socks_enabled; then
         [[ -z "${SOCKS_PORT:-}" ]]     && missing+="SOCKS_PORT "
@@ -782,7 +783,7 @@ write_singbox_config() {
     fi
 
     local json_uuid json_reality_sni json_private_key json_short_id json_ws_path argo_inbound hy2_inbound
-    local json_hy2_password json_hy2_sni json_key_path json_cert_path json_hy2_masquerade_url
+    local json_hy2_password json_hy2_sni json_key_path json_cert_path
     local json_socks_username json_socks_password socks_inbound
     local reality_inbound inbounds_joined inbound_part
 
@@ -818,7 +819,6 @@ ARGO_EOF
         json_hy2_sni=$(json_string "$HY2_SNI")
         json_key_path=$(json_string "${CONFIG_DIR}/server.key")
         json_cert_path=$(json_string "${CONFIG_DIR}/server.crt")
-        json_hy2_masquerade_url=$(json_string "$HY2_MASQUERADE_URL")
         hy2_inbound=$(cat << HY2_EOF
         {
             "type": "hysteria2",
@@ -839,9 +839,13 @@ ARGO_EOF
                 "certificate_path": ${json_cert_path}
             },
             "masquerade": {
-                "type": "proxy",
-                "url": ${json_hy2_masquerade_url},
-                "rewrite_host": true
+                "type": "string",
+                "status_code": 404,
+                "headers": {
+                    "content-type": "text/plain; charset=utf-8",
+                    "cache-control": "no-store"
+                },
+                "content": "Not Found\n"
             }
         }
 HY2_EOF

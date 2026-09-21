@@ -18,7 +18,8 @@ do_primary_install() {
     if is_socks_enabled; then
         info "SOCKS5 已生成随机用户名和密码，安装后随节点链接显示。"
     fi
-    select_reality_sni
+    ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖安装失败，安装已停止"
+    select_reality_sni || error "未找到通过运行时检查的 Reality 伪装域名，安装已停止"
 
     while true; do
         # Reality 默认使用随机高位 TCP 端口，降低标准 443 端口的无效扫描压力。
@@ -62,7 +63,14 @@ do_primary_install() {
     done
 
     prompt_read input "  Reality 伪装域名 [${REALITY_SNI}]: "
-    [[ -n "$input" ]] && REALITY_SNI="$input"
+    if [[ -n "$input" ]]; then
+        ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖不可用，安装已停止"
+        if reality_sni_runtime_usable "$input"; then
+            REALITY_SNI="$input"
+        else
+            warn "该域名未通过 Reality 运行时检查，保留自动优选域名: ${REALITY_SNI}"
+        fi
+    fi
 
     prompt_read input "  节点名称 [${NODE_NAME}]: "
     [[ -n "$input" ]] && NODE_NAME="$input"
@@ -132,7 +140,11 @@ do_primary_install() {
         error "sing-box 启动失败，请查看服务日志"
     fi
 
-    verify_or_reselect_reality_sni || warn "Reality 完整 TLS 转发验证未通过，已保留可恢复配置"
+    if ! verify_or_reselect_reality_sni; then
+        warn "Reality 完整 TLS 转发验证未通过，已保留当前运行配置"
+        save_params
+        return 1
+    fi
 
     ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅网关启动失败，可稍后执行 sbm restart 重试"; }
 
@@ -148,6 +160,11 @@ do_primary_install() {
             argo_ready=false
             warn "Argo 隧道启动失败，可稍后执行 sbm restart 重试"
         fi
+    fi
+
+    if argo_enabled && [[ "$argo_ready" == "true" ]] && ! resolve_argo_best_cf_domains; then
+        argo_ready=false
+        warn "CF 优选地址未通过当前 Argo 域名的实测"
     fi
 
     # 保存参数
@@ -254,9 +271,17 @@ do_modify_config() {
             2)
                 prompt_read input "  新伪装域名: "
                 if [[ -n "$input" ]]; then
-                    REALITY_SNI="$input"
-                    changed=true
-                    restart_singbox=true
+                    if ! ensure_reality_probe_dependencies; then
+                        warn "Reality 域名安全检查依赖不可用，未修改配置"
+                        continue
+                    fi
+                    if reality_sni_runtime_usable "$input"; then
+                        REALITY_SNI="$input"
+                        changed=true
+                        restart_singbox=true
+                    else
+                        warn "该域名未通过 Reality 运行时检查，未修改配置"
+                    fi
                 fi
                 ;;
             3)
@@ -787,6 +812,11 @@ do_reoptimize_reality_sni() {
     xray_managed_reality && reality_service="xray"
     info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选（自动避开当前与上一次域名）..."
 
+    if ! ensure_reality_probe_dependencies; then
+        warn "Reality 域名安全检查依赖不可用，已保留原配置"
+        return 1
+    fi
+
     # 清空后触发实测筛选；通过 REALITY_SNI_EXCLUDE 排除当前与上一次域名，
     # 确保重新优选的结果一定不同，否则就失去了重新优选的意义。
     REALITY_SNI=""
@@ -794,7 +824,12 @@ do_reoptimize_reality_sni() {
     if [[ "$reality_service" == "xray" ]]; then
         REALITY_SNI_EXCLUDE+=" www.microsoft.com www.apple.com gateway.icloud.com itunes.apple.com"
     fi
-    select_reality_sni
+    if ! select_reality_sni; then
+        REALITY_SNI="$old_sni"
+        REALITY_SNI_EXCLUDE=""
+        warn "未能优选到可用域名，已保留原伪装域名: ${old_sni:-未设置}"
+        return 1
+    fi
     REALITY_SNI_EXCLUDE=""
 
     if [[ -z "${REALITY_SNI:-}" ]]; then
@@ -874,6 +909,15 @@ do_apply_latest() {
         return 1
     fi
 
+    if ! ensure_reality_probe_dependencies; then
+        warn "Reality 域名安全检查依赖不可用，未执行配置更新"
+        return 1
+    fi
+    if ! reality_sni_runtime_usable "${REALITY_SNI:-}"; then
+        warn "当前 Reality 伪装域名未通过运行时检查，未执行配置更新"
+        return 1
+    fi
+
     info "正在按 v${SCRIPT_VERSION} 模板重写配置 (UUID / 端口 / 域名 / 密钥保持不变)..."
     generate_tls_cert
     write_singbox_config
@@ -890,6 +934,12 @@ do_apply_latest() {
         warn "sing-box 未成功启动，请查看日志排查"
         return 1
     fi
+
+    if ! verify_or_reselect_reality_sni; then
+        warn "Reality 完整 TLS 转发验证未通过，已保留可恢复配置"
+        return 1
+    fi
+    save_params
 
     success "配置已按 v${SCRIPT_VERSION} 同步并重启"
     refresh_argo_runtime || return 1
@@ -1167,7 +1217,7 @@ main() {
         restart)     do_restart ;;
         resni|reality-sni) do_reoptimize_reality_sni || warn "Reality 伪装域名优选未完成" ;;
         apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
-        cfopt|refresh-cf|cfopt-auto) warn "固定域名 Argo 不再使用第三方 CF 优选域名" ;;
+        cfopt|refresh-cf|cfopt-auto) warn "CF 优选现已在 links/sub 命令中自动执行" ;;
         status)      do_status ;;
         uninstall)   do_uninstall ;;
         --help|-h)

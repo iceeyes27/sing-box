@@ -333,11 +333,6 @@ fetch_argo_domain() {
         sleep 2
     done
 
-    if [[ -n "$candidate" ]]; then
-        ARGO_DOMAIN="$candidate"
-        warn "Argo 临时域名暂未通过存活验证，已保留日志中的最新域名: ${candidate}"
-        return 0
-    fi
     ARGO_DOMAIN="$previous_domain"
     return 1
 }

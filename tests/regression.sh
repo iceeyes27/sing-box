@@ -199,7 +199,7 @@ EOF
     load_params
     assert_eq "8443" "$HY2_PORT" "legacy HY2_PORT migration"
     assert_eq "legacy-hy2-password" "$HY2_PASSWORD" "legacy HY2 password migration"
-    assert_eq "https://www.bing.com" "$HY2_MASQUERADE_URL" "legacy HY2 masquerade migration"
+    assert_eq "" "$HY2_MASQUERADE_URL" "legacy HY2 static masquerade migration"
     assert_eq "legacy-sub-token" "$SUB_TOKEN" "legacy subscription token migration"
     assert_eq "24630" "$SUBSCRIPTION_PORT" "legacy subscription port migration"
     assert_eq "cf.example.com" "$ARGO_BEST_CF_DOMAIN_IPV4" "legacy Argo IPv4 cache migration"
@@ -515,7 +515,7 @@ test_ipv4_override_generates_direct_links() {
     assert_contains "$GENERATED_HY2_LINKS" "insecure=1&pinSHA256=" "v2rayN-compatible HY2 self-signed certificate parameters"
 }
 
-test_ip_detection_failure_keeps_argo_link_generation() {
+test_ip_detection_failure_keeps_argo_link_generation() (
     UUID="uuid-1"
     NODE_NAME="node"
     REALITY_PORT="443"
@@ -537,6 +537,10 @@ test_ip_detection_failure_keeps_argo_link_generation() {
     urlencode() {
         echo "$1"
     }
+    resolve_argo_best_cf_domains() {
+        ARGO_BEST_CF_DOMAIN_IPV4="cf.090227.xyz"
+        ARGO_BEST_CF_DOMAIN_IPV6=""
+    }
 
     build_share_links >/dev/null
     assert_eq "unknown" "$IP_STACK_MODE" "IP detection failure stack mode"
@@ -545,12 +549,12 @@ test_ip_detection_failure_keeps_argo_link_generation() {
 
     ARGO_TOKEN="fixed-token"
     build_share_links >/dev/null
-    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@argo.example.com:443" "fixed Argo link after IP failure"
-    assert_not_contains "$GENERATED_ARGO_LINKS" "cf.example.com" "fixed Argo ignores third-party CF domain"
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@cf.090227.xyz:443" "fixed Argo optimized address after IP failure"
+    assert_contains "$GENERATED_ARGO_LINKS" "sni=argo.example.com" "fixed Argo keeps tunnel SNI"
     assert_not_contains "$GENERATED_ARGO_LINKS" "ed%3D2048" "fixed Argo omits early data"
-}
+)
 
-test_ipv6_only_links_include_socks5() {
+test_ipv6_only_links_include_socks5() (
     UUID="uuid-1"
     NODE_NAME="node"
     REALITY_PORT="443"
@@ -579,14 +583,21 @@ test_ipv6_only_links_include_socks5() {
     urlencode() {
         echo "$1"
     }
+    resolve_argo_best_cf_domains() {
+        ARGO_BEST_CF_DOMAIN_IPV4="cf.090227.xyz"
+        ARGO_BEST_CF_DOMAIN_IPV6="saas.sin.fan"
+    }
 
     build_share_links >/dev/null
-    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@argo.example.com:443" "IPv6-only fixed Argo link"
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@cf.090227.xyz:443" "IPv6-only VPS emits IPv4-client Argo link"
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@saas.sin.fan:443" "IPv6-only VPS emits IPv6 Argo link"
+    assert_contains "$GENERATED_ARGO_LINKS" "sni=argo.example.com" "optimized Argo links keep tunnel SNI"
+    assert_contains "$GENERATED_ARGO_LINKS" "host=argo.example.com" "optimized Argo links keep tunnel Host"
     assert_not_contains "$GENERATED_REALITY_LINKS" "vless://" "IPv6-only Reality suppression"
     assert_not_contains "$GENERATED_HY2_LINKS" "hysteria2://" "IPv6-only Hysteria2 suppression"
     assert_eq "socks5://proxy:secret@[2001:db8::1]:10808" "$GENERATED_SOCKS_LINKS" "IPv6-only SOCKS5 link"
     SOCKS_ENABLED="false"
-}
+)
 
 test_multiple_ipv4_direct_links_follow_selection() {
     UUID="uuid-1"
@@ -781,7 +792,7 @@ test_runtime_param_restore_is_complete() {
     assert_eq "31080" "$SOCKS_PUBLIC_PORT" "restore SOCKS5 public port"
 }
 
-test_hysteria2_config_uses_masquerade_proxy() {
+test_hysteria2_config_uses_static_masquerade() {
     local tmp config chown_def
     tmp=$(mktemp -d)
 
@@ -818,9 +829,10 @@ test_hysteria2_config_uses_masquerade_proxy() {
     rm -rf "$tmp"
 
     assert_contains "$config" '"masquerade": {' "HY2 masquerade block"
-    assert_contains "$config" '"type": "proxy"' "HY2 masquerade proxy type"
-    assert_contains "$config" '"url": "https://www.bing.com"' "HY2 masquerade proxy URL"
-    assert_contains "$config" '"rewrite_host": true' "HY2 masquerade rewrite host"
+    assert_contains "$config" '"type": "string"' "HY2 static masquerade type"
+    assert_contains "$config" '"status_code": 404' "HY2 static masquerade status"
+    assert_contains "$config" '"content": "Not Found\n"' "HY2 static masquerade content"
+    assert_not_contains "$config" '"type": "proxy"' "HY2 does not proxy unauthenticated traffic"
 }
 
 test_optional_inbounds_follow_feature_state() {
@@ -1129,68 +1141,135 @@ exit 0'
     rm -rf "$tmp"
 }
 
-test_reality_sni_probe_failure_uses_default() {
+test_reality_sni_probe_failure_is_fail_closed() (
     local -a old_sni_list=("${REALITY_SNI_LIST[@]}")
     REALITY_SNI=""
-    REALITY_SNI_LIST=("www.microsoft.com" "www.apple.com")
+    REALITY_SNI_LIST=("www.nazhumi.com" "portal.citygrainla.com")
     get_reality_probe_parallelism() {
         echo 1
+    }
+    reality_sni_dns_metadata_valid() {
+        return 0
+    }
+    reality_curl_supports_h2() {
+        return 0
     }
     curl() {
         return 7
     }
 
-    select_reality_sni >/dev/null
-    assert_eq "www.microsoft.com" "$REALITY_SNI" "Reality SNI default after probe failure"
+    if select_reality_sni >/dev/null; then
+        fail "Reality SNI accepted when every probe failed"
+    fi
+    assert_eq "" "$REALITY_SNI" "Reality SNI stays empty after every probe fails"
     REALITY_SNI_LIST=("${old_sni_list[@]}")
-    unset -f curl get_reality_probe_parallelism
-}
+)
 
-test_reality_sni_probe_requires_two_successes() {
-    local tmp result curl_def
+test_reality_probe_dependencies_install_dns_tool() (
+    local tmp requested=""
     tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    package_manager() {
+        echo dnf
+    }
+    install_packages_low_resource() {
+        requested="$1"
+        printf '#!/usr/bin/env sh\nexit 0\n' > "${tmp}/dig"
+        /bin/chmod +x "${tmp}/dig"
+    }
+
+    PATH="$tmp" ensure_reality_probe_dependencies || fail "Reality DNS dependency installation failed"
+    assert_eq "bind-utils" "$requested" "Reality DNS dependency package"
+)
+
+test_reality_sni_probe_requires_strict_tls_h2_and_remote_ip() (
+    local tmp result calls
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
     PROBE_COUNTER_FILE="${tmp}/counter"
     result="${tmp}/result"
-    curl_def=$(declare -f curl 2>/dev/null || true)
+    calls="${tmp}/calls"
     printf '0\n' > "$PROBE_COUNTER_FILE"
     curl() {
         local count
+        printf '%s\n' "$*" >> "$calls"
         count=$(<"$PROBE_COUNTER_FILE")
         count=$((count + 1))
         printf '%s\n' "$count" > "$PROBE_COUNTER_FILE"
         if (( count <= 2 )); then
-            printf '2 0.050'
+            printf '2 0.050 95.169.9.215'
         else
-            printf '0 0.000'
+            printf '0 0.000 95.169.9.215'
         fi
     }
 
     probe_reality_sni_candidate 0 "portal.citygrainla.com" "$result" 1
     assert_contains "$(<"$result")" "0 2 50 50 portal.citygrainla.com" "Reality SNI accepts two of three stable handshakes"
+    assert_contains "$(<"$calls")" "--tlsv1.3" "Reality probe requires TLS 1.3"
+    assert_contains "$(<"$calls")" "--http2" "Reality probe requires HTTP/2"
 
     : > "$result"
-    printf '0\n' > "$PROBE_COUNTER_FILE"
     curl() {
-        local count
-        count=$(<"$PROBE_COUNTER_FILE")
-        count=$((count + 1))
-        printf '%s\n' "$count" > "$PROBE_COUNTER_FILE"
-        if (( count == 1 )); then
-            printf '2 0.050'
-        else
-            printf '0 0.000'
-        fi
+        printf '2 0.050'
     }
     probe_reality_sni_candidate 0 "portal.citygrainla.com" "$result" 1
-    [[ ! -s "$result" ]] || fail "Reality SNI accepted fewer than two successful handshakes"
+    [[ ! -s "$result" ]] || fail "Reality SNI accepted a probe without remote IP"
 
-    unset -f curl
-    if [[ -n "$curl_def" ]]; then
-        eval "$curl_def"
+    curl() {
+        printf '1.1 0.050 95.169.9.215'
+    }
+    probe_reality_sni_candidate 0 "portal.citygrainla.com" "$result" 1
+    [[ ! -s "$result" ]] || fail "Reality SNI accepted HTTP/1.1"
+)
+
+test_reality_sni_rejects_cloudflare_and_dns_asn_drift() (
+    reality_sni_is_approved "www.nazhumi.com" || fail "approved Reality SNI rejected"
+    if reality_sni_is_approved "dash.cloudflare.com"; then
+        fail "unapproved Cloudflare SNI accepted"
     fi
-    unset PROBE_COUNTER_FILE
-    rm -rf "$tmp"
-}
+    is_cloudflare_address "104.16.10.20" || fail "Cloudflare IPv4 range not detected"
+    is_cloudflare_address "162.159.1.1" || fail "Cloudflare 162.158.0.0/15 range not detected"
+    is_cloudflare_address "2400:cb00::1" || fail "Cloudflare 2400:cb00::/32 range not detected"
+    is_cloudflare_address "2606:4700::1" || fail "Cloudflare IPv6 range not detected"
+    is_cloudflare_address "2a06:98c7::1" || fail "Cloudflare 2a06:98c0::/29 range not detected"
+
+    dig() {
+        case "$*" in
+            *" CNAME www.nazhumi.com") : ;;
+            *" A www.nazhumi.com") echo "43.130.242.218" ;;
+            *" AAAA www.nazhumi.com") : ;;
+            *" TXT 218.242.130.43.origin.asn.cymru.com") echo '"132203 | 43.130.224.0/19 | SG | apnic"' ;;
+            *) return 1 ;;
+        esac
+    }
+    reality_sni_dns_metadata_valid "www.nazhumi.com" || fail "pinned Reality DNS and ASN rejected"
+
+    dig() {
+        case "$*" in
+            *" CNAME www.nazhumi.com") : ;;
+            *" A www.nazhumi.com") echo "104.16.10.20" ;;
+            *" AAAA www.nazhumi.com") : ;;
+            *" TXT 20.10.16.104.origin.asn.cymru.com") echo '"13335 | 104.16.0.0/13 | US | arin"' ;;
+            *) return 1 ;;
+        esac
+    }
+    if reality_sni_dns_metadata_valid "www.nazhumi.com"; then
+        fail "Cloudflare DNS drift passed Reality review"
+    fi
+
+    dig() {
+        case "$*" in
+            *" CNAME www.nazhumi.com") : ;;
+            *" A www.nazhumi.com") echo "43.130.242.218" ;;
+            *" AAAA www.nazhumi.com") : ;;
+            *" TXT 218.242.130.43.origin.asn.cymru.com") echo '"64500 | 43.130.224.0/19 | ZZ | test"' ;;
+            *) return 1 ;;
+        esac
+    }
+    if reality_sni_dns_metadata_valid "www.nazhumi.com"; then
+        fail "unexpected ASN passed Reality review"
+    fi
+)
 
 test_quick_argo_domain_is_read_from_service_logs() {
     local service_logs_def alive_def clear_cache_def
@@ -1212,6 +1291,53 @@ test_quick_argo_domain_is_read_from_service_logs() {
     eval "$alive_def"
     eval "$clear_cache_def"
 }
+
+test_argo_probe_requires_websocket_101_and_requested_family() (
+    local tmp result calls
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    result="${tmp}/result"
+    calls="${tmp}/calls"
+    ARGO_ENABLED="true"
+    ARGO_TOKEN="fixed-token"
+    ARGO_DOMAIN="argo.example.com"
+    WS_PATH="/ws"
+
+    curl() {
+        printf '%s\n' "$*" >> "$calls"
+        printf '101 0.050'
+    }
+    probe_argo_cf_domain 0 "saas.sin.fan" 6 "$result" 2
+    assert_contains "$(<"$calls")" "-6" "Argo IPv6 probe uses IPv6"
+    assert_not_contains "$(<"$calls")" " -4 " "Argo IPv6 probe does not cross to IPv4"
+    assert_contains "$(<"$calls")" "--connect-to argo.example.com:443:saas.sin.fan:443" "Argo probe separates address from tunnel identity"
+    assert_contains "$(<"$calls")" "https://argo.example.com/ws" "Argo probe keeps tunnel SNI and Host"
+    assert_contains "$(<"$calls")" "Upgrade: websocket" "Argo probe requests WebSocket upgrade"
+    assert_contains "$(<"$result")" "saas.sin.fan" "Argo accepts HTTP 101 WebSocket readiness"
+
+    : > "$result"
+    curl() {
+        printf '200 0.050'
+    }
+    probe_argo_cf_domain 0 "saas.sin.fan" 6 "$result" 2
+    [[ ! -s "$result" ]] || fail "Argo accepted ordinary HTTP 200 as WebSocket readiness"
+)
+
+test_argo_family_selection_never_crosses_family() (
+    local tmp calls
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    calls="${tmp}/calls"
+    probe_argo_cf_domain() {
+        printf '%s\n' "$3" >> "$calls"
+    }
+
+    if select_argo_cf_domain_for_family 6 >/dev/null; then
+        fail "Argo selected an IPv6 candidate without a successful probe"
+    fi
+    assert_not_contains "$(<"$calls")" "4" "Argo IPv6 selection does not run IPv4 probes"
+    assert_contains "$(<"$calls")" "6" "Argo IPv6 selection runs IPv6 probes"
+)
 
 test_manager_command_rejects_empty_source() {
     local tmp empty_script valid_script old_manager old_alias old_system old_system_alias old_bin old_bin_alias
@@ -1417,9 +1543,10 @@ test_argo_link_follows_enabled_mode_and_uses_own_domain() {
     GENERATED_SUBSCRIPTION_RAW=""
     ARGO_DOMAIN="fixed.example.com"
     ARGO_TOKEN="fixed-token"
-    build_argo_link_for_domain || true
-    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@fixed.example.com:443" "fixed Argo address"
+    build_argo_link_for_domain "saas.sin.fan" "IPv6" || true
+    assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@saas.sin.fan:443" "fixed Argo IPv6 optimized address"
     assert_contains "$GENERATED_ARGO_LINKS" "sni=fixed.example.com" "fixed Argo SNI"
+    assert_contains "$GENERATED_ARGO_LINKS" "host=fixed.example.com" "fixed Argo Host"
     assert_not_contains "$GENERATED_ARGO_LINKS" "ed%3D2048" "fixed Argo early data disabled"
 
     ARGO_DOMAIN="https://fixed.example.com/path"
@@ -1818,6 +1945,7 @@ test_install_selected_services_and_failure() (
         NODE_NAME=test; ARGO_TOKEN=""; ARGO_DOMAIN=""; ARGO_ENABLED=false
     }
     detect_install_network() { INSTALL_NETWORK_MODE=ipv4-only; }
+    ensure_reality_probe_dependencies() { :; }
     select_reality_sni() { :; }
     prompt_read() {
         case "$2" in
@@ -1843,18 +1971,25 @@ test_install_selected_services_and_failure() (
     service_is_active() { [[ "$failed_service" != sbm-subscription || "$1" != sbm-subscription ]]; }
     fetch_argo_domain() { ARGO_DOMAIN=quick.trycloudflare.com; }
     sleep() { :; }
-    verify_or_reselect_reality_sni() { return 0; }
+    verify_or_reselect_reality_sni() { [[ "$failed_service" != reality-validation ]]; }
     ensure_subscription_service_if_enabled() { return 0; }
+    resolve_argo_best_cf_domains() { [[ "$failed_service" != argo-probe ]]; }
     save_params() { echo saved >> "$tmp/events"; }
     generate_and_show_links() { [[ "$failed_service" == none ]] || fail "failed service reported successful install"; }
     show_subscription_url() { :; }; press_enter() { :; }
-    for failed_service in argo-tunnel sbm-subscription; do
+    for failed_service in argo-tunnel sbm-subscription argo-probe; do
         if do_primary_install <<< $'1\n2\n' >"$tmp/output"; then fail "failed $failed_service returned success"; fi
         output=$(<"$tmp/output")
         assert_contains "$output" '所选协议组合尚未完成部署' "incomplete install message"
         assert_not_contains "$output" '所选服务已启动' "no false success"
         assert_contains "$(<"$tmp/events")" saved "failure state saved for recovery"
     done
+    failed_service=reality-validation
+    if do_primary_install <<< $'1\n2\n' >"$tmp/output"; then fail "failed Reality validation returned success"; fi
+    output=$(<"$tmp/output")
+    assert_contains "$output" 'Reality 完整 TLS 转发验证未通过' "Reality post-start validation failure"
+    assert_not_contains "$output" '所选服务已启动' "Reality validation failure has no false success"
+    assert_contains "$(<"$tmp/events")" saved "Reality validation state saved for recovery"
     failed_service=none
     do_primary_install <<< $'1\n2\n' >"$tmp/output" || fail "healthy selected services rejected"
     assert_contains "$(<"$tmp/output")" '所选服务已启动' "healthy install"
@@ -1885,7 +2020,7 @@ test_rtc_epoch_uses_timedatectl_without_hwclock
 test_busybox_ntpd_can_step_system_time
 test_time_sync_is_only_checked_during_install
 test_runtime_param_restore_is_complete
-test_hysteria2_config_uses_masquerade_proxy
+test_hysteria2_config_uses_static_masquerade
 test_optional_inbounds_follow_feature_state
 test_only_primary_deployment_entrypoints_remain
 test_alpine_package_fallback
@@ -1895,9 +2030,13 @@ test_low_memory_without_swap_skips_optional_deps
 test_low_cpu_uses_low_priority_runner
 test_alpine_cloudflared_prefers_apk
 test_alpine_cloudflared_falls_back_to_binary
-test_reality_sni_probe_failure_uses_default
-test_reality_sni_probe_requires_two_successes
+test_reality_sni_probe_failure_is_fail_closed
+test_reality_probe_dependencies_install_dns_tool
+test_reality_sni_probe_requires_strict_tls_h2_and_remote_ip
+test_reality_sni_rejects_cloudflare_and_dns_asn_drift
 test_quick_argo_domain_is_read_from_service_logs
+test_argo_probe_requires_websocket_101_and_requested_family
+test_argo_family_selection_never_crosses_family
 test_manager_command_rejects_empty_source
 test_refresh_argo_runtime_disables_incomplete_config
 test_subscription_gateway_uses_local_https_origin

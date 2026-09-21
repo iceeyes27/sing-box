@@ -1,6 +1,6 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.0.0"
-DEFAULT_REALITY_SNI="www.microsoft.com"
+SCRIPT_VERSION="3.1.1"
+DEFAULT_REALITY_SNI="www.nazhumi.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -39,43 +39,40 @@ SINGBOX_SYSTEMD_DROPIN_DIR="/etc/systemd/system/sing-box.service.d"
 SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
-HY2_DEFAULT_MASQUERADE_URL="https://www.bing.com"
+HY2_DEFAULT_MASQUERADE_URL=""
 TIME_SKEW_THRESHOLD=30
 LOW_MEMORY_SWAP_FILE="/swapfile.sbm-install"
 LOW_MEMORY_SWAP_CREATED=false
 
-# Reality 伪装域名候选列表
-# Reality 客户端在「国内→VPS」这条连接上，线路里声称访问的就是这个 SNI。
-# 一旦该域名被 GFW 按 SNI 封锁 / 限速 / 偶发重置(即「半被墙」，如 amazon.com)，
-# 你的 Reality 隧道会一并继承同样的命运。挑选标准(第 1 条是硬性底线):
-#   1) 「国内一定能通」——GFW 不按 SNI 封锁/限速，国内可稳定握手;
-#   2) 稳定支持 TLS 1.3 + HTTP/2(Reality 转发所需);
-#   3) 境外高信誉大厂站点，封锁代价高，借用其 TLS 身份更可信。
-# 注意:select_reality_sni 的实测跑在「境外 VPS」上，只能验证 TLS1.3+h2 与握手
-# 延迟，无法发现「国内是否被墙」。因此本列表必须人工保证全部「国内可达」，
-# 不要把半被墙站点(amazon / mozilla / swift 等)放进来——服务端测不出来。
-# 国内 CDN 落地反而是优点(说明 GFW 不会封)，无需刻意回避。
-REALITY_SNI_LIST=(
-    "www.microsoft.com"  # Azure/Akamai 中国 CDN，国内稳定可达
-    "portal.citygrainla.com" # 瓦工严选 Reality SNI
-    "dash.cloudflare.com" # Cloudflare Anycast，优先匹配邻近边缘节点
-    "www.apple.com"      # Apple 中国 CDN，国内稳定可达
-    "gateway.icloud.com" # iCloud 国内正常使用
-    "itunes.apple.com"   # Apple，国内可达
-    "www.tesla.com"      # 特斯拉在华运营，国内可达
-    "www.intel.com"      # Intel，国内可达
-    "www.nvidia.com"     # NVIDIA，国内可达
-    "www.amd.com"        # AMD，国内可达
-    "www.ibm.com"        # IBM，国内可达
-    "www.cisco.com"      # Cisco，在华运营，国内可达
-    "www.dell.com"       # Dell，在华运营，国内可达
-    "www.hp.com"         # HP/惠普，在华运营，国内可达
-    "www.qualcomm.com"   # 高通，在华运营，国内可达
-    "www.samsung.com"    # 三星，在华运营，国内可达
-    "www.sony.com"       # 索尼，在华运营，国内可达
-    "www.oracle.com"     # Oracle，在华运营，国内可达
-    "www.vmware.com"     # VMware，企业级站点，国内可达
+# Argo 连接地址候选。它们只用于 URI 的地址部分；SNI 和 Host 始终使用
+# ARGO_DOMAIN，不能把这些地址当作 Reality 伪装域名。
+ARGO_CF_DOMAIN_LIST_VERSION="2026-09-21.1"
+ARGO_CF_DOMAINS=(
+    "cf.090227.xyz"
+    "cf.877774.xyz"
+    "cf.130519.xyz"
+    "cf.008500.xyz"
+    "store.ubi.com"
+    "saas.sin.fan"
 )
+
+# Reality 候选必须是人工审核的直连站点。共享 CDN 域名（尤其 Cloudflare）
+# 不得加入。运行时会拒绝 Cloudflare 地址段；更新列表前必须重新核查 DNS、
+# 证书、TLS 1.3 和 HTTP/2。
+REALITY_SNI_LIST=(
+    "www.nazhumi.com"
+    "portal.citygrainla.com"
+)
+
+# 审核时记录的直连站点 ASN。运行时要求域名仍为单一 IPv4、无 CNAME/AAAA，
+# 且 Team Cymru 返回的起源 ASN 与记录一致；任一条件漂移即拒绝启用 Reality。
+reality_sni_expected_asn() {
+    case "${1:-}" in
+        www.nazhumi.com) echo "132203" ;;
+        portal.citygrainla.com) echo "25820" ;;
+        *) return 1 ;;
+    esac
+}
 
 # ─── 颜色 ─────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -614,7 +611,8 @@ link_ipv4_selection_label() {
 PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV REALITY_BACKEND WS_PORT WS_PATH NODE_NAME
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_ENABLED ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
-    ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
+    ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 ARGO_CF_CACHE_DOMAIN ARGO_CF_CACHE_VERSION
+    LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
     SOCKS_PORT SOCKS_USERNAME SOCKS_PASSWORD SOCKS_ENABLED
     NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT SOCKS_PUBLIC_PORT
@@ -754,7 +752,7 @@ load_params() {
             HY2_SNI="${HY2_DEFAULT_SNI}"
             need_save=true
         fi
-        if [[ -z "${HY2_MASQUERADE_URL:-}" ]]; then
+        if ! grep -q '^HY2_MASQUERADE_URL=' "$PARAMS_FILE" 2>/dev/null; then
             HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
             need_save=true
         fi
@@ -813,6 +811,14 @@ load_params() {
         fi
         if [[ ! ${ARGO_BEST_CF_DOMAIN_IPV6+x} ]]; then
             ARGO_BEST_CF_DOMAIN_IPV6=""
+            need_save=true
+        fi
+        if [[ ! ${ARGO_CF_CACHE_DOMAIN+x} ]]; then
+            ARGO_CF_CACHE_DOMAIN=""
+            need_save=true
+        fi
+        if [[ ! ${ARGO_CF_CACHE_VERSION+x} ]]; then
+            ARGO_CF_CACHE_VERSION=""
             need_save=true
         fi
         if [[ -z "${LINK_IPV4_SELECTION:-}" ]]; then
@@ -1002,6 +1008,8 @@ clear_argo_best_cf_cache() {
     ARGO_BEST_CF_DOMAIN=""
     ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""
+    ARGO_CF_CACHE_DOMAIN=""
+    ARGO_CF_CACHE_VERSION=""
 }
 
 restore_runtime_params() {

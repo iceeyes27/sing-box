@@ -13,6 +13,8 @@
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
 - 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、HTTPS 订阅链接、Argo 订阅链接、重载配置、监控日志与开机自启。
 - 📡 **Argo 订阅网关** — 勾选 Argo 后默认创建 `trycloudflare.com` 临时隧道并提供 HTTPS 订阅，也支持切换为固定域名 Tunnel Token 模式。
+- 🛡️ **Reality 域名检查** — 从独立候选列表检查 DNS/ASN、TLS 1.3 与 HTTP/2，全部失败时报错；CF 优选域名仅用于 Argo。Hysteria2 使用本地静态伪装响应。
+- 🌐 **CF 地址优选** — Argo 按 IPv4/IPv6 分别实测优选地址；节点的 SNI 与 Host 始终保持真实 Argo 域名。
 - 🧩 **NAT VPS 适配** — 自动识别公网 IPv4 不在本机网卡的环境，分别保存本机监听端口与面板公网映射端口；没有 UDP 映射时可直接禁用 Hysteria2。
 - 🎯 **单一部署路径** — 仅提供主节点完整部署，主菜单安装入口直接开始主节点配置。
 
@@ -46,7 +48,7 @@ sbm
 
 **面板概览：**
 ```text
-  sing-box 管理面板  v3.0.0
+  sing-box 管理面板  v3.1.1
   ────────────────────────────────────────
   sing-box: ● 运行中    argo-tunnel: ● 运行中
 
@@ -79,7 +81,7 @@ sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 
 ## 🌐 IPv4 / IPv6 VPS
 
-脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality 直连链接；IPv6-only VPS 通过默认启用的 Argo 生成外部节点链接。Reality 与 Argo 是独立入口：本地只有 IPv4 时使用 Argo 节点，IPv6-only 的默认订阅不包含 Reality IPv6 直连链接。隧道在纯 IPv6 安装时指定 IPv6 边缘连接，其他场景自动选择。固定域名 Argo 始终直接使用自有域名，不使用第三方 CF 优选域名。
+脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality 直连链接；IPv6-only VPS 通过默认启用的 Argo 生成外部节点链接。Reality 与 Argo 是独立入口。Argo 会从内置列表分别实测 IPv4/IPv6 连接地址，只生成当前 VPS 能用对应地址族完成 WebSocket 握手的链接；TLS SNI、WebSocket Host 和路径始终使用当前 `ARGO_DOMAIN`。
 
 NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持 sing-box 使用本机监听端口。Reality、Hysteria2 和已启用的 SOCKS5 分别保存公网映射端口；映射变化后可在 `sbm` 的“修改 NAT 公网映射”中更新。
 
@@ -131,11 +133,13 @@ sbm links
 2. 不要公开 Argo token、订阅 token、UUID 或 Reality 私钥。
 3. 怀疑凭据泄露时，应重新生成对应凭据。
 4. 订阅服务保持监听 `127.0.0.1`；SOCKS5 端口应限制允许访问的来源 IP。
+5. 域名检查不能消除 Reality 未认证转发或保证流量账单上限。
 
 ## 🔄 旧用户升级兼容说明
 
 - 现有 `/etc/sing-box/.params` 参数文件继续兼容，升级后无需重新安装。
 - 主节点、订阅、Argo、Reality、Hysteria2 和 SOCKS5 配置继续保留。
+- 脚本升级不自动重写运行配置。使用旧 CDN SNI 的节点可执行 `sbm resni` 重新优选，再执行 `sbm apply` 应用静态 Hysteria2 伪装。
 - `relay-install`、`relay` 及线路机脚本生成功能已移除。
 - 更新管理脚本后可执行 `sbm apply`，按当前版本模板刷新配置并重启服务。
 
