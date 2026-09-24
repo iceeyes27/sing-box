@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.1.1"
+SCRIPT_VERSION="3.1.2"
 DEFAULT_REALITY_SNI="www.nazhumi.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
@@ -268,6 +268,27 @@ service_restart() {
         systemd) systemctl restart "$svc" 2>/dev/null ;;
         openrc)  rc-service "$svc" restart 2>/dev/null || rc-service "$svc" start 2>/dev/null ;;
         *)       return 1 ;;
+    esac
+}
+
+# 用于交互式配置修改；缺少 timeout 时失败，而不是无限等待或误报成功。
+service_restart_bounded() {
+    local svc=$1 seconds=${2:-30} result
+    if ! command -v timeout >/dev/null 2>&1; then
+        warn "缺少 timeout 命令，无法安全重启 ${svc}"
+        return 1
+    fi
+    case "$(service_manager)" in
+        systemd) timeout "$seconds" systemctl restart "$svc" 2>/dev/null ;;
+        openrc)
+            timeout "$seconds" rc-service "$svc" restart 2>/dev/null && return 0
+            result=$?
+            if [[ "$result" == 124 || "$result" == 137 ]]; then
+                return "$result"
+            fi
+            timeout "$seconds" rc-service "$svc" start 2>/dev/null
+            ;;
+        *) return 1 ;;
     esac
 }
 

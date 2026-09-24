@@ -1864,6 +1864,21 @@ EOF
     assert_contains "$(<"${tmp}/config.json")" '"target": "new.example.com:443"' "Xray Reality target update"
     assert_contains "$(<"${tmp}/config.json")" '"new.example.com"' "Xray Reality serverNames update"
 
+    cat > "${tmp}/config.json" <<'EOF'
+{"inbounds":[{"protocol":"vless","port":20001,"settings":{"clients":[{"id":"old-uuid"}]},"streamSettings":{"security":"reality","realitySettings":{"target":"old.example.com:443","serverNames":["old.example.com"],"privateKey":"old-private","shortIds":["old-short"]}}}]}
+EOF
+    write_xray_reality_config "new.example.com" 20012 new-uuid new-private new-short || fail "Xray Reality port and credentials update"
+    local body
+    body=$(<"${tmp}/config.json")
+    assert_contains "$body" '"port": 20012' "Xray Reality local port update"
+    assert_contains "$body" '"id": "new-uuid"' "Xray Reality UUID update"
+    assert_contains "$body" '"privateKey": "new-private"' "Xray Reality key update"
+    assert_contains "$body" '"new-short"' "Xray Reality short ID update"
+    if write_xray_reality_config "new.example.com" 70000 new-uuid new-private new-short >/dev/null 2>&1; then
+        fail "invalid Xray Reality port accepted"
+    fi
+    assert_eq "$body" "$(<"${tmp}/config.json")" "invalid Xray update preserves config"
+
     unset -f xray
     [[ -n "$xray_def" ]] && eval "$xray_def"
     unset XRAY_CONFIG_FILE
@@ -1882,14 +1897,85 @@ test_install_protocol_choices() (
     prompt_install_protocols ipv6-only <<< '' >/dev/null
     assert_eq true "$ARGO_ENABLED" "IPv6 Argo default"
     assert_eq false "$SOCKS_ENABLED" "IPv6 SOCKS default"
-    prompt_install_protocols ipv4-only <<< $'invalid\n1\n2\n' >/dev/null
+    prompt_install_protocols ipv4-only <<< $'invalid\n1,2\n' >/dev/null
     assert_eq true "$ARGO_ENABLED" "selected Argo"
     assert_eq true "$SOCKS_ENABLED" "selected SOCKS"
-    prompt_install_protocols ipv6-only <<< $'1\n2\n2\n' >/dev/null
-    assert_eq false "$ARGO_ENABLED" "IPv6 Argo deselected"
-    assert_eq false "$SOCKS_ENABLED" "SOCKS toggle twice"
+    prompt_install_protocols ipv6-only <<< '2' >/dev/null
+    assert_eq false "$ARGO_ENABLED" "IPv6 Argo deselected by explicit choice"
+    assert_eq true "$SOCKS_ENABLED" "SOCKS-only selection"
+    prompt_install_protocols ipv4-only <<< '2，1' >/dev/null
+    assert_eq true "$ARGO_ENABLED" "Chinese comma Argo selection"
+    assert_eq true "$SOCKS_ENABLED" "Chinese comma SOCKS selection"
+    prompt_install_protocols ipv4-only <<< '1,1' >/dev/null && fail "duplicate protocol choice accepted"
     if prompt_install_protocols unknown <<< '' >/dev/null; then fail "unknown network accepted"; fi
     if prompt_install_protocols ipv4-only </dev/null >/dev/null; then fail "protocol EOF accepted"; fi
+)
+
+test_reality_listener_validation() (
+    REALITY_PORT=20012
+    ss() { printf 'LISTEN 0 4096 *:20012 *:* users:(("sing-box",pid=1,fd=3))\n'; }
+    verify_reality_local_listener || fail "active Reality local listener rejected"
+    ss() { :; }
+    if verify_reality_local_listener >/dev/null 2>&1; then fail "missing Reality listener accepted"; fi
+)
+
+test_bounded_service_restart() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    make_cmd "$tmp/systemctl" '#!/usr/bin/env bash
+sleep 3'
+    service_manager() { echo systemd; }
+    if PATH="$tmp:$PATH" service_restart_bounded sing-box 1; then
+        fail "timed-out service restart accepted"
+    fi
+    make_cmd "$tmp/systemctl" '#!/usr/bin/env bash
+exit 0'
+    PATH="$tmp:$PATH" service_restart_bounded sing-box 1 || fail "healthy bounded service restart rejected"
+)
+
+test_modify_nat_reality_port_with_xray() (
+    local tmp output
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    UUID=old-uuid; SHORT_ID=old-short; PRIVATE_KEY=old-private; PUBLIC_KEY=old-public
+    REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; REALITY_SNI=example.com; REALITY_BACKEND=xray
+    WS_PORT=8080; WS_PATH=/old-short; NODE_NAME=test
+    HY2_PORT=8443; HY2_PASSWORD=hy2-pass; HY2_SNI=example.com; HY2_ENABLED=false
+    SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; ARGO_DOMAIN=""; ARGO_TOKEN=""
+    LINK_IPV4_SELECTION=all; PUBLIC_IPV4_OVERRIDE=198.51.100.1; NAT_MODE=true
+    SOCKS_PORT=20023; SOCKS_USERNAME=user; SOCKS_PASSWORD=pass; SOCKS_ENABLED=true; SOCKS_PUBLIC_PORT=20023
+
+    clear() { :; }; press_enter() { :; }; sleep() { :; }
+    load_params() { :; }; prompt_read() { read -r "$1"; }
+    validate_service_ports() { :; }; open_service_ports() { :; }
+    generate_tls_cert() { :; }; write_singbox_config() { :; }; write_singbox_service() { :; }
+    xray_managed_reality() { :; }
+    write_xray_reality_config() { printf '%s %s\n' "$2" "$3" >> "$tmp/xray-config"; }
+    save_params() { printf '%s\n' "$REALITY_PORT" >> "$tmp/saved"; }
+    service_restart_bounded() { printf '%s\n' "$1" >> "$tmp/restarts"; }
+    service_is_active() { :; }
+    verify_reality_local_listener() { [[ "${listener_ready:-true}" == true ]]; }
+    generate_and_show_links() { :; }; ensure_subscription_service_if_enabled() { :; }; show_subscription_url() { :; }
+
+    do_modify_config <<< $'1\n20012\n\n0\n' > "$tmp/output"
+    output=$(<"$tmp/output")
+    assert_eq 20012 "$REALITY_PORT" "Reality local port persisted after verification"
+    assert_eq 20001 "$REALITY_PUBLIC_PORT" "NAT public port not silently changed"
+    assert_contains "$output" "公网 20001/TCP 映射及外部连接尚未验证" "NAT mapping verification boundary"
+    assert_contains "$(<"$tmp/xray-config")" '20012 old-uuid' "Xray receives new Reality port"
+    assert_contains "$(<"$tmp/restarts")" xray "Xray restarted after port change"
+
+    REALITY_PORT=20001
+    listener_ready=false
+    do_modify_config <<< $'1\n20012\n\n0\n' > "$tmp/output"
+    output=$(<"$tmp/output")
+    assert_eq 20001 "$REALITY_PORT" "Reality port restored when listener missing"
+    assert_eq 20001 "$REALITY_PUBLIC_PORT" "NAT mapping restored when listener missing"
+    assert_not_contains "$output" "配置已更新并重启" "missing listener must not be reported as success"
+    assert_contains "$output" "正在恢复旧配置" "missing listener rollback notice"
+    assert_contains "$(<"$tmp/xray-config")" '20001 old-uuid' "Xray config restored after listener failure"
+    assert_eq 20001 "$(tail -n1 "$tmp/saved")" "old params saved after listener failure"
 )
 
 test_install_network_failure_selection() (
@@ -1949,7 +2035,7 @@ test_install_selected_services_and_failure() (
     select_reality_sni() { :; }
     prompt_read() {
         case "$2" in
-            *切换勾选*) read -r "$1" ;;
+            *请选择协议*) read -r "$1" ;;
             *) printf -v "$1" '%s' '' ;;
         esac
     }
@@ -1978,24 +2064,27 @@ test_install_selected_services_and_failure() (
     generate_and_show_links() { [[ "$failed_service" == none ]] || fail "failed service reported successful install"; }
     show_subscription_url() { :; }; press_enter() { :; }
     for failed_service in argo-tunnel sbm-subscription argo-probe; do
-        if do_primary_install <<< $'1\n2\n' >"$tmp/output"; then fail "failed $failed_service returned success"; fi
+        if do_primary_install <<< '1,2' >"$tmp/output"; then fail "failed $failed_service returned success"; fi
         output=$(<"$tmp/output")
         assert_contains "$output" '所选协议组合尚未完成部署' "incomplete install message"
         assert_not_contains "$output" '所选服务已启动' "no false success"
         assert_contains "$(<"$tmp/events")" saved "failure state saved for recovery"
     done
     failed_service=reality-validation
-    if do_primary_install <<< $'1\n2\n' >"$tmp/output"; then fail "failed Reality validation returned success"; fi
+    if do_primary_install <<< '1,2' >"$tmp/output"; then fail "failed Reality validation returned success"; fi
     output=$(<"$tmp/output")
     assert_contains "$output" 'Reality 完整 TLS 转发验证未通过' "Reality post-start validation failure"
     assert_not_contains "$output" '所选服务已启动' "Reality validation failure has no false success"
     assert_contains "$(<"$tmp/events")" saved "Reality validation state saved for recovery"
     failed_service=none
-    do_primary_install <<< $'1\n2\n' >"$tmp/output" || fail "healthy selected services rejected"
+    do_primary_install <<< '1,2' >"$tmp/output" || fail "healthy selected services rejected"
     assert_contains "$(<"$tmp/output")" '所选服务已启动' "healthy install"
 )
 
 test_install_protocol_choices
+test_reality_listener_validation
+test_bounded_service_restart
+test_modify_nat_reality_port_with_xray
 test_install_network_failure_selection
 test_argo_edge_family_services
 test_install_selected_services_and_failure

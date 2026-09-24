@@ -227,6 +227,16 @@ do_modify_config() {
         local old_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
         local old_socks_active_port=""
         [[ "$old_socks_enabled" == "true" ]] && old_socks_active_port="$old_socks_port"
+        local -a old_runtime_params=(
+            "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key"
+            "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path"
+            "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni"
+            "$old_hy2_masquerade_url" "$old_subscription_port" "$old_argo_domain" "$old_argo_token"
+            "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
+            "$old_link_ipv4_selection" "$old_public_ipv4_override" "$old_nat_mode"
+            "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
+            "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
+        )
         clear
         echo -e "${CYAN}${BOLD}"
         echo "  ── 修改配置 ──"
@@ -255,6 +265,7 @@ do_modify_config() {
         local changed=false
         local ports_changed=false
         local restart_singbox=false
+        local restart_reality_backend=false
         local restart_argo=false
         local links_only_changed=false
         case "$choice" in
@@ -266,6 +277,7 @@ do_modify_config() {
                     changed=true
                     ports_changed=true
                     restart_singbox=true
+                    restart_reality_backend=true
                 fi
                 ;;
             2)
@@ -279,6 +291,7 @@ do_modify_config() {
                         REALITY_SNI="$input"
                         changed=true
                         restart_singbox=true
+                        restart_reality_backend=true
                     else
                         warn "该域名未通过 Reality 运行时检查，未修改配置"
                     fi
@@ -289,6 +302,7 @@ do_modify_config() {
                 info "新 UUID: $UUID"
                 changed=true
                 restart_singbox=true
+                restart_reality_backend=true
                 ;;
             4)
                 local keypair
@@ -300,6 +314,7 @@ do_modify_config() {
                 info "新密钥对已生成"
                 changed=true
                 restart_singbox=true
+                restart_reality_backend=true
                 ;;
             5)
                 prompt_read input "  新节点名称: "
@@ -338,6 +353,7 @@ do_modify_config() {
                 changed=true
                 ports_changed=true
                 restart_singbox=true
+                restart_reality_backend=true
                 ;;
             10)
                 echo -e "\n  当前模式: $(argo_mode_label)"
@@ -566,43 +582,28 @@ do_modify_config() {
         if [[ "$changed" == "true" ]]; then
             if [[ "$links_only_changed" != "true" ]] && ! validate_service_ports \
                 "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false "$old_socks_active_port"; then
-                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                    "$old_hy2_masquerade_url" \
-                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
-                    "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
+                restore_runtime_params "${old_runtime_params[@]}"
                 warn "端口检查未通过，已保留原配置"
                 press_enter
                 continue
             fi
             if [[ "$ports_changed" == "true" ]] && ! confirm_port_selection; then
-                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                    "$old_hy2_masquerade_url" \
-                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
-                    "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
+                restore_runtime_params "${old_runtime_params[@]}"
                 warn "已取消端口修改"
                 press_enter
                 continue
             fi
+            if [[ "$restart_reality_backend" == "true" && "${REALITY_BACKEND:-singbox}" == "xray" ]] && ! xray_managed_reality; then
+                restore_runtime_params "${old_runtime_params[@]}"
+                warn "Reality 由 Xray 承载，但 Xray 配置或服务不存在，未修改配置"
+                press_enter
+                continue
+            fi
+            if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" ]]; then
+                warn "请确认服务商面板已将公网 ${REALITY_PUBLIC_PORT}/TCP 转发到本机 ${REALITY_PORT}/TCP；脚本无法修改面板映射"
+            fi
             if [[ "$links_only_changed" != "true" ]] && ! open_service_ports; then
-                restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                    "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                    "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                    "$old_hy2_masquerade_url" \
-                    "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                    "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                    "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                    "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
-                    "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
+                restore_runtime_params "${old_runtime_params[@]}"
                 warn "端口放行失败，已保留原配置"
                 press_enter
                 continue
@@ -613,44 +614,60 @@ do_modify_config() {
                 generate_tls_cert
                 write_singbox_config
                 write_singbox_service
+                local xray_update_required=false
+                if [[ "$restart_reality_backend" == "true" && "${REALITY_BACKEND:-singbox}" == "xray" ]]; then
+                    if ! write_xray_reality_config "$REALITY_SNI" "$REALITY_PORT" "$UUID" "$PRIVATE_KEY" "$SHORT_ID"; then
+                        restore_runtime_params "${old_runtime_params[@]}"
+                        write_singbox_config
+                        warn "Xray Reality 配置更新失败，已保留原配置"
+                        press_enter
+                        continue
+                    fi
+                    xray_update_required=true
+                fi
                 save_params
                 info "重启 sing-box..."
-                if ! service_restart sing-box; then
-                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                        "$old_hy2_masquerade_url" \
-                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
-                        "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
+                local restart_failed=false
+                service_restart_bounded sing-box || restart_failed=true
+                if [[ "$xray_update_required" == "true" ]]; then
+                    info "重启 Xray..."
+                    service_restart_bounded xray || restart_failed=true
+                fi
+                if [[ "$restart_failed" == "true" ]]; then
+                    restore_runtime_params "${old_runtime_params[@]}"
                     write_singbox_config
                     write_singbox_service
+                    [[ "$xray_update_required" == "true" ]] && write_xray_reality_config "$REALITY_SNI" "$REALITY_PORT" "$UUID" "$PRIVATE_KEY" "$SHORT_ID" || true
                     save_params
-                    warn "sing-box 重启失败，正在恢复旧端口配置..."
-                    service_restart sing-box 2>/dev/null || true
+                    warn "服务重启失败，正在恢复旧配置..."
+                    service_restart_bounded sing-box 2>/dev/null || true
+                    [[ "$xray_update_required" == "true" ]] && service_restart_bounded xray 2>/dev/null || true
                     press_enter
                     continue
                 fi
                 sleep 2
-                if service_is_active sing-box; then
+                local services_ready=true
+                service_is_active sing-box || services_ready=false
+                if [[ "$xray_update_required" == "true" ]]; then
+                    service_is_active xray || services_ready=false
+                fi
+                if [[ "$restart_reality_backend" == "true" && "$services_ready" == "true" ]]; then
+                    verify_reality_local_listener || services_ready=false
+                fi
+                if [[ "$services_ready" == "true" ]]; then
                     success "配置已更新并重启"
+                    if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" ]]; then
+                        warn "仅已验证本机 ${REALITY_PORT}/TCP 监听；公网 ${REALITY_PUBLIC_PORT}/TCP 映射及外部连接尚未验证"
+                    fi
                 else
-                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                        "$old_hy2_masquerade_url" \
-                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
-                        "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
+                    restore_runtime_params "${old_runtime_params[@]}"
                     write_singbox_config
                     write_singbox_service
+                    [[ "$xray_update_required" == "true" ]] && write_xray_reality_config "$REALITY_SNI" "$REALITY_PORT" "$UUID" "$PRIVATE_KEY" "$SHORT_ID" || true
                     save_params
-                    warn "sing-box 未成功启动，正在恢复旧端口配置..."
-                    service_restart sing-box 2>/dev/null || true
+                    warn "服务未正常启动或 Reality 新端口未监听，正在恢复旧配置..."
+                    service_restart_bounded sing-box 2>/dev/null || true
+                    [[ "$xray_update_required" == "true" ]] && service_restart_bounded xray 2>/dev/null || true
                     press_enter
                     continue
                 fi
@@ -661,15 +678,7 @@ do_modify_config() {
 
             if [[ "$restart_argo" == "true" ]]; then
                 if ! refresh_argo_runtime; then
-                    restore_runtime_params "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key" \
-                        "$old_reality_port" "$old_reality_sni" "$old_ws_port" "$old_ws_path" \
-                        "$old_node_name" "$old_hy2_port" "$old_hy2_password" "$old_hy2_sni" \
-                        "$old_hy2_masquerade_url" \
-                        "$old_subscription_port" "$old_argo_domain" "$old_argo_token" \
-                        "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6" \
-                        "$old_link_ipv4_selection" "$old_public_ipv4_override" \
-                        "$old_nat_mode" "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled" \
-                        "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
+                    restore_runtime_params "${old_runtime_params[@]}"
                     save_params
                     if argo_enabled; then
                         write_argo_service
@@ -749,22 +758,24 @@ do_restart() {
 }
 
 # ─── Xray Reality 配置更新 ───────────────────────────────────
-write_xray_reality_sni() {
+write_xray_reality_config() {
     local sni="$1"
+    local port="${2:-}" uuid="${3:-}" private_key="${4:-}" short_id="${5:-}"
     local config="${XRAY_CONFIG_FILE:-/etc/xray/config.json}"
     local tmp="${config}.new"
 
     is_valid_hostname "$sni" || return 1
+    [[ -z "$port" ]] || validate_port "$port" "Reality" || return 1
     [[ -f "$config" ]] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
     command -v xray >/dev/null 2>&1 || return 1
 
-    if ! python3 - "$config" "$tmp" "$sni" <<'PY'
+    if ! python3 - "$config" "$tmp" "$sni" "$port" "$uuid" "$private_key" "$short_id" <<'PY'
 import json
 import os
 import sys
 
-source, target, sni = sys.argv[1:]
+source, target, sni, port, uuid, private_key, short_id = sys.argv[1:]
 with open(source, "r", encoding="utf-8") as handle:
     config = json.load(handle)
 
@@ -776,6 +787,14 @@ for inbound in config.get("inbounds", []):
         continue
     reality["target"] = f"{sni}:443"
     reality["serverNames"] = [sni]
+    if port:
+        clients = inbound.get("settings", {}).get("clients", [])
+        if len(clients) != 1 or not all((uuid, private_key, short_id)):
+            raise SystemExit("Xray Reality credentials missing or ambiguous")
+        inbound["port"] = int(port)
+        clients[0]["id"] = uuid
+        reality["privateKey"] = private_key
+        reality["shortIds"] = [short_id]
     updated = True
 
 if not updated:
@@ -797,6 +816,10 @@ PY
     fi
 
     mv -f "$tmp" "$config"
+}
+
+write_xray_reality_sni() {
+    write_xray_reality_config "$1"
 }
 
 # ─── 重新优选 Reality 伪装域名 ───────────────────────────────

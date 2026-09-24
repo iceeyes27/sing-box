@@ -53,29 +53,30 @@ generate_params() {
 
 # 仅供新安装使用；旧配置加载不应用这些默认值。
 prompt_install_protocols() {
-    local network_mode="$1" choice argo_mark socks_mark
+    local network_mode="$1" choice default_argo
     case "$network_mode" in
-        ipv4-only|dual-stack) ARGO_ENABLED="false" ;;
-        ipv6-only) ARGO_ENABLED="true" ;;
+        ipv4-only|dual-stack) default_argo="false" ;;
+        ipv6-only) default_argo="true" ;;
         *) warn "未确认网络类型，无法设置安装默认协议"; return 1 ;;
     esac
-    SOCKS_ENABLED="false"
     while true; do
-        argo_mark=" "; socks_mark=" "
-        argo_enabled && argo_mark="✓"
-        is_socks_enabled && socks_mark="✓"
         echo "  网络类型: ${network_mode}"
         echo "  [✓] Reality (基础功能)"
-        echo "  1) [${argo_mark}] Argo"
-        echo "  2) [${socks_mark}] SOCKS5"
+        echo "  1) Argo"
+        echo "  2) SOCKS5"
         [[ "$network_mode" == "ipv6-only" ]] && echo "  本地只有 IPv4 时需启用 Argo，并使用 Argo 节点。"
-        prompt_read choice "  输入 1/2 切换勾选，Enter 确认: " || return 1
+        echo "  输入 1、2 或 1,2 一次选择；Enter 使用默认 ($( [[ "$default_argo" == true ]] && printf 'Reality + Argo' || printf '仅 Reality' ))。"
+        prompt_read choice "  请选择协议: " || return 1
+        choice="${choice//[[:space:]]/}"
+        choice="${choice//，/,}"
         case "$choice" in
-            1) if argo_enabled; then ARGO_ENABLED="false"; else ARGO_ENABLED="true"; fi ;;
-            2) if is_socks_enabled; then SOCKS_ENABLED="false"; else SOCKS_ENABLED="true"; fi ;;
-            "") return 0 ;;
-            *) warn "请输入 1、2 或直接按 Enter" ;;
+            "") ARGO_ENABLED="$default_argo"; SOCKS_ENABLED="false" ;;
+            1) ARGO_ENABLED="true"; SOCKS_ENABLED="false" ;;
+            2) ARGO_ENABLED="false"; SOCKS_ENABLED="true" ;;
+            1,2|2,1) ARGO_ENABLED="true"; SOCKS_ENABLED="true" ;;
+            *) warn "请输入 1、2、1,2 或直接按 Enter"; continue ;;
         esac
+        return 0
     done
 }
 
@@ -187,6 +188,19 @@ get_port_listeners() {
 
     warn "未找到 ss/netstat/lsof，跳过 ${proto^^} 端口占用检查"
     return 0
+}
+
+verify_reality_local_listener() {
+    local listeners
+    if ! command -v ss &>/dev/null && ! command -v netstat &>/dev/null && ! command -v lsof &>/dev/null; then
+        warn "无法检测 Reality 本机监听端口：缺少 ss/netstat/lsof"
+        return 1
+    fi
+    listeners=$(get_port_listeners "$REALITY_PORT" tcp)
+    if [[ -z "$listeners" ]]; then
+        warn "Reality 未在本机 ${REALITY_PORT}/TCP 监听"
+        return 1
+    fi
 }
 
 select_random_available_tcp_port() {
