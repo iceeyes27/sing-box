@@ -83,7 +83,7 @@ sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 
 脚本会按 VPS 实际公网网络生成节点链接：IPv4-only 和双栈 VPS 默认生成 IPv4 Reality 直连链接；IPv6-only VPS 通过默认启用的 Argo 生成外部节点链接。Reality 与 Argo 是独立入口。Argo 会从内置列表分别实测 IPv4/IPv6 连接地址，只生成当前 VPS 能用对应地址族完成 WebSocket 握手的链接；TLS SNI、WebSocket Host 和路径始终使用当前 `ARGO_DOMAIN`。
 
-NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持服务使用本机监听端口。Reality、Hysteria2 和已启用的 SOCKS5 分别保存公网映射端口；映射变化后可在 `sbm` 的“修改 NAT 公网映射”中更新。修改 Reality 本机端口不会修改服务商面板的转发目标；脚本会检查新端口在本机监听，但公网映射仍需在面板确认。
+NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持服务使用本机监听端口。Reality 的公网端口与本机监听端口可在“修改 Reality 端口”中一次确认；其他协议的公网端口可在“修改 NAT 公网映射”中更新。脚本会检查 Reality 新端口在本机监听，但无法修改或验证服务商面板的实际映射。
 
 ## 🔌 可选 SOCKS5 代理
 

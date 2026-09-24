@@ -241,7 +241,11 @@ do_modify_config() {
         echo -e "${CYAN}${BOLD}"
         echo "  ── 修改配置 ──"
         echo -e "${NC}"
-        echo -e "  1) 修改 Reality 端口       ${DIM}(当前: ${REALITY_PORT})${NC}"
+        if nat_mode_enabled; then
+            echo -e "  1) 修改 Reality 端口       ${DIM}(公网 ${REALITY_PUBLIC_PORT} -> 本机 ${REALITY_PORT})${NC}"
+        else
+            echo -e "  1) 修改 Reality 端口       ${DIM}(当前: ${REALITY_PORT})${NC}"
+        fi
         echo -e "  2) 修改伪装域名            ${DIM}(当前: ${REALITY_SNI})${NC}"
         echo -e "  3) 重新生成 UUID           ${DIM}(当前: ${UUID:0:8}...)${NC}"
         echo -e "  4) 重新生成 Reality 密钥对"
@@ -270,14 +274,30 @@ do_modify_config() {
         local links_only_changed=false
         case "$choice" in
             1)
-                local new_reality_port
-                prompt_port_value new_reality_port "Reality" "$REALITY_PORT" "  新端口 [${REALITY_PORT}]: " || continue
+                local new_reality_port="$REALITY_PORT"
+                local new_reality_public_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
+                if nat_mode_enabled; then
+                    prompt_port_value new_reality_public_port "Reality 公网" "$new_reality_public_port" \
+                        "  公网 TCP 端口 [${new_reality_public_port}]: " || continue
+                fi
+                prompt_port_value new_reality_port "Reality 本机监听" "$REALITY_PORT" \
+                    "  本机监听 TCP 端口 [${REALITY_PORT}]: " || continue
+                if nat_mode_enabled && [[ "$new_reality_public_port" != "$REALITY_PUBLIC_PORT" ]]; then
+                    REALITY_PUBLIC_PORT="$new_reality_public_port"
+                    changed=true
+                    ports_changed=true
+                    links_only_changed=true
+                fi
                 if [[ "$new_reality_port" != "$REALITY_PORT" ]]; then
                     REALITY_PORT="$new_reality_port"
+                    if ! nat_mode_enabled; then
+                        REALITY_PUBLIC_PORT="$new_reality_port"
+                    fi
                     changed=true
                     ports_changed=true
                     restart_singbox=true
                     restart_reality_backend=true
+                    links_only_changed=false
                 fi
                 ;;
             2)
@@ -580,7 +600,7 @@ do_modify_config() {
         esac
 
         if [[ "$changed" == "true" ]]; then
-            if [[ "$links_only_changed" != "true" ]] && ! validate_service_ports \
+            if [[ "$ports_changed" == "true" || "$links_only_changed" != "true" ]] && ! validate_service_ports \
                 "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false "$old_socks_active_port"; then
                 restore_runtime_params "${old_runtime_params[@]}"
                 warn "端口检查未通过，已保留原配置"
@@ -599,7 +619,7 @@ do_modify_config() {
                 press_enter
                 continue
             fi
-            if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" ]]; then
+            if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" || "$REALITY_PUBLIC_PORT" != "$old_reality_public_port" ]]; then
                 warn "请确认服务商面板已将公网 ${REALITY_PUBLIC_PORT}/TCP 转发到本机 ${REALITY_PORT}/TCP；脚本无法修改面板映射"
             fi
             if [[ "$links_only_changed" != "true" ]] && ! open_service_ports; then
@@ -674,6 +694,9 @@ do_modify_config() {
             else
                 save_params
                 success "配置已更新"
+                if nat_mode_enabled && [[ "$REALITY_PUBLIC_PORT" != "$old_reality_public_port" ]]; then
+                    warn "仅已更新链接使用的公网 ${REALITY_PUBLIC_PORT}/TCP；服务商面板映射及外部连接尚未验证"
+                fi
             fi
 
             if [[ "$restart_argo" == "true" ]]; then

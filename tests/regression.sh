@@ -1948,7 +1948,8 @@ test_modify_nat_reality_port_with_xray() (
 
     clear() { :; }; press_enter() { :; }; sleep() { :; }
     load_params() { :; }; prompt_read() { read -r "$1"; }
-    validate_service_ports() { :; }; open_service_ports() { :; }
+    validate_service_ports() { [[ "$REALITY_PUBLIC_PORT" != "$SOCKS_PUBLIC_PORT" ]]; }
+    open_service_ports() { :; }
     generate_tls_cert() { :; }; write_singbox_config() { :; }; write_singbox_service() { :; }
     xray_managed_reality() { :; }
     write_xray_reality_config() { printf '%s %s\n' "$2" "$3" >> "$tmp/xray-config"; }
@@ -1958,8 +1959,10 @@ test_modify_nat_reality_port_with_xray() (
     verify_reality_local_listener() { [[ "${listener_ready:-true}" == true ]]; }
     generate_and_show_links() { :; }; ensure_subscription_service_if_enabled() { :; }; show_subscription_url() { :; }
 
-    do_modify_config <<< $'1\n20012\n\n0\n' > "$tmp/output"
+    do_modify_config <<< $'1\n\n20012\n\n0\n' > "$tmp/output"
     output=$(<"$tmp/output")
+    assert_contains "$output" '公网 20001 -> 本机 20001' "NAT menu labels both Reality ports"
+    assert_contains "$output" '面板映射需确认' "NAT port confirmation does not claim provider mapping"
     assert_eq 20012 "$REALITY_PORT" "Reality local port persisted after verification"
     assert_eq 20001 "$REALITY_PUBLIC_PORT" "NAT public port not silently changed"
     assert_contains "$output" "公网 20001/TCP 映射及外部连接尚未验证" "NAT mapping verification boundary"
@@ -1968,7 +1971,7 @@ test_modify_nat_reality_port_with_xray() (
 
     REALITY_PORT=20001
     listener_ready=false
-    do_modify_config <<< $'1\n20012\n\n0\n' > "$tmp/output"
+    do_modify_config <<< $'1\n\n20012\n\n0\n' > "$tmp/output"
     output=$(<"$tmp/output")
     assert_eq 20001 "$REALITY_PORT" "Reality port restored when listener missing"
     assert_eq 20001 "$REALITY_PUBLIC_PORT" "NAT mapping restored when listener missing"
@@ -1976,6 +1979,33 @@ test_modify_nat_reality_port_with_xray() (
     assert_contains "$output" "正在恢复旧配置" "missing listener rollback notice"
     assert_contains "$(<"$tmp/xray-config")" '20001 old-uuid' "Xray config restored after listener failure"
     assert_eq 20001 "$(tail -n1 "$tmp/saved")" "old params saved after listener failure"
+
+    : > "$tmp/restarts"
+    : > "$tmp/xray-config"
+    do_modify_config <<< $'1\n20015\n\n\n0\n' > "$tmp/output"
+    output=$(<"$tmp/output")
+    assert_eq 20015 "$REALITY_PUBLIC_PORT" "public-only NAT change saved"
+    assert_eq 20001 "$REALITY_PORT" "public-only NAT change preserves local port"
+    assert_eq 20015 "$(reality_share_port)" "public-only NAT link port updated"
+    assert_eq '' "$(<"$tmp/restarts")" "public-only NAT change does not restart services"
+    assert_eq '' "$(<"$tmp/xray-config")" "public-only NAT change does not rewrite Xray"
+    assert_contains "$output" '服务商面板映射及外部连接尚未验证' "public-only NAT change avoids external success claim"
+
+    do_modify_config <<< $'1\n20023\n\n0\n' > "$tmp/output"
+    output=$(<"$tmp/output")
+    assert_eq 20015 "$REALITY_PUBLIC_PORT" "conflicting NAT public port rejected"
+    assert_contains "$output" '端口检查未通过' "NAT public port conflict validation"
+
+    listener_ready=true
+    do_modify_config <<< $'1\n20016\n20012\n\n0\n' > "$tmp/output"
+    assert_eq 20016 "$REALITY_PUBLIC_PORT" "both-port NAT change saves public port"
+    assert_eq 20012 "$REALITY_PORT" "both-port NAT change saves local listener"
+    assert_eq 20016 "$(reality_share_port)" "both-port NAT change updates client link"
+    assert_contains "$(<"$tmp/xray-config")" '20012 old-uuid' "both-port NAT change updates Xray listener"
+
+    do_modify_config <<< $'1\n20017\n20018\nr\n0\n' > "$tmp/output"
+    assert_eq 20016 "$REALITY_PUBLIC_PORT" "canceled NAT public port restored"
+    assert_eq 20012 "$REALITY_PORT" "canceled NAT local port restored"
 )
 
 test_install_network_failure_selection() (
