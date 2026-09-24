@@ -639,11 +639,7 @@ show_subscription_url() {
 
     [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_enabled || return
 
-    echo ""
-    echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}${BOLD}║                      订阅地址                       ║${NC}"
-    echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    menu_header "连接与订阅 / 订阅地址"
     if public_subscription_url=$(subscription_https_url); then
         echo -e "${GREEN}${BOLD}HTTPS 订阅（导入 v2rayN / v2rayNG）${NC}"
         echo -e "${YELLOW}${BOLD}${public_subscription_url}${NC}"
@@ -661,13 +657,9 @@ show_subscription_url() {
 generate_and_show_links() {
     build_share_links
 
-    echo ""
-    echo -e "${PURPLE}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${PURPLE}${BOLD}║              📋 配置信息 & 分享链接                 ║${NC}"
-    echo -e "${PURPLE}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    menu_header "连接与订阅 / 配置信息 & 分享链接"
 
-    echo -e "${CYAN}${BOLD}── 基本信息 ──${NC}"
+    menu_section "基本信息"
     case "${IP_STACK_MODE:-}" in
         dual-stack)
             echo -e "  公网类型:      ${BOLD}IPv4 + IPv6${NC}"
@@ -691,7 +683,7 @@ generate_and_show_links() {
         echo -e "  IPv4 策略:     ${BOLD}$(link_ipv4_selection_label)${NC}"
     fi
     if [[ "${IP_STACK_MODE:-}" == "unknown" ]]; then
-        echo -e "  ${DIM}提示: 可在 [修改配置] -> [修改直连公网 IPv4 覆盖] 中手动设置正确公网 IP 后重新生成链接。${NC}"
+        echo -e "  ${DIM}提示: 可在 [连接与订阅] -> [公网 IPv4 与 NAT] 设置正确公网 IP 后重新生成链接。${NC}"
     fi
     echo -e "  UUID:          ${BOLD}${UUID}${NC}"
     if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
@@ -723,14 +715,14 @@ generate_and_show_links() {
     echo ""
 
     if [[ -n "${GENERATED_REALITY_LINKS}" ]]; then
-        echo -e "${GREEN}${BOLD}── VLESS + Reality (直连) ──${NC}"
+        menu_section "VLESS + Reality (直连)"
         echo -e "${YELLOW}${GENERATED_REALITY_LINKS}${NC}"
         echo -e "  ${DIM}提示: Reality 请使用 Xray-core / sing-box 内核；若 v2rayN 当前使用 v2fly core，请先切换到 Xray core。${NC}"
         echo ""
     fi
 
     if [[ -n "${GENERATED_ARGO_LINKS}" ]]; then
-        echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
+        menu_section "VLESS + WS + Argo (CDN)"
         echo -e "  伪装域名(SNI): ${BOLD}${ARGO_DOMAIN}${NC}"
         echo -e "  接入地址(ADDR): ${BOLD}${ARGO_DOMAIN}${NC}"
         echo -e "${YELLOW}${GENERATED_ARGO_LINKS}${NC}"
@@ -738,7 +730,7 @@ generate_and_show_links() {
     fi
 
     if [[ -n "${GENERATED_HY2_LINKS}" ]]; then
-        echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
+        menu_section "Hysteria2 (QUIC/UDP 高速)"
         echo -e "${YELLOW}${GENERATED_HY2_LINKS}${NC}"
         echo -e "  ${DIM}提示: 链接同时提供 insecure=1 与 pinSHA256，以兼容 v2rayN 和支持证书固定的客户端。${NC}"
         echo ""
@@ -755,7 +747,7 @@ generate_and_show_links() {
     fi
 
     if [[ -n "${GENERATED_SOCKS_LINKS}" ]]; then
-        echo -e "${CYAN}${BOLD}── SOCKS5 代理 ──${NC}"
+        menu_section "SOCKS5 代理"
         echo -e "${YELLOW}${GENERATED_SOCKS_LINKS}${NC}"
         echo ""
     elif is_socks_enabled; then

@@ -84,6 +84,9 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
+if [[ -n "${NO_COLOR:-}" || ! -t 1 ]]; then
+    RED='' GREEN='' YELLOW='' BLUE='' PURPLE='' CYAN='' BOLD='' DIM='' NC=''
+fi
 
 # ─── 辅助函数 ────────────────────────────────────────────────
 info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
@@ -131,9 +134,30 @@ separator() {
     echo -e "${DIM}─────────────────────────────────────────────${NC}"
 }
 
+menu_header() {
+    echo ""
+    echo -e "  ${CYAN}${BOLD}sbm${NC} ${DIM}/ $1${NC}"
+    separator
+}
+
+menu_section() {
+    echo ""
+    echo -e "  ${CYAN}${BOLD}$1${NC}"
+}
+
+menu_item() {
+    echo -e "  ${BOLD}$1)${NC} $2${3:+ ${DIM}$3${NC}}"
+}
+
+menu_back() {
+    echo ""
+    menu_item 0 "${1:-返回上级}"
+    echo ""
+}
+
 press_enter() {
     echo ""
-    prompt_read _ "按 Enter 返回主菜单..." || true
+    prompt_read _ "按 Enter 返回${MENU_CONTEXT:-上级菜单}..." || true
 }
 
 prompt_read() {

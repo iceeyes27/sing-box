@@ -129,6 +129,9 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
+if [[ -n "${NO_COLOR:-}" || ! -t 1 ]]; then
+    RED='' GREEN='' YELLOW='' BLUE='' PURPLE='' CYAN='' BOLD='' DIM='' NC=''
+fi
 
 # ─── 辅助函数 ────────────────────────────────────────────────
 info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
@@ -176,9 +179,30 @@ separator() {
     echo -e "${DIM}─────────────────────────────────────────────${NC}"
 }
 
+menu_header() {
+    echo ""
+    echo -e "  ${CYAN}${BOLD}sbm${NC} ${DIM}/ $1${NC}"
+    separator
+}
+
+menu_section() {
+    echo ""
+    echo -e "  ${CYAN}${BOLD}$1${NC}"
+}
+
+menu_item() {
+    echo -e "  ${BOLD}$1)${NC} $2${3:+ ${DIM}$3${NC}}"
+}
+
+menu_back() {
+    echo ""
+    menu_item 0 "${1:-返回上级}"
+    echo ""
+}
+
 press_enter() {
     echo ""
-    prompt_read _ "按 Enter 返回主菜单..." || true
+    prompt_read _ "按 Enter 返回${MENU_CONTEXT:-上级菜单}..." || true
 }
 
 prompt_read() {
@@ -1838,10 +1862,13 @@ prompt_install_protocols() {
         *) warn "未确认网络类型，无法设置安装默认协议"; return 1 ;;
     esac
     while true; do
+        menu_header "安装节点 / 2. 选择协议"
+        menu_section "基础协议"
         echo "  网络类型: ${network_mode}"
         echo "  [✓] Reality (基础功能)"
-        echo "  1) Argo"
-        echo "  2) SOCKS5"
+        menu_section "可多选 · 输入 1,2"
+        menu_item 1 "Argo 隧道"
+        menu_item 2 "SOCKS5 代理"
         [[ "$network_mode" == "ipv6-only" ]] && echo "  本地只有 IPv4 时需启用 Argo，并使用 Argo 节点。"
         echo "  输入 1、2 或 1,2 一次选择；Enter 使用默认 ($( [[ "$default_argo" == true ]] && printf 'Reality + Argo' || printf '仅 Reality' ))。"
         prompt_read choice "  请选择协议: " || return 1
@@ -1867,7 +1894,13 @@ detect_install_network() {
             return 0
         fi
         warn "公网网络检测失败，请重试或手动指定类型。"
-        prompt_read choice "  1) 重试  2) IPv4-only  3) IPv6-only  4) 双栈: " || return 1
+        menu_header "安装节点 / 2. 网络类型"
+        menu_section "检测失败 · 手动指定或重试"
+        menu_item 1 "重新检测"
+        menu_item 2 "IPv4-only"
+        menu_item 3 "IPv6-only"
+        menu_item 4 "双栈"
+        prompt_read choice "  请选择 [1-4]: " || return 1
         case "$choice" in
             1) continue ;;
             2) INSTALL_NETWORK_MODE="ipv4-only"; return 0 ;;
@@ -2266,8 +2299,8 @@ prompt_port_value() {
 }
 
 show_port_confirmation() {
-    echo ""
-    echo -e "${CYAN}${BOLD}── 端口确认 ──${NC}"
+    menu_header "安装节点 / 3. 端口确认"
+    menu_section "本机监听"
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
     if ! is_hy2_enabled; then
         echo -e "  Hysteria2:    ${DIM}未启用${NC}"
@@ -2282,6 +2315,7 @@ show_port_confirmation() {
         echo -e "  SOCKS5:       ${DIM}未启用${NC}"
     fi
     if nat_mode_enabled; then
+        menu_section "公网映射 · 需在服务商面板配置"
         echo -e "  NAT Reality:  ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC} ${DIM}(面板映射需确认)${NC}"
         if is_hy2_enabled; then
             echo -e "  NAT Hysteria2:${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
@@ -2291,8 +2325,10 @@ show_port_confirmation() {
         fi
     fi
     if argo_enabled; then
+        menu_section "订阅"
         echo -e "  订阅服务:     ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(仅本机/Argo 使用)${NC}"
     fi
+    menu_section "放行范围"
     if nat_mode_enabled; then
         echo -e "  本机防火墙:   ${BOLD}${REALITY_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
         echo -e "  服务商面板:   ${BOLD}${REALITY_PUBLIC_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PUBLIC_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PUBLIC_PORT")"
@@ -2329,8 +2365,8 @@ prompt_nat_mapping_config() {
     REALITY_PUBLIC_PORT="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
     HY2_PUBLIC_PORT="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
     SOCKS_PUBLIC_PORT="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
-    echo ""
-    echo -e "${CYAN}${BOLD}── NAT 公网映射 ──${NC}"
+    menu_header "安装节点 / 3. NAT 公网映射"
+    menu_section "公网 → 本机"
     echo -e "  检测到公网 IPv4 不在本机网卡，按 NAT VPS 配置。"
     echo -e "  公网 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
     prompt_port_value REALITY_PUBLIC_PORT "NAT Reality 公网映射" "$REALITY_PUBLIC_PORT" \
@@ -2393,13 +2429,12 @@ prompt_public_ipv4_override_optional() {
 prompt_public_ipv4_override() {
     local choice input
 
-    echo ""
-    echo -e "${CYAN}${BOLD}── 直连公网 IPv4 覆盖 ──${NC}"
-    echo -e "  当前覆盖值: ${BOLD}$(public_ipv4_override_label)${NC}"
+    menu_header "连接与订阅 / 公网与 NAT / IPv4 覆盖"
+    menu_section "当前覆盖值: $(public_ipv4_override_label)"
     echo -e "  ${DIM}该值仅用于生成 Reality/Hysteria2 直连分享链接和订阅内容，不会修改服务端监听配置。${NC}"
-    echo -e "  1) 设置/修改覆盖 IPv4"
-    echo -e "  2) 清除覆盖，恢复自动检测"
-    echo -e "  0) 取消"
+    menu_item 1 "设置或修改覆盖 IPv4"
+    menu_item 2 "清除覆盖并恢复自动检测"
+    menu_back "取消"
     prompt_read choice "  请选择 [0]: " || return 1
     choice=${choice:-0}
 
@@ -2443,21 +2478,21 @@ prompt_ipv4_link_selection_if_multiple() {
         return 1
     fi
 
-    echo ""
-    echo -e "${CYAN}${BOLD}── 多 IPv4 链接策略 ──${NC}"
+    menu_header "连接与订阅 / 公网与 NAT / IPv4 链接策略"
+    menu_section "检测到多个 IPv4"
     echo -e "  检测到多个 IPv4: ${BOLD}$(public_ipv4_display)${NC}"
     index=1
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
         if (( index == 1 )); then
-            echo -e "  ${index}) 仅启用 ${ip} ${GREEN}推荐${NC}"
+            menu_item "$index" "仅启用 ${ip}" "推荐"
         else
-            echo -e "  ${index}) 仅启用 ${ip}"
+            menu_item "$index" "仅启用 ${ip}"
         fi
         index=$((index + 1))
     done <<< "$PUBLIC_IPV4_LIST"
     all_option=$index
-    echo -e "  ${all_option}) 全部启用"
+    menu_item "$all_option" "全部启用"
 
     prompt_read input "  请选择 [1]: " || input=1
     input=${input:-1}
@@ -2479,7 +2514,7 @@ show_external_access_requirements() {
     local access_mode
     access_mode=$(detect_external_access_mode)
 
-    echo -e "${CYAN}${BOLD}── 外部放行提示 ──${NC}"
+    menu_section "外部放行提示"
     case "$access_mode" in
         ipv6-only)
             echo -e "  检测到 IPv6-only VPS；Reality/Hysteria2 通过 Argo 提供外部入口。"
@@ -3798,11 +3833,7 @@ show_subscription_url() {
 
     [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_enabled || return
 
-    echo ""
-    echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}${BOLD}║                      订阅地址                       ║${NC}"
-    echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    menu_header "连接与订阅 / 订阅地址"
     if public_subscription_url=$(subscription_https_url); then
         echo -e "${GREEN}${BOLD}HTTPS 订阅（导入 v2rayN / v2rayNG）${NC}"
         echo -e "${YELLOW}${BOLD}${public_subscription_url}${NC}"
@@ -3820,13 +3851,9 @@ show_subscription_url() {
 generate_and_show_links() {
     build_share_links
 
-    echo ""
-    echo -e "${PURPLE}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${PURPLE}${BOLD}║              📋 配置信息 & 分享链接                 ║${NC}"
-    echo -e "${PURPLE}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    menu_header "连接与订阅 / 配置信息 & 分享链接"
 
-    echo -e "${CYAN}${BOLD}── 基本信息 ──${NC}"
+    menu_section "基本信息"
     case "${IP_STACK_MODE:-}" in
         dual-stack)
             echo -e "  公网类型:      ${BOLD}IPv4 + IPv6${NC}"
@@ -3850,7 +3877,7 @@ generate_and_show_links() {
         echo -e "  IPv4 策略:     ${BOLD}$(link_ipv4_selection_label)${NC}"
     fi
     if [[ "${IP_STACK_MODE:-}" == "unknown" ]]; then
-        echo -e "  ${DIM}提示: 可在 [修改配置] -> [修改直连公网 IPv4 覆盖] 中手动设置正确公网 IP 后重新生成链接。${NC}"
+        echo -e "  ${DIM}提示: 可在 [连接与订阅] -> [公网 IPv4 与 NAT] 设置正确公网 IP 后重新生成链接。${NC}"
     fi
     echo -e "  UUID:          ${BOLD}${UUID}${NC}"
     if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
@@ -3882,14 +3909,14 @@ generate_and_show_links() {
     echo ""
 
     if [[ -n "${GENERATED_REALITY_LINKS}" ]]; then
-        echo -e "${GREEN}${BOLD}── VLESS + Reality (直连) ──${NC}"
+        menu_section "VLESS + Reality (直连)"
         echo -e "${YELLOW}${GENERATED_REALITY_LINKS}${NC}"
         echo -e "  ${DIM}提示: Reality 请使用 Xray-core / sing-box 内核；若 v2rayN 当前使用 v2fly core，请先切换到 Xray core。${NC}"
         echo ""
     fi
 
     if [[ -n "${GENERATED_ARGO_LINKS}" ]]; then
-        echo -e "${BLUE}${BOLD}── VLESS + WS + Argo (CDN) ──${NC}"
+        menu_section "VLESS + WS + Argo (CDN)"
         echo -e "  伪装域名(SNI): ${BOLD}${ARGO_DOMAIN}${NC}"
         echo -e "  接入地址(ADDR): ${BOLD}${ARGO_DOMAIN}${NC}"
         echo -e "${YELLOW}${GENERATED_ARGO_LINKS}${NC}"
@@ -3897,7 +3924,7 @@ generate_and_show_links() {
     fi
 
     if [[ -n "${GENERATED_HY2_LINKS}" ]]; then
-        echo -e "${PURPLE}${BOLD}── Hysteria2 (QUIC/UDP 高速) ──${NC}"
+        menu_section "Hysteria2 (QUIC/UDP 高速)"
         echo -e "${YELLOW}${GENERATED_HY2_LINKS}${NC}"
         echo -e "  ${DIM}提示: 链接同时提供 insecure=1 与 pinSHA256，以兼容 v2rayN 和支持证书固定的客户端。${NC}"
         echo ""
@@ -3914,7 +3941,7 @@ generate_and_show_links() {
     fi
 
     if [[ -n "${GENERATED_SOCKS_LINKS}" ]]; then
-        echo -e "${CYAN}${BOLD}── SOCKS5 代理 ──${NC}"
+        menu_section "SOCKS5 代理"
         echo -e "${YELLOW}${GENERATED_SOCKS_LINKS}${NC}"
         echo ""
     elif is_socks_enabled; then
@@ -3985,7 +4012,7 @@ json_string() {
 # ─── 完整安装 ────────────────────────────────────────────────
 do_primary_install() {
     local INSTALL_NETWORK_MODE="" argo_ready=true subscription_ready=true
-    echo ""
+    menu_header "安装节点 / 1. 准备环境"
     info "开始完整安装..."
     separator
 
@@ -4003,11 +4030,11 @@ do_primary_install() {
 
     while true; do
         # Reality 默认使用随机高位 TCP 端口，降低标准 443 端口的无效扫描压力。
-        echo ""
-        echo -e "${CYAN}${BOLD}── 端口配置 ──${NC}"
-        echo -e "  1) 自动高位端口 (${REALITY_PORT}/TCP) ${GREEN}推荐${NC}"
-        echo -e "  2) 使用 443/TCP"
-        echo -e "  3) 自定义 Reality TCP 端口"
+        menu_header "安装节点 / 3. 端口与公网映射"
+        menu_section "Reality 本机监听"
+        menu_item 1 "自动高位端口" "${REALITY_PORT}/TCP · 推荐"
+        menu_item 2 "使用 443/TCP"
+        menu_item 3 "自定义 TCP 端口"
         prompt_read port_mode "  请选择 [1]: "
         port_mode=${port_mode:-1}
 
@@ -4042,6 +4069,7 @@ do_primary_install() {
         warn "端口放行失败，请调整端口后重试"
     done
 
+    menu_header "安装节点 / 4. 节点身份"
     prompt_read input "  Reality 伪装域名 [${REALITY_SNI}]: "
     if [[ -n "$input" ]]; then
         ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖不可用，安装已停止"
@@ -4067,10 +4095,10 @@ do_primary_install() {
 
     # 仅为已勾选 Argo 的安装配置隧道模式。
     if argo_enabled; then
-        echo ""
-        echo -e "${CYAN}${BOLD}── Argo 隧道配置 ──${NC}"
-        echo -e "  1) 临时域名模式 (trycloudflare.com) ${GREEN}推荐${NC}"
-        echo -e "  2) 固定域名模式 (需提供 Cloudflare Tunnel Token)"
+        menu_header "安装节点 / 5. Argo 隧道"
+        menu_section "域名模式"
+        menu_item 1 "临时域名" "trycloudflare.com · 推荐"
+        menu_item 2 "固定域名" "需要 Cloudflare Tunnel Token"
         prompt_read argo_choice "  请选择 [1]: "
         argo_choice=${argo_choice:-1}
         if [[ "$argo_choice" == "2" ]]; then
@@ -4150,7 +4178,7 @@ do_primary_install() {
     # 保存参数
     save_params
 
-    echo ""
+    menu_header "安装节点 / 部署结果"
     if argo_enabled && { [[ "$argo_ready" != "true" || "$subscription_ready" != "true" ]] || ! service_is_active argo-tunnel || ! service_is_active sbm-subscription || ! is_valid_hostname "${ARGO_DOMAIN:-}"; }; then
         warn "所选协议组合尚未完成部署：Argo 或订阅网关未就绪。"
         return 1
@@ -4170,7 +4198,95 @@ do_primary_install() {
 }
 
 # ─── 修改配置 ────────────────────────────────────────────────
+prompt_modify_action() {
+    local output_var="$1" category="$2" menu_choice action
+    while true; do
+        clear
+        case "$category" in
+            reality)
+                menu_header "节点与协议 / Reality"
+                menu_section "当前连接"
+                if nat_mode_enabled; then
+                    echo "  公网 ${REALITY_PUBLIC_PORT}/TCP → 本机 ${REALITY_PORT}/TCP"
+                else
+                    echo "  本机 ${REALITY_PORT}/TCP"
+                fi
+                menu_section "连接设置"
+                menu_item 1 "修改端口"
+                menu_item 2 "修改伪装域名" "${REALITY_SNI}"
+                menu_item 3 "重新优选伪装域名"
+                menu_item 4 "切换为单端口模式 (443)"
+                menu_section "凭据"
+                menu_item 5 "重新生成 Reality 密钥对"
+                ;;
+            hy2)
+                menu_header "节点与协议 / Hysteria2"
+                menu_section "当前状态"
+                echo "  $(is_hy2_enabled && printf '已启用' || printf '未启用') · ${HY2_PORT}/UDP"
+                menu_section "设置"
+                menu_item 1 "启用或关闭"
+                menu_item 2 "修改端口"
+                menu_item 3 "重新生成密码"
+                ;;
+            socks)
+                menu_header "节点与协议 / SOCKS5"
+                menu_section "当前状态"
+                echo "  $(is_socks_enabled && printf '已启用 · %s/TCP' "$SOCKS_PORT" || printf '未启用')"
+                menu_section "设置"
+                menu_item 1 "管理 SOCKS5 代理"
+                ;;
+            identity)
+                menu_header "节点与协议 / 节点身份"
+                menu_section "当前节点"
+                echo "  ${NODE_NAME} · UUID ${UUID:0:8}…"
+                menu_section "设置"
+                menu_item 1 "修改节点名称"
+                menu_item 2 "重新生成 UUID"
+                ;;
+            argo)
+                menu_header "连接与订阅 / Argo"
+                menu_section "当前状态"
+                echo "  $(argo_mode_label) · 订阅本机端口 ${SUBSCRIPTION_PORT}/TCP"
+                menu_section "隧道与订阅"
+                menu_item 1 "修改隧道模式、Token 或域名"
+                menu_item 2 "更新订阅链接"
+                menu_item 3 "修改订阅服务端口"
+                ;;
+            network)
+                menu_header "连接与订阅 / 公网与 NAT"
+                menu_section "当前状态"
+                echo "  NAT $(nat_mode_enabled && printf '已启用' || printf '未启用') · $(public_ipv4_override_label)"
+                menu_section "公网设置"
+                menu_item 1 "修改 NAT 公网映射"
+                menu_item 2 "修改直连公网 IPv4"
+                menu_item 3 "修改 IPv4 链接策略"
+                ;;
+            *) warn "未知配置分类: ${category}"; return 1 ;;
+        esac
+        menu_back
+        prompt_read menu_choice "  选择: " || return 1
+        action=""
+        case "${category}:${menu_choice}" in
+            *:0) action=0 ;;
+            reality:1) action=1 ;; reality:2) action=2 ;; reality:3) action=6 ;;
+            reality:4) action=9 ;; reality:5) action=4 ;;
+            hy2:1) action=16 ;; hy2:2) action=7 ;; hy2:3) action=8 ;;
+            socks:1) action=17 ;;
+            identity:1) action=5 ;; identity:2) action=3 ;;
+            argo:1) action=10 ;; argo:2) action=11 ;; argo:3) action=12 ;;
+            network:1) action=15 ;; network:2) action=14 ;; network:3) action=13 ;;
+        esac
+        if [[ -n "$action" ]]; then
+            printf -v "$output_var" '%s' "$action"
+            return 0
+        fi
+        warn "无效选项"
+    done
+}
+
 do_modify_config() {
+    local category="${1:-reality}" selected_action choice
+    local MENU_CONTEXT="当前配置页"
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
     while true; do
@@ -4217,34 +4333,8 @@ do_modify_config() {
             "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
             "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
         )
-        clear
-        echo -e "${CYAN}${BOLD}"
-        echo "  ── 修改配置 ──"
-        echo -e "${NC}"
-        if nat_mode_enabled; then
-            echo -e "  1) 修改 Reality 端口       ${DIM}(公网 ${REALITY_PUBLIC_PORT} -> 本机 ${REALITY_PORT})${NC}"
-        else
-            echo -e "  1) 修改 Reality 端口       ${DIM}(当前: ${REALITY_PORT})${NC}"
-        fi
-        echo -e "  2) 修改伪装域名            ${DIM}(当前: ${REALITY_SNI})${NC}"
-        echo -e "  3) 重新生成 UUID           ${DIM}(当前: ${UUID:0:8}...)${NC}"
-        echo -e "  4) 重新生成 Reality 密钥对"
-        echo -e "  5) 修改节点名称            ${DIM}(当前: ${NODE_NAME})${NC}"
-        echo -e "  6) 重新优选伪装域名"
-        echo -e "  7) 修改 Hysteria2 端口     ${DIM}(当前: ${HY2_PORT})${NC}"
-        echo -e "  8) 重新生成 Hysteria2 密码"
-        echo -e "  9) 切换为单端口模式 (443)  ${GREEN}推荐${NC}"
-        echo -e "  10) 修改 Argo 隧道 (Token/域名)"
-        echo -e "  11) 更新 Argo 订阅链接"
-        echo -e "  12) 修改订阅服务端口       ${DIM}(当前: ${SUBSCRIPTION_PORT})${NC}"
-        echo -e "  13) 修改 IPv4 链接策略     ${DIM}(当前: $(link_ipv4_selection_label))${NC}"
-        echo -e "  14) 修改直连公网 IPv4 覆盖 ${DIM}(当前: $(public_ipv4_override_label))${NC}"
-        echo -e "  15) 修改 NAT 公网映射       ${DIM}(当前: $(nat_mode_enabled && echo '已启用' || echo '未启用'))${NC}"
-        echo -e "  16) 启用/关闭 Hysteria2     ${DIM}(当前: $(is_hy2_enabled && echo '已启用' || echo '未启用'))${NC}"
-        echo -e "  17) 管理 SOCKS5 代理        ${DIM}(当前: $(is_socks_enabled && echo "已启用 ${SOCKS_PORT}/TCP" || echo '未启用'))${NC}"
-        echo -e "  0) 返回主菜单"
-        echo ""
-        prompt_read choice "  请选择 [0-17]: "
+        prompt_modify_action selected_action "$category" || return
+        choice="$selected_action"
 
         local changed=false
         local ports_changed=false
@@ -4356,12 +4446,16 @@ do_modify_config() {
                 restart_reality_backend=true
                 ;;
             10)
-                echo -e "\n  当前模式: $(argo_mode_label)"
-                echo -e "  1) 临时域名模式 (trycloudflare.com)"
-                echo -e "  2) 固定域名 Token 模式"
-                echo -e "  3) 关闭 Argo"
-                prompt_read sub_choice "  请选择 [1]: "
+                menu_header "连接与订阅 / Argo / 隧道模式"
+                menu_section "当前模式: $(argo_mode_label)"
+                menu_item 1 "临时域名" "trycloudflare.com"
+                menu_item 2 "固定域名" "Token 模式"
+                menu_item 3 "关闭 Argo"
+                menu_back "取消"
+                prompt_read sub_choice "  请选择 [1]: " || continue
                 sub_choice=${sub_choice:-1}
+                [[ "$sub_choice" == "0" ]] && continue
+                [[ "$sub_choice" =~ ^[123]$ ]] || { warn "无效选项"; continue; }
                 if [[ "$sub_choice" == "2" ]]; then
                     local old_argo_domain="${ARGO_DOMAIN:-}"
                     local old_argo_token="${ARGO_TOKEN:-}"
@@ -4444,10 +4538,15 @@ do_modify_config() {
                 fi
                 ;;
             15)
-                echo -e "  1) 启用/修改 NAT 公网映射"
-                echo -e "  2) 关闭 NAT 公网映射"
-                prompt_read sub_choice "  请选择 [1]: "
+                menu_header "连接与订阅 / 公网与 NAT / 映射"
+                menu_section "管理公网映射"
+                menu_item 1 "启用或修改 NAT 公网映射"
+                menu_item 2 "关闭 NAT 公网映射"
+                menu_back "取消"
+                prompt_read sub_choice "  请选择 [1]: " || continue
                 sub_choice=${sub_choice:-1}
+                [[ "$sub_choice" == "0" ]] && continue
+                [[ "$sub_choice" =~ ^[12]$ ]] || { warn "无效选项"; continue; }
                 if [[ "$sub_choice" == "2" ]]; then
                     NAT_MODE="false"
                     REALITY_PUBLIC_PORT="${REALITY_PORT}"
@@ -4514,12 +4613,13 @@ do_modify_config() {
                 ;;
             17)
                 if is_socks_enabled; then
-                    echo -e "  当前 SOCKS5: ${BOLD}${SOCKS_USERNAME}@${SOCKS_PORT}/TCP${NC}"
-                    echo -e "  1) 修改端口"
-                    echo -e "  2) 修改用户名"
-                    echo -e "  3) 重新生成密码"
-                    echo -e "  4) 关闭 SOCKS5"
-                    echo -e "  0) 取消"
+                    menu_header "节点与协议 / SOCKS5 / 管理"
+                    menu_section "当前 ${SOCKS_USERNAME}@${SOCKS_PORT}/TCP"
+                    menu_item 1 "修改端口"
+                    menu_item 2 "修改用户名"
+                    menu_item 3 "重新生成密码"
+                    menu_item 4 "关闭 SOCKS5"
+                    menu_back "取消"
                     prompt_read sub_choice "  请选择 [0]: " || continue
                     sub_choice=${sub_choice:-0}
                     case "$sub_choice" in
@@ -4717,6 +4817,7 @@ do_show_links() {
 
 # ─── 启动 / 停止 / 重启 ──────────────────────────────────────
 do_start() {
+    menu_header "服务与诊断 / 启动服务"
     info "启动服务..."
     service_start sing-box && success "sing-box 已启动" || warn "sing-box 启动失败"
     if load_params; then
@@ -4733,6 +4834,7 @@ do_start() {
 }
 
 do_stop() {
+    menu_header "服务与诊断 / 停止服务"
     info "停止服务..."
     service_stop sing-box && success "sing-box 已停止" || warn "sing-box 停止失败"
     service_stop argo-tunnel && success "argo-tunnel 已停止" || warn "argo-tunnel 停止失败"
@@ -4741,6 +4843,7 @@ do_stop() {
 }
 
 do_restart() {
+    menu_header "服务与诊断 / 重启服务"
     info "重启服务..."
     service_restart sing-box && success "sing-box 已重启" || warn "sing-box 重启失败"
     if load_params; then
@@ -4827,6 +4930,7 @@ write_xray_reality_sni() {
 
 # ─── 重新优选 Reality 伪装域名 ───────────────────────────────
 do_reoptimize_reality_sni() {
+    menu_header "节点与协议 / Reality / 优选伪装域名"
     if ! load_params; then
         warn "未安装，无法重新优选 Reality 伪装域名"
         return 1
@@ -4930,6 +5034,7 @@ do_reoptimize_reality_sni() {
 # 重写服务端配置并重启，再按新格式重新生成链接。适用于升级脚本后
 # 让服务端配置与当前稳定链接格式同步生效。
 do_apply_latest() {
+    menu_header "系统维护 / 配置同步"
     if ! load_params; then
         warn "未安装，无法应用配置更新"
         return 1
@@ -4988,26 +5093,26 @@ disable_cfopt_auto() {
 
 # ─── 查看状态 ────────────────────────────────────────────────
 do_status() {
-    echo ""
-    echo -e "${CYAN}${BOLD}── sing-box 状态 ──${NC}"
+    menu_header "服务与诊断 / 运行状态"
+    menu_section "sing-box"
     service_status sing-box || warn "sing-box 未安装"
-    separator
-    echo -e "${CYAN}${BOLD}── argo-tunnel 状态 ──${NC}"
+    menu_section "argo-tunnel"
     service_status argo-tunnel || warn "argo-tunnel 未安装"
-    separator
-    echo -e "${CYAN}${BOLD}── 订阅服务状态 ──${NC}"
+    menu_section "订阅服务"
     service_status sbm-subscription || warn "订阅服务未安装"
     press_enter
 }
 
 # ─── 查看日志 ────────────────────────────────────────────────
 do_logs() {
-    echo ""
-    echo -e "  1) sing-box 日志"
-    echo -e "  2) argo-tunnel 日志"
-    echo -e "  3) 订阅服务日志"
-    echo -e "  0) 返回"
-    prompt_read choice "  请选择: "
+    menu_header "服务与诊断 / 日志"
+    menu_section "选择服务"
+    menu_item 1 "sing-box 日志"
+    menu_item 2 "argo-tunnel 日志"
+    menu_item 3 "订阅服务日志"
+    menu_back
+    prompt_read choice "  请选择: " || return
+    [[ "$choice" == 0 ]] && return
     case "$choice" in
         1) service_logs sing-box 50 || warn "未找到 sing-box 日志" ;;
         2) service_logs argo-tunnel 50 || warn "未找到 argo-tunnel 日志" ;;
@@ -5018,11 +5123,13 @@ do_logs() {
 
 # ─── 开机自启设置 ──────────────────────────────────────────────
 do_boot_manage() {
-    echo ""
-    echo -e "  1) 开启 sing-box 及已配置附加服务的开机自启"
-    echo -e "  2) 关闭全部服务的开机自启"
-    echo -e "  0) 返回"
-    prompt_read choice "  请选择: "
+    menu_header "服务与诊断 / 开机自启"
+    menu_section "服务设置"
+    menu_item 1 "开启" "sing-box 及已配置附加服务"
+    menu_item 2 "关闭" "全部服务"
+    menu_back
+    prompt_read choice "  请选择: " || return
+    [[ "$choice" == 0 ]] && return
     case "$choice" in
         1)
             service_enable sing-box 2>/dev/null || true
@@ -5042,12 +5149,15 @@ do_boot_manage() {
 
 # ─── 更新 sing-box ───────────────────────────────────────────
 do_upgrade() {
-    echo ""
-    echo -e "  1) 更新 sing-box"
-    echo -e "  2) 更新 cloudflared"
-    echo -e "  3) 更新此管理脚本"
-    echo -e "  0) 返回"
-    prompt_read choice "  请选择: "
+    menu_header "系统维护 / 更新"
+    menu_section "组件"
+    menu_item 1 "更新 sing-box"
+    menu_item 2 "更新 cloudflared"
+    menu_section "管理脚本"
+    menu_item 3 "更新此管理脚本"
+    menu_back
+    prompt_read choice "  请选择: " || return
+    [[ "$choice" == 0 ]] && return
     case "$choice" in
         1)
             info "更新 sing-box..."
@@ -5106,7 +5216,7 @@ do_upgrade() {
 
 # ─── 卸载 ────────────────────────────────────────────────────
 do_uninstall() {
-    echo ""
+    menu_header "系统维护 / 卸载"
     warn "即将卸载 sing-box 和 Argo 隧道"
     prompt_read confirm "  确认卸载？(y/N): "
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消"; press_enter; return; }
@@ -5175,18 +5285,110 @@ show_banner() {
 
 # ─── 主菜单 ──────────────────────────────────────────────────
 show_menu() {
-    echo -e "  ${CYAN}部署 & 配置${NC}"
-    echo -e "   ${BOLD}1)${NC} 部署 / 安装节点"
-    echo -e "   ${BOLD}2)${NC} 修改配置 ${DIM}(端口 / 域名 / UUID / SNI / SOCKS5)${NC}"
-    echo -e "   ${BOLD}3)${NC} 节点链接与订阅"
-    echo ""
-    echo -e "  ${CYAN}服务管理${NC}"
-    echo -e "   ${BOLD}4)${NC} 启动     ${BOLD}5)${NC} 停止     ${BOLD}6)${NC} 重启"
-    echo -e "   ${BOLD}7)${NC} 状态     ${BOLD}8)${NC} 日志     ${BOLD}9)${NC} 自启"
-    echo ""
-    echo -e "  ${CYAN}系统维护${NC}"
-    echo -e "  ${BOLD}10)${NC} 更新     ${BOLD}11)${NC} 卸载     ${BOLD}0)${NC} 退出"
-    echo ""
+    menu_section "主菜单"
+    menu_item 1 "节点与协议" "安装 / Reality / Hysteria2 / SOCKS5"
+    menu_item 2 "连接与订阅" "Argo / NAT / 链接"
+    menu_item 3 "服务与诊断" "运行 / 状态 / 日志"
+    menu_item 4 "系统维护" "更新 / 配置同步 / 卸载"
+    menu_back "退出"
+}
+
+node_menu() {
+    local choice
+    local MENU_CONTEXT="节点与协议"
+    while true; do
+        show_banner
+        menu_header "节点与协议"
+        menu_section "部署"
+        menu_item 1 "安装节点"
+        menu_section "协议配置"
+        menu_item 2 "Reality"
+        menu_item 3 "Hysteria2"
+        menu_item 4 "SOCKS5"
+        menu_item 5 "节点身份"
+        menu_back
+        prompt_read choice "  选择 [0-5]: " || return
+        case "$choice" in
+            1) do_primary_install ;;
+            2) do_modify_config reality ;;
+            3) do_modify_config hy2 ;;
+            4) do_modify_config socks ;;
+            5) do_modify_config identity ;;
+            0) return ;;
+            *) warn "无效选项" ;;
+        esac
+    done
+}
+
+connection_menu() {
+    local choice
+    local MENU_CONTEXT="连接与订阅"
+    while true; do
+        show_banner
+        menu_header "连接与订阅"
+        menu_section "隧道与订阅"
+        menu_item 1 "Argo 与订阅配置"
+        menu_item 2 "查看节点链接与订阅"
+        menu_section "公网接入"
+        menu_item 3 "公网 IPv4 与 NAT"
+        menu_back
+        prompt_read choice "  选择 [0-3]: " || return
+        case "$choice" in
+            1) do_modify_config argo ;;
+            2) do_show_links ;;
+            3) do_modify_config network ;;
+            0) return ;;
+            *) warn "无效选项" ;;
+        esac
+    done
+}
+
+service_menu() {
+    local choice
+    local MENU_CONTEXT="服务与诊断"
+    while true; do
+        show_banner
+        menu_header "服务与诊断"
+        menu_section "运行控制"
+        menu_item 1 "启动服务"
+        menu_item 2 "停止服务"
+        menu_item 3 "重启服务"
+        menu_section "检查"
+        menu_item 4 "查看状态"
+        menu_item 5 "查看日志"
+        menu_item 6 "开机自启"
+        menu_back
+        prompt_read choice "  选择 [0-6]: " || return
+        case "$choice" in
+            1) do_start ;; 2) do_stop ;; 3) do_restart ;;
+            4) do_status ;; 5) do_logs ;; 6) do_boot_manage ;;
+            0) return ;;
+            *) warn "无效选项" ;;
+        esac
+    done
+}
+
+maintenance_menu() {
+    local choice
+    local MENU_CONTEXT="系统维护"
+    while true; do
+        show_banner
+        menu_header "系统维护"
+        menu_section "更新"
+        menu_item 1 "更新组件与管理脚本"
+        menu_item 2 "按当前版本同步配置"
+        menu_section "删除"
+        menu_item 3 "卸载" "需再次确认"
+        menu_back
+        prompt_read choice "  选择 [0-3]: " || return
+        case "$choice" in
+            1) do_upgrade ;;
+            2) do_apply_latest || warn "配置同步未完成"; press_enter ;;
+            3) do_uninstall ;;
+            0) return ;;
+            *) warn "无效选项" ;;
+        esac
+    done
 }
 
 main_menu() {
@@ -5195,23 +5397,16 @@ main_menu() {
     while true; do
         show_banner
         show_menu
-        if ! prompt_read choice "  请选择 [0-11]: "; then
+        if ! prompt_read choice "  选择 [0-4]: "; then
             echo ""
             warn "未检测到交互式终端，请在服务器终端直接执行: sbm"
             exit 1
         fi
         case "$choice" in
-            1)  do_primary_install ;;
-            2)  do_modify_config ;;
-            3)  do_show_links ;;
-            4)  do_start ;;
-            5)  do_stop ;;
-            6)  do_restart ;;
-            7)  do_status ;;
-            8)  do_logs ;;
-            9)  do_boot_manage ;;
-            10) do_upgrade ;;
-            11) do_uninstall ;;
+            1)  node_menu ;;
+            2)  connection_menu ;;
+            3)  service_menu ;;
+            4)  maintenance_menu ;;
             0)  echo -e "\n  ${CYAN}Bye!${NC}\n"; exit 0 ;;
             *)  warn "无效选项" ; sleep 0.5 ;;
         esac

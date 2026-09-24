@@ -915,7 +915,8 @@ test_optional_inbounds_follow_feature_state() {
 test_only_primary_deployment_entrypoints_remain() {
     local output check_root_def detect_os_def install_manager_command_def
 
-    assert_contains "$(declare -f main_menu)" "do_primary_install" "main menu installs primary node directly"
+    assert_contains "$(declare -f main_menu)" "node_menu" "main menu opens node category"
+    assert_contains "$(declare -f node_menu)" "do_primary_install" "node category installs primary node"
     assert_not_contains "$(declare -f main_menu)" "do_install" "main menu omits deployment target selector"
     assert_contains "$(declare -f show_menu)" "/ SOCKS5" "main menu exposes SOCKS5 configuration"
     if declare -F do_relay_install >/dev/null || declare -F do_generate_relay_script >/dev/null; then
@@ -1961,7 +1962,7 @@ test_modify_nat_reality_port_with_xray() (
 
     do_modify_config <<< $'1\n\n20012\n\n0\n' > "$tmp/output"
     output=$(<"$tmp/output")
-    assert_contains "$output" '公网 20001 -> 本机 20001' "NAT menu labels both Reality ports"
+    assert_contains "$output" '公网 20001/TCP → 本机 20001/TCP' "NAT menu labels both Reality ports"
     assert_contains "$output" '面板映射需确认' "NAT port confirmation does not claim provider mapping"
     assert_eq 20012 "$REALITY_PORT" "Reality local port persisted after verification"
     assert_eq 20001 "$REALITY_PUBLIC_PORT" "NAT public port not silently changed"
@@ -2111,7 +2112,104 @@ test_install_selected_services_and_failure() (
     assert_contains "$(<"$tmp/output")" '所选服务已启动' "healthy install"
 )
 
+test_menu_navigation_and_actions() (
+    local tmp category expected selected
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    clear() { :; }
+    show_banner() { :; }
+    prompt_read() { read -r "$1"; }
+    do_primary_install() { echo install >> "$tmp/actions"; }
+    do_modify_config() { echo "config:$1" >> "$tmp/actions"; }
+    do_show_links() { echo links >> "$tmp/actions"; }
+    do_start() { echo start >> "$tmp/actions"; }
+    do_stop() { echo stop >> "$tmp/actions"; }
+    do_restart() { echo restart >> "$tmp/actions"; }
+    do_status() { echo status >> "$tmp/actions"; }
+    do_logs() { echo logs >> "$tmp/actions"; }
+    do_boot_manage() { echo boot >> "$tmp/actions"; }
+    do_upgrade() { echo upgrade >> "$tmp/actions"; }
+    do_apply_latest() { echo apply >> "$tmp/actions"; }
+    do_uninstall() { echo uninstall >> "$tmp/actions"; }
+    press_enter() { :; }
+
+    node_menu <<< $'1\n2\n3\n4\n5\n0\n' > "$tmp/node"
+    assert_eq $'install\nconfig:reality\nconfig:hy2\nconfig:socks\nconfig:identity' "$(<"$tmp/actions")" "node menu dispatch"
+    : > "$tmp/actions"
+    connection_menu <<< $'1\n2\n3\n0\n' > "$tmp/connection"
+    assert_eq $'config:argo\nlinks\nconfig:network' "$(<"$tmp/actions")" "connection menu dispatch"
+    : > "$tmp/actions"
+    service_menu <<< $'1\n2\n3\n4\n5\n6\n0\n' > "$tmp/service"
+    assert_eq $'start\nstop\nrestart\nstatus\nlogs\nboot' "$(<"$tmp/actions")" "service menu dispatch"
+    : > "$tmp/actions"
+    maintenance_menu <<< $'1\n2\n3\n0\n' > "$tmp/maintenance"
+    assert_eq $'upgrade\napply\nuninstall' "$(<"$tmp/actions")" "maintenance menu dispatch"
+    assert_contains "$(<"$tmp/node")" '节点与协议' "node breadcrumb"
+    assert_contains "$(<"$tmp/connection")" '公网接入' "connection section"
+    assert_contains "$(<"$tmp/service")" '运行控制' "service section"
+    assert_contains "$(<"$tmp/maintenance")" '系统维护' "maintenance breadcrumb"
+    : > "$tmp/actions"
+    node_menu </dev/null > /dev/null || true
+    [[ ! -s "$tmp/actions" ]] || fail "node menu EOF dispatched an action"
+)
+
+test_modify_menu_categories() (
+    local tmp category expected selected item input
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    clear() { :; }
+    prompt_read() { read -r "$1"; }
+    REALITY_PORT=20012; REALITY_PUBLIC_PORT=20001; NAT_MODE=true
+    REALITY_SNI=example.com; HY2_PORT=8443; HY2_ENABLED=false
+    SOCKS_PORT=20023; SOCKS_ENABLED=false; NODE_NAME=test; UUID=12345678-abcd
+    SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; PUBLIC_IPV4_OVERRIDE=198.51.100.1
+    for category in reality hy2 socks identity argo network; do
+        case "$category" in
+            reality) expected=1 ;; hy2) expected=16 ;; socks) expected=17 ;;
+            identity) expected=5 ;; argo) expected=10 ;; network) expected=15 ;;
+        esac
+        selected=""
+        prompt_modify_action selected "$category" <<< $'99\n1\n' > "$tmp/$category"
+        assert_eq "$expected" "$selected" "$category first action"
+        assert_contains "$(<"$tmp/$category")" '无效选项' "$category invalid choice retry"
+        selected=""
+        prompt_modify_action selected "$category" <<< '0' > /dev/null
+        assert_eq 0 "$selected" "$category return"
+        if prompt_modify_action selected "$category" </dev/null > /dev/null; then
+            fail "$category EOF accepted"
+        fi
+    done
+    assert_contains "$(<"$tmp/reality")" '公网 20001/TCP → 本机 20012/TCP' "NAT port pair in menu"
+    for item in \
+        reality:1:1 reality:2:2 reality:3:6 reality:4:9 reality:5:4 \
+        hy2:1:16 hy2:2:7 hy2:3:8 socks:1:17 \
+        identity:1:5 identity:2:3 \
+        argo:1:10 argo:2:11 argo:3:12 \
+        network:1:15 network:2:14 network:3:13; do
+        IFS=: read -r category input expected <<< "$item"
+        selected=""
+        prompt_modify_action selected "$category" <<< "$input" > /dev/null
+        assert_eq "$expected" "$selected" "$category option $input mapping"
+    done
+    assert_not_contains "$(menu_header '菜单预览')" $'\033' "redirected menu has no ANSI escape"
+)
+
+test_submenus_return_without_action() (
+    prompt_read() { read -r "$1"; }
+    press_enter() { fail "return prompted for another input"; }
+    service_logs() { fail "return read a log"; }
+    service_enable() { fail "return changed boot policy"; }
+    service_disable() { fail "return changed boot policy"; }
+    install_or_upgrade_singbox_package() { fail "return started upgrade"; }
+    do_logs <<< '0' > /dev/null
+    do_boot_manage <<< '0' > /dev/null
+    do_upgrade <<< '0' > /dev/null
+)
+
 test_install_protocol_choices
+test_menu_navigation_and_actions
+test_modify_menu_categories
+test_submenus_return_without_action
 test_reality_listener_validation
 test_bounded_service_restart
 test_modify_nat_reality_port_with_xray

@@ -60,10 +60,13 @@ prompt_install_protocols() {
         *) warn "未确认网络类型，无法设置安装默认协议"; return 1 ;;
     esac
     while true; do
+        menu_header "安装节点 / 2. 选择协议"
+        menu_section "基础协议"
         echo "  网络类型: ${network_mode}"
         echo "  [✓] Reality (基础功能)"
-        echo "  1) Argo"
-        echo "  2) SOCKS5"
+        menu_section "可多选 · 输入 1,2"
+        menu_item 1 "Argo 隧道"
+        menu_item 2 "SOCKS5 代理"
         [[ "$network_mode" == "ipv6-only" ]] && echo "  本地只有 IPv4 时需启用 Argo，并使用 Argo 节点。"
         echo "  输入 1、2 或 1,2 一次选择；Enter 使用默认 ($( [[ "$default_argo" == true ]] && printf 'Reality + Argo' || printf '仅 Reality' ))。"
         prompt_read choice "  请选择协议: " || return 1
@@ -89,7 +92,13 @@ detect_install_network() {
             return 0
         fi
         warn "公网网络检测失败，请重试或手动指定类型。"
-        prompt_read choice "  1) 重试  2) IPv4-only  3) IPv6-only  4) 双栈: " || return 1
+        menu_header "安装节点 / 2. 网络类型"
+        menu_section "检测失败 · 手动指定或重试"
+        menu_item 1 "重新检测"
+        menu_item 2 "IPv4-only"
+        menu_item 3 "IPv6-only"
+        menu_item 4 "双栈"
+        prompt_read choice "  请选择 [1-4]: " || return 1
         case "$choice" in
             1) continue ;;
             2) INSTALL_NETWORK_MODE="ipv4-only"; return 0 ;;
@@ -488,8 +497,8 @@ prompt_port_value() {
 }
 
 show_port_confirmation() {
-    echo ""
-    echo -e "${CYAN}${BOLD}── 端口确认 ──${NC}"
+    menu_header "安装节点 / 3. 端口确认"
+    menu_section "本机监听"
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
     if ! is_hy2_enabled; then
         echo -e "  Hysteria2:    ${DIM}未启用${NC}"
@@ -504,6 +513,7 @@ show_port_confirmation() {
         echo -e "  SOCKS5:       ${DIM}未启用${NC}"
     fi
     if nat_mode_enabled; then
+        menu_section "公网映射 · 需在服务商面板配置"
         echo -e "  NAT Reality:  ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC} ${DIM}(面板映射需确认)${NC}"
         if is_hy2_enabled; then
             echo -e "  NAT Hysteria2:${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
@@ -513,8 +523,10 @@ show_port_confirmation() {
         fi
     fi
     if argo_enabled; then
+        menu_section "订阅"
         echo -e "  订阅服务:     ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(仅本机/Argo 使用)${NC}"
     fi
+    menu_section "放行范围"
     if nat_mode_enabled; then
         echo -e "  本机防火墙:   ${BOLD}${REALITY_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
         echo -e "  服务商面板:   ${BOLD}${REALITY_PUBLIC_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PUBLIC_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PUBLIC_PORT")"
@@ -551,8 +563,8 @@ prompt_nat_mapping_config() {
     REALITY_PUBLIC_PORT="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
     HY2_PUBLIC_PORT="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
     SOCKS_PUBLIC_PORT="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
-    echo ""
-    echo -e "${CYAN}${BOLD}── NAT 公网映射 ──${NC}"
+    menu_header "安装节点 / 3. NAT 公网映射"
+    menu_section "公网 → 本机"
     echo -e "  检测到公网 IPv4 不在本机网卡，按 NAT VPS 配置。"
     echo -e "  公网 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
     prompt_port_value REALITY_PUBLIC_PORT "NAT Reality 公网映射" "$REALITY_PUBLIC_PORT" \
@@ -615,13 +627,12 @@ prompt_public_ipv4_override_optional() {
 prompt_public_ipv4_override() {
     local choice input
 
-    echo ""
-    echo -e "${CYAN}${BOLD}── 直连公网 IPv4 覆盖 ──${NC}"
-    echo -e "  当前覆盖值: ${BOLD}$(public_ipv4_override_label)${NC}"
+    menu_header "连接与订阅 / 公网与 NAT / IPv4 覆盖"
+    menu_section "当前覆盖值: $(public_ipv4_override_label)"
     echo -e "  ${DIM}该值仅用于生成 Reality/Hysteria2 直连分享链接和订阅内容，不会修改服务端监听配置。${NC}"
-    echo -e "  1) 设置/修改覆盖 IPv4"
-    echo -e "  2) 清除覆盖，恢复自动检测"
-    echo -e "  0) 取消"
+    menu_item 1 "设置或修改覆盖 IPv4"
+    menu_item 2 "清除覆盖并恢复自动检测"
+    menu_back "取消"
     prompt_read choice "  请选择 [0]: " || return 1
     choice=${choice:-0}
 
@@ -665,21 +676,21 @@ prompt_ipv4_link_selection_if_multiple() {
         return 1
     fi
 
-    echo ""
-    echo -e "${CYAN}${BOLD}── 多 IPv4 链接策略 ──${NC}"
+    menu_header "连接与订阅 / 公网与 NAT / IPv4 链接策略"
+    menu_section "检测到多个 IPv4"
     echo -e "  检测到多个 IPv4: ${BOLD}$(public_ipv4_display)${NC}"
     index=1
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
         if (( index == 1 )); then
-            echo -e "  ${index}) 仅启用 ${ip} ${GREEN}推荐${NC}"
+            menu_item "$index" "仅启用 ${ip}" "推荐"
         else
-            echo -e "  ${index}) 仅启用 ${ip}"
+            menu_item "$index" "仅启用 ${ip}"
         fi
         index=$((index + 1))
     done <<< "$PUBLIC_IPV4_LIST"
     all_option=$index
-    echo -e "  ${all_option}) 全部启用"
+    menu_item "$all_option" "全部启用"
 
     prompt_read input "  请选择 [1]: " || input=1
     input=${input:-1}
@@ -701,7 +712,7 @@ show_external_access_requirements() {
     local access_mode
     access_mode=$(detect_external_access_mode)
 
-    echo -e "${CYAN}${BOLD}── 外部放行提示 ──${NC}"
+    menu_section "外部放行提示"
     case "$access_mode" in
         ipv6-only)
             echo -e "  检测到 IPv6-only VPS；Reality/Hysteria2 通过 Argo 提供外部入口。"
