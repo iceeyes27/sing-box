@@ -12,6 +12,7 @@ modules=(
     03-config.sh
     04-argo-subscription.sh
     05-links.sh
+    05-verify.sh
     06-actions-menu.sh
 )
 

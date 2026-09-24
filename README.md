@@ -55,7 +55,7 @@ sbm
   主菜单
    1) 节点与协议     安装 / Reality / Hysteria2 / SOCKS5 / 节点身份
    2) 连接与订阅     Argo / NAT / IPv4 / 链接与订阅
-   3) 服务与诊断     启动 / 停止 / 重启 / 状态 / 日志 / 自启
+   3) 服务与诊断     启动 / 停止 / 重启 / 状态 / 日志 / 自启 / 协议自检
    4) 系统维护       更新 / 配置同步 / 卸载
    0) 退出
 ```
@@ -71,6 +71,7 @@ sbm resni           # 手动重新选择 Reality 伪装域名 (SNI) 并重启生
 sbm apply           # 升级脚本后一键同步：按新版本模板重写配置并重启、刷新链接
 sbm restart         # 重启系统后台的所有相关运行服务
 sbm status          # 查看当前各个核心组件的系统运行状态
+sbm verify          # 对已启用协议进行限时认证与流量自检（不代替外部客户端测试）
 sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 ```
 
@@ -114,13 +115,19 @@ sbm install
 
 脚本先检测网络类型并显示协议选择页；输入 `1,2` 可同时启用 Argo 与 SOCKS5，输入 `1` 或 `2` 单选，按 Enter 使用当前网络类型的默认组合。随后配置 Reality/SOCKS5 端口、NAT 公网映射、Reality 伪装域名、节点名称，以及已选的 Argo 模式，并自动生成 UUID、Reality 密钥与订阅凭据。
 
+新安装仅由 sing-box 承载 Reality；旧配置中已部署的 Xray Reality 继续保留原有管理路径。临时 Argo 隧道遇到已有 `.cloudflared/config.yaml` 时会停止配置并提示冲突，不会改动该文件。
+
 ### 步骤 3：查看链接
 
 安装完成后按已启用功能输出节点链接；启用 Argo 时提供 HTTPS 订阅地址。SOCKS5 可在安装时勾选，也可在“节点与协议”→“SOCKS5”中启用。
 
+安装完成及配置更新后会对已启用协议尝试限时认证与流量测试；`sbm verify` 可随时重新执行。显示“本机通过”不代表 NAT 面板映射或外部客户端通过，公网仍需从另一网络实际验证。Hysteria2 默认未启用，未启用时不展示端口和密码。
+
 ```bash
 sbm links
 ```
+
+开发环境具备网络、`openssl` 与 `python3` 时，可执行 `bash tests/protocol-integration.sh`：使用官方 sing-box 二进制检查生成配置，并在独立临时目录中验证 Reality、Hysteria2 和 SOCKS5 的本机认证与流量；Argo 仍需有真实隧道和外部客户端验证。
 
 ## 🛡️ 安全建议
 

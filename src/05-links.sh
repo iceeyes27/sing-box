@@ -637,11 +637,15 @@ subscription_local_url() {
 show_subscription_url() {
     local public_subscription_url local_subscription_url
 
-    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_enabled || return
+    [[ -n "${GENERATED_SUBSCRIPTION_RAW:-}" ]] && argo_enabled || return 0
+    if ! service_is_active sbm-subscription || ! service_is_active argo-tunnel; then
+        warn "订阅服务或 Argo 隧道未运行，不展示未经验证的订阅地址"
+        return 0
+    fi
 
     menu_header "连接与订阅 / 订阅地址"
     if public_subscription_url=$(subscription_https_url); then
-        echo -e "${GREEN}${BOLD}HTTPS 订阅（导入 v2rayN / v2rayNG）${NC}"
+        echo -e "${GREEN}${BOLD}HTTPS 订阅地址（公网可用性待验证）${NC}"
         echo -e "${YELLOW}${BOLD}${public_subscription_url}${NC}"
     else
         echo -e "${DIM}Argo 域名尚未就绪，仅提供本机调试地址。${NC}"
@@ -708,7 +712,7 @@ generate_and_show_links() {
     else
         echo -e "  Argo 模式:     ${DIM}未启用${NC}"
     fi
-    if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
+    if is_hy2_enabled && [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
         echo -e "  Hysteria2 端口: ${BOLD}$(hy2_share_port)${NC}$(nat_mode_enabled && printf ' (本机监听 %s)' "$HY2_PORT")"
         echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
     fi

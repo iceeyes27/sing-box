@@ -10,6 +10,18 @@ ensure_argo_dependencies() {
     install_cloudflared
 }
 
+quick_tunnel_config_conflict() {
+    local config
+    for config in "${HOME:-/root}/.cloudflared/config.yaml" \
+        "/root/.cloudflared/config.yaml" "/etc/cloudflared/config.yaml" "/.cloudflared/config.yaml"; do
+        if [[ -f "$config" ]]; then
+            warn "临时隧道与已有 cloudflared 配置冲突: ${config}；未修改该文件"
+            return 0
+        fi
+    done
+    return 1
+}
+
 write_argo_service() {
     local cloudflared_bin exec_cmd argo_origin_url systemd_hardening edge_ip_version="auto"
     if ! argo_enabled; then
@@ -28,6 +40,7 @@ write_argo_service() {
         write_env_file "$ARGO_ENV_FILE" ARGO_TOKEN "$ARGO_TOKEN" TUNNEL_TOKEN "$ARGO_TOKEN"
         exec_cmd="tunnel --protocol http2 --no-autoupdate --edge-ip-version ${edge_ip_version} run"
     else
+        quick_tunnel_config_conflict && return 1
         info "使用 Argo 临时隧道 (trycloudflare.com)"
         rm -f "$ARGO_ENV_FILE"
         exec_cmd="tunnel --url ${argo_origin_url} --no-autoupdate --protocol http2 --edge-ip-version ${edge_ip_version}"
@@ -364,12 +377,21 @@ refresh_argo_runtime() {
         return 0
     fi
 
+    if argo_quick_enabled && quick_tunnel_config_conflict; then
+        return 1
+    fi
     ensure_argo_dependencies || return 1
+    # 源站先可用，再启动隧道并校验临时域名。
+    ensure_subscription_service_if_enabled || return 1
     write_argo_service || return 1
     if service_is_active argo-tunnel; then
         service_restart argo-tunnel || return 1
     elif ! service_enable_now argo-tunnel; then
         warn "argo-tunnel 重启失败，无法更新 Argo 订阅链接"
+        return 1
+    fi
+    if ! service_is_active argo-tunnel; then
+        warn "Argo 隧道未运行，未更新订阅链接"
         return 1
     fi
 
@@ -392,7 +414,12 @@ update_argo_subscription_links() {
     fi
     refresh_argo_runtime || return 1
     generate_and_show_links
-    ensure_subscription_service_if_enabled || warn "订阅服务启动失败，请检查 python3 或服务日志"
-    success "Argo 订阅链接已更新"
+    if [[ -z "${GENERATED_ARGO_LINKS:-}" ]]; then
+        warn "Argo 节点链接未通过探测，链接更新未完成"
+        return 1
+    fi
+    service_is_active argo-tunnel || { warn "Argo 隧道未运行，链接更新未完成"; return 1; }
+    service_is_active sbm-subscription || { warn "订阅服务未运行，链接更新未完成"; return 1; }
+    success "Argo 订阅链接已更新；公网连接仍需验证"
     show_subscription_url
 }

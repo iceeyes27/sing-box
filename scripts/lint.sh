@@ -11,4 +11,4 @@ fi
 
 # install.sh is generated from src/, so lint the generated release artifact plus tests/tooling.
 # Use error-level gating first; warning-level cleanup can be tightened once legacy findings are triaged.
-shellcheck -S error install.sh tests/regression.sh scripts/*.sh
+shellcheck -S error install.sh tests/regression.sh tests/protocol-integration.sh scripts/*.sh

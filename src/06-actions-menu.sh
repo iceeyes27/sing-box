@@ -6,6 +6,9 @@
 do_primary_install() {
     local INSTALL_NETWORK_MODE="" argo_ready=true subscription_ready=true
     menu_header "安装节点 / 1. 准备环境"
+    if [[ "${REALITY_BACKEND:-singbox}" != "singbox" ]]; then
+        error "新安装仅支持 sing-box 承载 Reality；已有 Xray 配置仍可继续管理"
+    fi
     info "开始完整安装..."
     separator
 
@@ -119,6 +122,9 @@ do_primary_install() {
         fi
     fi
     if argo_enabled; then
+        if argo_quick_enabled && quick_tunnel_config_conflict; then
+            error "临时 Argo 隧道配置冲突，安装已停止"
+        fi
         if ! ensure_argo_dependencies; then
             error "Argo 依赖安装失败，所选协议组合未完成部署"
         fi
@@ -129,7 +135,9 @@ do_primary_install() {
 
     write_singbox_config
     write_singbox_service
-    argo_enabled && write_argo_service
+    if argo_enabled; then
+        write_argo_service || error "Argo 隧道配置失败，安装已停止"
+    fi
 
     # 启动 sing-box
     info "启动 sing-box..."
@@ -186,6 +194,7 @@ do_primary_install() {
     # 显示链接
     generate_and_show_links
     show_subscription_url
+    verify_enabled_protocols || warn "部分协议未通过服务端认证测试；公网连接尚未验证"
 
     press_enter
 }
@@ -777,20 +786,26 @@ do_modify_config() {
                     restore_runtime_params "${old_runtime_params[@]}"
                     save_params
                     if argo_enabled; then
-                        write_argo_service
-                        service_enable_now argo-tunnel 2>/dev/null || true
+                        if ensure_subscription_service_if_enabled && write_argo_service; then
+                            service_enable_now argo-tunnel 2>/dev/null || warn "原 Argo 服务未恢复运行"
+                        else
+                            warn "原 Argo 服务未恢复运行"
+                        fi
                     else
                         service_stop argo-tunnel 2>/dev/null || true
                         service_disable argo-tunnel 2>/dev/null || true
                     fi
-                    warn "Argo 配置更新失败，已恢复原配置"
+                    warn "Argo 配置更新失败，已恢复原参数；请检查服务运行状态"
                     press_enter
                     continue
                 fi
             fi
             generate_and_show_links
-            ensure_subscription_service_if_enabled || warn "订阅服务启动失败，请检查 python3 或服务日志"
+            if ! service_is_active sbm-subscription && argo_enabled; then
+                warn "订阅服务未运行，请检查 python3 或服务日志"
+            fi
             show_subscription_url
+            verify_enabled_protocols || warn "部分协议未通过服务端认证测试；公网连接尚未验证"
             press_enter
         fi
     done
@@ -800,10 +815,10 @@ do_modify_config() {
 do_show_links() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
+    ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"
     refresh_argo_domain_if_needed
 
     generate_and_show_links
-    ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"
     show_subscription_url
     press_enter
 }
@@ -812,16 +827,23 @@ do_show_links() {
 do_start() {
     menu_header "服务与诊断 / 启动服务"
     info "启动服务..."
-    service_start sing-box && success "sing-box 已启动" || warn "sing-box 启动失败"
+    local core_ready=true
+    service_start sing-box && success "sing-box 已启动" || { core_ready=false; warn "sing-box 启动失败"; }
     if load_params; then
+        # 临时隧道的域名检查会访问源站，订阅网关必须先就绪。
+        local subscription_ready=true
+        ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅服务启动失败"; }
         if argo_enabled; then
-            service_start argo-tunnel && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
-            refresh_argo_domain_if_needed
+            if [[ "$subscription_ready" == "true" && "$core_ready" == "true" ]]; then
+                service_start argo-tunnel && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
+                refresh_argo_domain_if_needed
+            else
+                warn "sing-box 或订阅网关未就绪，未启动 Argo 隧道"
+            fi
         fi
         save_params
         build_share_links
         write_subscription_assets
-        ensure_subscription_service_if_enabled || warn "订阅服务启动失败"
     fi
     press_enter
 }
@@ -838,19 +860,25 @@ do_stop() {
 do_restart() {
     menu_header "服务与诊断 / 重启服务"
     info "重启服务..."
-    service_restart sing-box && success "sing-box 已重启" || warn "sing-box 重启失败"
+    local core_ready=true
+    service_restart sing-box && success "sing-box 已重启" || { core_ready=false; warn "sing-box 重启失败"; }
     if load_params; then
+        local subscription_ready=true
+        ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅服务重启失败"; }
         if argo_enabled; then
-            service_restart argo-tunnel && success "argo-tunnel 已重启" || warn "argo-tunnel 重启失败"
-            if argo_quick_enabled; then
-                sleep 3
-                fetch_argo_domain || warn "Argo 已重启，但尚未取得新的临时域名"
+            if [[ "$subscription_ready" == "true" && "$core_ready" == "true" ]]; then
+                service_restart argo-tunnel && success "argo-tunnel 已重启" || warn "argo-tunnel 重启失败"
+                if argo_quick_enabled; then
+                    sleep 3
+                    fetch_argo_domain || warn "Argo 已重启，但尚未取得新的临时域名"
+                fi
+            else
+                warn "sing-box 或订阅网关未就绪，未重启 Argo 隧道"
             fi
         fi
         save_params
         build_share_links
         write_subscription_assets
-        ensure_subscription_service_if_enabled || warn "订阅服务重启失败"
         argo_enabled && [[ -n "${ARGO_DOMAIN:-}" ]] && info "Argo 域名: ${ARGO_DOMAIN}"
     fi
     press_enter
@@ -1015,9 +1043,9 @@ do_reoptimize_reality_sni() {
     fi
 
     success "Reality 伪装域名已更新为: ${REALITY_SNI}"
+    ensure_subscription_service_if_enabled || warn "订阅服务启动失败"
     refresh_argo_domain_if_needed
     generate_and_show_links
-    ensure_subscription_service_if_enabled || warn "订阅服务启动失败"
     show_subscription_url
     return 0
 }
@@ -1068,7 +1096,6 @@ do_apply_latest() {
     success "配置已按 v${SCRIPT_VERSION} 同步并重启"
     refresh_argo_runtime || return 1
     generate_and_show_links
-    ensure_subscription_service_if_enabled || warn "订阅服务启动失败"
     show_subscription_url
     info "请在客户端重新导入上方订阅 / 链接以获得最新格式。"
     return 0
@@ -1191,9 +1218,9 @@ do_upgrade() {
                 info "如需让服务端配置使用当前稳定模板，升级后执行: sbm apply"
                 # 仅刷新链接显示 (不重写配置、不重启)
                 if load_params; then
+                    ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"
                     refresh_argo_domain_if_needed
                     generate_and_show_links
-                    ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"
                     show_subscription_url
                 fi
                 echo ""
@@ -1350,11 +1377,13 @@ service_menu() {
         menu_item 4 "查看状态"
         menu_item 5 "查看日志"
         menu_item 6 "开机自启"
+        menu_item 7 "协议自检" "认证与流量测试；公网仍需外部验证"
         menu_back
-        prompt_read choice "  选择 [0-6]: " || return
+        prompt_read choice "  选择 [0-7]: " || return
         case "$choice" in
             1) do_start ;; 2) do_stop ;; 3) do_restart ;;
             4) do_status ;; 5) do_logs ;; 6) do_boot_manage ;;
+            7) do_verify || warn "协议自检未通过"; press_enter ;;
             0) return ;;
             *) warn "无效选项" ;;
         esac
@@ -1425,7 +1454,7 @@ main() {
 
     case "${1:-}" in
         install)     do_primary_install ;;
-        links|sub)   load_params && { refresh_argo_domain_if_needed; generate_and_show_links; ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"; show_subscription_url; } || warn "未安装" ;;
+        links|sub)   if load_params; then ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"; refresh_argo_domain_if_needed; generate_and_show_links; show_subscription_url; else warn "未安装"; fi ;;
         start)       do_start ;;
         stop)        do_stop ;;
         restart)     do_restart ;;
@@ -1433,6 +1462,7 @@ main() {
         apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
         cfopt|refresh-cf|cfopt-auto) warn "CF 优选现已在 links/sub 命令中自动执行" ;;
         status)      do_status ;;
+        verify)      do_verify ;;
         uninstall)   do_uninstall ;;
         --help|-h)
             echo "用法: bash $0 [命令]"
@@ -1448,6 +1478,7 @@ main() {
             echo "  resni           重新优选 Reality 伪装域名(SNI)并重启生效"
             echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
             echo "  status          查看状态"
+            echo "  verify          对启用协议执行限时认证与流量测试"
             echo "  uninstall       卸载"
             exit 0
             ;;

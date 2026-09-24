@@ -1504,8 +1504,9 @@ test_subscription_gateway_uses_local_https_origin() {
     rm -rf "$tmp"
 }
 
-test_subscription_url_prefers_https_argo() {
+test_subscription_url_prefers_https_argo() (
     local output
+    service_is_active() { [[ "$1" == "sbm-subscription" || "$1" == "argo-tunnel" ]]; }
 
     GENERATED_SUBSCRIPTION_RAW="vless://uuid@example.com:443"
     ARGO_ENABLED="true"
@@ -1520,7 +1521,11 @@ test_subscription_url_prefers_https_argo() {
     assert_contains "$output" "https://sub.example.com/sub/sub-token" "HTTPS subscription URL"
     assert_contains "$output" "http://127.0.0.1:24630/sub/sub-token" "local debug subscription URL"
     assert_not_contains "$output" "http://198.51.100.10:24630" "public HTTP subscription URL"
-}
+
+    service_is_active() { [[ "$1" == "sbm-subscription" ]]; }
+    output=$(show_subscription_url)
+    assert_not_contains "$output" "https://sub.example.com" "inactive tunnel subscription URL hidden"
+)
 
 test_argo_link_follows_enabled_mode_and_uses_own_domain() {
     UUID="uuid-1"
@@ -1782,7 +1787,7 @@ test_socks5_port_conflicts_are_rejected() {
     eval "$assert_port_available_def"
 }
 
-test_subscription_page_is_final_section() {
+test_subscription_page_is_final_section() (
     local output subscription_line config_line
     local tmp
     local build_share_links_def show_external_access_requirements_def write_subscription_assets_def
@@ -1802,6 +1807,7 @@ test_subscription_page_is_final_section() {
     ARGO_DOMAIN="sub.example.com"
     WS_PATH="/abcd1234"
     HY2_PORT="443"
+    HY2_ENABLED=false
     HY2_PASSWORD="hy2-password"
     SUB_TOKEN="sub-token"
     LINK_FILE="${tmp}/share-links.txt"
@@ -1820,6 +1826,7 @@ test_subscription_page_is_final_section() {
     write_subscription_assets() {
         :
     }
+    service_is_active() { [[ "$1" == "sbm-subscription" || "$1" == "argo-tunnel" ]]; }
 
     output=$(generate_and_show_links; echo "deployment complete"; show_subscription_url)
     subscription_line=$(printf '%s\n' "$output" | grep -n "订阅地址" | tail -n1 | cut -d: -f1)
@@ -1827,6 +1834,7 @@ test_subscription_page_is_final_section() {
 
     [[ -n "$subscription_line" && -n "$config_line" ]] || fail "subscription-final output markers missing"
     (( config_line < subscription_line )) || fail "subscription URL page is not shown last"
+    assert_not_contains "$output" 'Hysteria2 密码:' "disabled Hysteria2 credentials hidden"
     [[ "$(printf '%s\n' "$output" | tail -n1)" == *"http://127.0.0.1:24630/sub/sub-token"* ]] || fail "subscription page is not the final output"
 
     unset -f build_share_links show_external_access_requirements write_subscription_assets
@@ -1834,7 +1842,7 @@ test_subscription_page_is_final_section() {
     eval "$show_external_access_requirements_def"
     eval "$write_subscription_assets_def"
     rm -rf "$tmp"
-}
+)
 
 test_xray_reality_sni_config_update() {
     local tmp
@@ -2110,6 +2118,17 @@ test_install_selected_services_and_failure() (
     failed_service=none
     do_primary_install <<< '1,2' >"$tmp/output" || fail "healthy selected services rejected"
     assert_contains "$(<"$tmp/output")" '所选服务已启动' "healthy install"
+
+    HOME="$tmp"
+    mkdir -p "$tmp/.cloudflared"
+    printf 'tunnel: existing\n' > "$tmp/.cloudflared/config.yaml"
+    ensure_argo_dependencies() { fail "conflicting quick tunnel installed dependencies"; }
+    write_singbox_config() { fail "conflicting quick tunnel wrote service config"; }
+    if (do_primary_install <<< '1,2') >"$tmp/output" 2>&1; then
+        fail "new install accepted conflicting quick tunnel config"
+    fi
+    assert_contains "$(<"$tmp/output")" '临时 Argo 隧道配置冲突' "install conflict reported"
+    assert_eq 'tunnel: existing' "$(<"$tmp/.cloudflared/config.yaml")" "install conflict preserved config"
 )
 
 test_menu_navigation_and_actions() (
@@ -2128,6 +2147,7 @@ test_menu_navigation_and_actions() (
     do_status() { echo status >> "$tmp/actions"; }
     do_logs() { echo logs >> "$tmp/actions"; }
     do_boot_manage() { echo boot >> "$tmp/actions"; }
+    do_verify() { echo verify >> "$tmp/actions"; }
     do_upgrade() { echo upgrade >> "$tmp/actions"; }
     do_apply_latest() { echo apply >> "$tmp/actions"; }
     do_uninstall() { echo uninstall >> "$tmp/actions"; }
@@ -2139,8 +2159,8 @@ test_menu_navigation_and_actions() (
     connection_menu <<< $'1\n2\n3\n0\n' > "$tmp/connection"
     assert_eq $'config:argo\nlinks\nconfig:network' "$(<"$tmp/actions")" "connection menu dispatch"
     : > "$tmp/actions"
-    service_menu <<< $'1\n2\n3\n4\n5\n6\n0\n' > "$tmp/service"
-    assert_eq $'start\nstop\nrestart\nstatus\nlogs\nboot' "$(<"$tmp/actions")" "service menu dispatch"
+    service_menu <<< $'1\n2\n3\n4\n5\n6\n7\n0\n' > "$tmp/service"
+    assert_eq $'start\nstop\nrestart\nstatus\nlogs\nboot\nverify' "$(<"$tmp/actions")" "service menu dispatch"
     : > "$tmp/actions"
     maintenance_menu <<< $'1\n2\n3\n0\n' > "$tmp/maintenance"
     assert_eq $'upgrade\napply\nuninstall' "$(<"$tmp/actions")" "maintenance menu dispatch"
@@ -2206,10 +2226,187 @@ test_submenus_return_without_action() (
     do_upgrade <<< '0' > /dev/null
 )
 
+test_new_install_rejects_missing_xray_setup() (
+    REALITY_BACKEND=xray
+    install_deps() { fail "Xray-only new install changed system before rejection"; }
+    local output
+    output=$(do_primary_install 2>&1) && fail "new install accepted an unsupported Xray backend"
+    assert_contains "$output" '新安装仅支持 sing-box 承载 Reality' "Xray backend rejection"
+)
+
+test_argo_gateway_precedes_tunnel_and_failure_is_truthful() (
+    local tmp output tunnel_started=false
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    ARGO_ENABLED=true; ARGO_TOKEN=fixed-token; ARGO_DOMAIN=argo.example.com
+    ensure_argo_dependencies() { :; }
+    ensure_subscription_service_if_enabled() { echo gateway >> "$tmp/order"; }
+    write_argo_service() { echo tunnel-config >> "$tmp/order"; }
+    service_is_active() { [[ "$1" == argo-tunnel && "$tunnel_started" == true ]]; }
+    service_enable_now() { echo tunnel-start >> "$tmp/order"; tunnel_started=true; }
+    save_params() { :; }
+    refresh_argo_runtime > /dev/null
+    assert_eq $'gateway\ntunnel-config\ntunnel-start' "$(<"$tmp/order")" "gateway startup precedes tunnel"
+
+    ensure_subscription_service_if_enabled() { return 1; }
+    : > "$tmp/order"
+    if refresh_argo_runtime > /dev/null; then fail "tunnel proceeded without gateway"; fi
+    [[ ! -s "$tmp/order" ]] || fail "tunnel changed after gateway failure"
+
+    refresh_argo_runtime() { :; }
+    generate_and_show_links() { GENERATED_ARGO_LINKS='vless://test@argo.example.com:443'; }
+    service_is_active() { [[ "$1" == argo-tunnel ]]; }
+    show_subscription_url() { fail "inactive subscription was presented"; }
+    if output=$(update_argo_subscription_links); then fail "inactive subscription update returned success"; fi
+    [[ "$output" != *'Argo 订阅链接已更新'* ]] || fail "inactive subscription reported success"
+    generate_and_show_links() { GENERATED_ARGO_LINKS=""; }
+    service_is_active() { :; }
+    if output=$(update_argo_subscription_links); then fail "missing Argo link update returned success"; fi
+    assert_contains "$output" 'Argo 节点链接未通过探测' "missing Argo link reported"
+)
+
+test_start_restart_wait_for_subscription() (
+    local test_dir
+    test_dir=$(mktemp -d)
+    trap 'rm -rf "$test_dir"' EXIT
+    ARGO_ENABLED=true; ARGO_TOKEN=""; ARGO_DOMAIN=quick.trycloudflare.com
+    load_params() { :; }
+    service_start() { echo "start:$1" >> "$test_dir/order"; }
+    service_restart() { echo "restart:$1" >> "$test_dir/order"; }
+    ensure_subscription_service_if_enabled() { echo gateway >> "$test_dir/order"; }
+    refresh_argo_domain_if_needed() { :; }
+    fetch_argo_domain() { :; }
+    save_params() { :; }
+    build_share_links() { :; }
+    write_subscription_assets() { :; }
+    press_enter() { :; }
+    sleep() { :; }
+    do_start > /dev/null
+    assert_eq $'start:sing-box\ngateway\nstart:argo-tunnel' "$(<"$test_dir/order")" "start order"
+    : > "$test_dir/order"
+    do_restart > /dev/null
+    assert_eq $'restart:sing-box\ngateway\nrestart:argo-tunnel' "$(<"$test_dir/order")" "restart order"
+    : > "$test_dir/order"
+    ensure_subscription_service_if_enabled() { return 1; }
+    do_start > /dev/null
+    assert_eq 'start:sing-box' "$(<"$test_dir/order")" "gateway failure skips tunnel"
+)
+
+test_quick_tunnel_rejects_conflicting_config() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    HOME="$tmp"
+    mkdir -p "$tmp/.cloudflared"
+    printf 'tunnel: existing\n' > "$tmp/.cloudflared/config.yaml"
+    ARGO_ENABLED=true; ARGO_TOKEN=""; ARGO_DOMAIN=""
+    ARGO_SERVICE="$tmp/argo.service"; ARGO_ENV_FILE="$tmp/argo.env"
+    if write_argo_service > /dev/null; then fail "quick tunnel accepted conflicting config.yaml"; fi
+    [[ ! -f "$ARGO_SERVICE" ]] || fail "conflicting quick tunnel service was written"
+    ensure_argo_dependencies() { fail "conflicting quick tunnel installed dependencies on refresh"; }
+    ensure_subscription_service_if_enabled() { fail "conflicting quick tunnel started gateway on refresh"; }
+    if refresh_argo_runtime > /dev/null; then fail "refresh accepted conflicting config.yaml"; fi
+    assert_eq 'tunnel: existing' "$(<"$tmp/.cloudflared/config.yaml")" "existing cloudflared config preserved"
+)
+
+test_protocol_verification_uses_real_client_configuration() (
+    local test_dir protocol
+    test_dir=$(mktemp -d)
+    trap 'rm -rf "$test_dir"' EXIT
+    REALITY_PORT=20444; SOCKS_PORT=20445; HY2_PORT=20446; WS_PORT=8080; SUBSCRIPTION_PORT=24630
+    REALITY_SNI=example.com; PUBLIC_KEY=public-key; SHORT_ID=abcd; UUID=test-uuid
+    HY2_SNI=example.com; HY2_PASSWORD=hy2-password
+    SOCKS_USERNAME=user; SOCKS_PASSWORD=secret
+    ARGO_DOMAIN=argo.example.com; WS_PATH=/abcd
+    select_random_available_tcp_port() { [[ " $* " == *' 39000 '* ]] && echo 39001 || echo 39000; }
+    random_hex() { echo verification-token; }
+    timeout() {
+        shift
+        if [[ "$1" == sing-box && "$2" == check ]]; then "$@"; fi
+    }
+    sleep() { :; }
+    curl() { printf 'verification-token'; }
+    sing-box() {
+        if [[ "$1" == check ]]; then cp "$3" "$test_dir/${protocol}.json"; fi
+    }
+    for protocol in reality hy2 socks argo; do
+        verify_protocol_loopback "$protocol" argo.example.com || fail "$protocol local test harness failed"
+        python3 -m json.tool "$test_dir/${protocol}.json" >/dev/null || fail "$protocol client config is invalid JSON"
+        assert_contains "$(<"$test_dir/${protocol}.json")" '"type":"socks","tag":"test-in"' "$protocol test proxy inbound"
+    done
+    assert_contains "$(<"$test_dir/reality.json")" '"public_key":"public-key"' "Reality authentication input"
+    assert_contains "$(<"$test_dir/hy2.json")" '"password":"hy2-password"' "Hysteria2 authentication input"
+    assert_contains "$(<"$test_dir/socks.json")" '"username":"user"' "SOCKS5 authentication input"
+    assert_contains "$(<"$test_dir/argo.json")" '"headers":{"Host":"argo.example.com"}' "Argo Host uses tunnel domain"
+    assert_contains "$(<"$test_dir/argo.json")" '"fingerprint":"chrome"' "Argo TLS fingerprint matches share link"
+)
+
+test_enabled_protocols_verify_only_active_features() (
+    local test_dir result
+    test_dir=$(mktemp -d)
+    trap 'rm -rf "$test_dir"' EXIT
+    CONFIG_FILE="$test_dir/config.json"
+    printf '{}' > "$CONFIG_FILE"
+    ARGO_ENABLED=false; HY2_ENABLED=false; SOCKS_ENABLED=false; REALITY_BACKEND=singbox
+    sing-box() { :; }
+    timeout() { :; }
+    service_is_active() { :; }
+    verify_protocol_loopback() { printf '%s\n' "$1" >> "$test_dir/calls"; }
+    verify_subscription_payload() { fail "disabled subscription was tested"; }
+    verify_enabled_protocols > /dev/null
+    assert_eq reality "$(<"$test_dir/calls")" "disabled protocols skipped"
+
+    HY2_ENABLED=true; SOCKS_ENABLED=true; ARGO_ENABLED=true; ARGO_TOKEN=fixed-token
+    ARGO_DOMAIN=argo.example.com; ARGO_BEST_CF_DOMAIN_IPV4=cf.example.com
+    ARGO_BEST_CF_DOMAIN_IPV6=""
+    verify_subscription_payload() { :; }
+    : > "$test_dir/calls"
+    verify_enabled_protocols > /dev/null
+    assert_eq $'reality\nhy2\nsocks\nargo' "$(<"$test_dir/calls")" "all enabled protocols tested"
+    verify_protocol_loopback() { [[ "$1" != socks ]]; }
+    if verify_enabled_protocols > /dev/null; then fail "failed SOCKS5 authentication was reported healthy"; fi
+)
+
+test_subscription_payload_requires_matching_data() (
+    local test_dir
+    test_dir=$(mktemp -d)
+    trap 'rm -rf "$test_dir"' EXIT
+    SUBSCRIPTION_FILE="$test_dir/subscription"
+    printf 'valid-payload' > "$SUBSCRIPTION_FILE"
+    ARGO_DOMAIN=argo.example.com; SUB_TOKEN=token
+    curl() {
+        local output_file=""
+        while (( $# > 0 )); do
+            if [[ "$1" == -o ]]; then shift; output_file="$1"; fi
+            shift
+        done
+        cp "$SUBSCRIPTION_FILE" "$output_file"
+    }
+    verify_subscription_payload || fail "matching HTTPS subscription response rejected"
+    curl() {
+        local output_file=""
+        while (( $# > 0 )); do
+            if [[ "$1" == -o ]]; then shift; output_file="$1"; fi
+            shift
+        done
+        printf 'other-data' > "$output_file"
+    }
+    if verify_subscription_payload; then fail "mismatched subscription response accepted"; fi
+    SUB_TOKEN=$'bad\nurl = "https://invalid.example/"'
+    if verify_subscription_payload; then fail "unsafe subscription token accepted in curl config"; fi
+)
+
 test_install_protocol_choices
 test_menu_navigation_and_actions
 test_modify_menu_categories
 test_submenus_return_without_action
+test_new_install_rejects_missing_xray_setup
+test_argo_gateway_precedes_tunnel_and_failure_is_truthful
+test_start_restart_wait_for_subscription
+test_quick_tunnel_rejects_conflicting_config
+test_protocol_verification_uses_real_client_configuration
+test_enabled_protocols_verify_only_active_features
+test_subscription_payload_requires_matching_data
 test_reality_listener_validation
 test_bounded_service_restart
 test_modify_nat_reality_port_with_xray
