@@ -101,23 +101,28 @@ ARGO_CF_DOMAINS=(
     "saas.sin.fan"
 )
 
-# Reality 候选必须是人工审核的直连站点。共享 CDN 域名（尤其 Cloudflare）
-# 不得加入。运行时会拒绝 Cloudflare 地址段；更新列表前必须重新核查 DNS、
-# 证书、TLS 1.3 和 HTTP/2。
+# Reality 候选通过实际 TLS 1.3 + HTTP/2 握手筛选，按成功率与延迟择优。
+# 不依赖第三方 ASN 查询，也不限制正常的 CNAME、多 IP 或 IPv6 解析。
+# Cloudflare 域名不列入候选，实际连接到 Cloudflare 地址的探测仍会被排除。
 REALITY_SNI_LIST=(
     "www.nazhumi.com"
     "portal.citygrainla.com"
+    "www.microsoft.com"
+    "www.apple.com"
+    "gateway.icloud.com"
+    "itunes.apple.com"
+    "www.tesla.com"
+    "www.intel.com"
+    "www.nvidia.com"
+    "www.amd.com"
+    "www.ibm.com"
+    "www.cisco.com"
+    "www.dell.com"
+    "www.hp.com"
+    "www.samsung.com"
+    "www.sony.com"
+    "www.oracle.com"
 )
-
-# 审核时记录的直连站点 ASN。运行时要求域名仍为单一 IPv4、无 CNAME/AAAA，
-# 且 Team Cymru 返回的起源 ASN 与记录一致；任一条件漂移即拒绝启用 Reality。
-reality_sni_expected_asn() {
-    case "${1:-}" in
-        www.nazhumi.com) echo "132203" ;;
-        portal.citygrainla.com) echo "25820" ;;
-        *) return 1 ;;
-    esac
-}
 
 # ─── 颜色 ─────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -3221,14 +3226,11 @@ update_argo_subscription_links() {
 }
 # ─── Reality 优选 SNI ────────────────────────────────────────
 ensure_reality_probe_dependencies() {
-    command -v dig >/dev/null 2>&1 && return 0
-    local dns_package="dnsutils"
-    case "$(package_manager)" in
-        dnf|yum) dns_package="bind-utils" ;;
-        apk) dns_package="bind-tools" ;;
-    esac
-    install_packages_low_resource "$dns_package" || return 1
-    command -v dig >/dev/null 2>&1
+    if ! command -v curl >/dev/null 2>&1 || ! reality_curl_supports_h2; then
+        warn "Reality 域名检查需要支持 HTTP/2 的 curl，当前环境不满足"
+        return 1
+    fi
+    return 0
 }
 
 get_reality_probe_parallelism() {
@@ -3259,30 +3261,6 @@ reality_sni_is_approved() {
         [[ "$requested" == "$candidate" ]] && return 0
     done
     return 1
-}
-
-reality_sni_dns_metadata_valid() {
-    local sni="${1:-}" expected_asn cname aaaa origin_record origin_asn
-    local a b c d
-    local -a ipv4_addresses=()
-
-    reality_sni_is_approved "$sni" || return 1
-    command -v dig >/dev/null 2>&1 || return 1
-    expected_asn=$(reality_sni_expected_asn "$sni") || return 1
-
-    cname=$(dig +time=2 +tries=1 +short CNAME "$sni" 2>/dev/null) || return 1
-    [[ -z "$cname" ]] || return 1
-    mapfile -t ipv4_addresses < <(dig +time=2 +tries=1 +short A "$sni" 2>/dev/null | awk '/^[0-9]+([.][0-9]+){3}$/')
-    [[ ${#ipv4_addresses[@]} -eq 1 ]] || return 1
-    is_valid_public_ipv4_for_link "${ipv4_addresses[0]}" || return 1
-    aaaa=$(dig +time=2 +tries=1 +short AAAA "$sni" 2>/dev/null) || return 1
-    [[ -z "$aaaa" ]] || return 1
-    is_cloudflare_address "${ipv4_addresses[0]}" && return 1
-
-    IFS=. read -r a b c d <<< "${ipv4_addresses[0]}"
-    origin_record=$(dig +time=2 +tries=1 +short TXT "${d}.${c}.${b}.${a}.origin.asn.cymru.com" 2>/dev/null | head -1)
-    origin_asn=$(printf '%s\n' "$origin_record" | tr -d '"' | awk -F'|' '{gsub(/[[:space:]]/, "", $1); print $1}')
-    [[ "$origin_asn" == "$expected_asn" ]]
 }
 
 is_cloudflare_address() {
@@ -3350,8 +3328,7 @@ probe_reality_sni_candidate() {
 reality_sni_runtime_usable() {
     local sni="$1" tmp
     reality_sni_is_approved "$sni" || return 1
-    reality_sni_dns_metadata_valid "$sni" || return 1
-    reality_curl_supports_h2 || return 1
+    ensure_reality_probe_dependencies || return 1
     tmp=$(mktemp) || return 1
     probe_reality_sni_candidate 0 "$sni" "$tmp" 1
     local result=1
@@ -3378,12 +3355,11 @@ select_reality_sni() {
     local probe_parallelism
     probe_parallelism=$(get_reality_probe_parallelism)
 
-    if ! command -v dig >/dev/null 2>&1 || ! reality_curl_supports_h2; then
+    if ! ensure_reality_probe_dependencies; then
         REALITY_SNI=""
-        warn "Reality 审核需要 dig 与支持 HTTP/2 的 curl，当前环境不满足"
         return 1
     fi
-    info "正在实测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名 (要求 DNS/ASN 未漂移、TLS1.3 + HTTP/2，按握手延迟择优)，并发数: ${probe_parallelism}"
+    info "正在实测 ${#REALITY_SNI_LIST[@]} 个 Reality 候选域名 (要求 TLS1.3 + HTTP/2，排除 Cloudflare 地址，按握手成功率和延迟择优)，并发数: ${probe_parallelism}"
 
     local tmp_dir
     if ! tmp_dir=$(mktemp -d); then
@@ -3404,7 +3380,6 @@ select_reality_sni() {
     local active_jobs=0
     for idx in "${!REALITY_SNI_LIST[@]}"; do
         local sni="${REALITY_SNI_LIST[$idx]}"
-        reality_sni_dns_metadata_valid "$sni" || continue
         if (( probe_parallelism <= 1 )); then
             probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" 1
         else
@@ -4200,7 +4175,7 @@ do_primary_install() {
     if is_socks_enabled; then
         info "SOCKS5 已生成随机用户名和密码，安装后随节点链接显示。"
     fi
-    ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖安装失败，安装已停止"
+    ensure_reality_probe_dependencies || error "Reality 域名检查依赖不可用，安装已停止"
     select_reality_sni || error "未找到通过运行时检查的 Reality 伪装域名，安装已停止"
 
     while true; do

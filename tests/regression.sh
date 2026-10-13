@@ -1149,9 +1149,6 @@ test_reality_sni_probe_failure_is_fail_closed() (
     get_reality_probe_parallelism() {
         echo 1
     }
-    reality_sni_dns_metadata_valid() {
-        return 0
-    }
     reality_curl_supports_h2() {
         return 0
     }
@@ -1166,21 +1163,58 @@ test_reality_sni_probe_failure_is_fail_closed() (
     REALITY_SNI_LIST=("${old_sni_list[@]}")
 )
 
-test_reality_probe_dependencies_install_dns_tool() (
-    local tmp requested=""
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
-    package_manager() {
-        echo dnf
+test_reality_probe_dependencies_need_only_http2_curl() (
+    local supports_h2=true
+    command() {
+        [[ "$*" == "-v dig" ]] && return 1
+        builtin command "$@"
     }
     install_packages_low_resource() {
-        requested="$1"
-        printf '#!/usr/bin/env sh\nexit 0\n' > "${tmp}/dig"
-        /bin/chmod +x "${tmp}/dig"
+        fail "Reality probe should not install a DNS tool"
+    }
+    curl() {
+        [[ "$supports_h2" == "true" ]] && printf 'Features: HTTP2 SSL\n' || printf 'Features: SSL\n'
     }
 
-    PATH="$tmp" ensure_reality_probe_dependencies || fail "Reality DNS dependency installation failed"
-    assert_eq "bind-utils" "$requested" "Reality DNS dependency package"
+    ensure_reality_probe_dependencies || fail "Reality probe rejected HTTP/2 curl without dig"
+    supports_h2=false
+    if ensure_reality_probe_dependencies >/dev/null; then
+        fail "Reality probe accepted curl without HTTP/2"
+    fi
+)
+
+test_reality_sni_selection_works_without_asn_queries() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    local dns_queries="${tmp}/dns-queries"
+    REALITY_SNI=""
+    REALITY_SNI_EXCLUDE=""
+    REALITY_SNI_LIST=("www.nazhumi.com" "portal.citygrainla.com" "www.microsoft.com")
+    get_reality_probe_parallelism() { echo 1; }
+    dig() {
+        printf '%s\n' "$*" >> "$dns_queries"
+        return 9
+    }
+    curl() {
+        case "$*" in
+            --version) printf 'Features: HTTP2 SSL\n' ;;
+            *https://www.nazhumi.com) printf '2 0.020 43.130.242.218' ;;
+            *https://portal.citygrainla.com) printf '2 0.040 95.169.9.215' ;;
+            *https://www.microsoft.com) printf '2 0.010 104.16.10.20' ;;
+            *) return 1 ;;
+        esac
+    }
+
+    select_reality_sni >/dev/null || fail "Reality selection failed without ASN queries"
+    assert_eq "www.nazhumi.com" "$REALITY_SNI" "fastest usable non-Cloudflare candidate"
+    reality_sni_runtime_usable "portal.citygrainla.com" || fail "preset SNI required an ASN query"
+
+    REALITY_SNI=""
+    REALITY_SNI_EXCLUDE="www.nazhumi.com"
+    select_reality_sni >/dev/null || fail "Reality re-selection failed without ASN queries"
+    assert_eq "portal.citygrainla.com" "$REALITY_SNI" "excluded SNI is not selected again"
+    [[ ! -f "$dns_queries" ]] || fail "Reality selection queried third-party DNS metadata"
 )
 
 test_reality_sni_probe_requires_strict_tls_h2_and_remote_ip() (
@@ -1223,7 +1257,7 @@ test_reality_sni_probe_requires_strict_tls_h2_and_remote_ip() (
     [[ ! -s "$result" ]] || fail "Reality SNI accepted HTTP/1.1"
 )
 
-test_reality_sni_rejects_cloudflare_and_dns_asn_drift() (
+test_reality_sni_rejects_cloudflare_targets() (
     reality_sni_is_approved "www.nazhumi.com" || fail "approved Reality SNI rejected"
     if reality_sni_is_approved "dash.cloudflare.com"; then
         fail "unapproved Cloudflare SNI accepted"
@@ -1234,42 +1268,16 @@ test_reality_sni_rejects_cloudflare_and_dns_asn_drift() (
     is_cloudflare_address "2606:4700::1" || fail "Cloudflare IPv6 range not detected"
     is_cloudflare_address "2a06:98c7::1" || fail "Cloudflare 2a06:98c0::/29 range not detected"
 
-    dig() {
-        case "$*" in
-            *" CNAME www.nazhumi.com") : ;;
-            *" A www.nazhumi.com") echo "43.130.242.218" ;;
-            *" AAAA www.nazhumi.com") : ;;
-            *" TXT 218.242.130.43.origin.asn.cymru.com") echo '"132203 | 43.130.224.0/19 | SG | apnic"' ;;
-            *) return 1 ;;
-        esac
+    local tmp cloudflare_test_ip
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    curl() {
+        printf '2 0.050 %s' "$cloudflare_test_ip"
     }
-    reality_sni_dns_metadata_valid "www.nazhumi.com" || fail "pinned Reality DNS and ASN rejected"
-
-    dig() {
-        case "$*" in
-            *" CNAME www.nazhumi.com") : ;;
-            *" A www.nazhumi.com") echo "104.16.10.20" ;;
-            *" AAAA www.nazhumi.com") : ;;
-            *" TXT 20.10.16.104.origin.asn.cymru.com") echo '"13335 | 104.16.0.0/13 | US | arin"' ;;
-            *) return 1 ;;
-        esac
-    }
-    if reality_sni_dns_metadata_valid "www.nazhumi.com"; then
-        fail "Cloudflare DNS drift passed Reality review"
-    fi
-
-    dig() {
-        case "$*" in
-            *" CNAME www.nazhumi.com") : ;;
-            *" A www.nazhumi.com") echo "43.130.242.218" ;;
-            *" AAAA www.nazhumi.com") : ;;
-            *" TXT 218.242.130.43.origin.asn.cymru.com") echo '"64500 | 43.130.224.0/19 | ZZ | test"' ;;
-            *) return 1 ;;
-        esac
-    }
-    if reality_sni_dns_metadata_valid "www.nazhumi.com"; then
-        fail "unexpected ASN passed Reality review"
-    fi
+    for cloudflare_test_ip in "104.16.10.20" "2606:4700::1"; do
+        probe_reality_sni_candidate 0 "www.nazhumi.com" "${tmp}/result" 1
+        [[ ! -s "${tmp}/result" ]] || fail "Cloudflare remote IP passed Reality probe"
+    done
 )
 
 test_quick_argo_domain_is_read_from_service_logs() {
@@ -2445,9 +2453,10 @@ test_low_cpu_uses_low_priority_runner
 test_alpine_cloudflared_prefers_apk
 test_alpine_cloudflared_falls_back_to_binary
 test_reality_sni_probe_failure_is_fail_closed
-test_reality_probe_dependencies_install_dns_tool
+test_reality_probe_dependencies_need_only_http2_curl
+test_reality_sni_selection_works_without_asn_queries
 test_reality_sni_probe_requires_strict_tls_h2_and_remote_ip
-test_reality_sni_rejects_cloudflare_and_dns_asn_drift
+test_reality_sni_rejects_cloudflare_targets
 test_quick_argo_domain_is_read_from_service_logs
 test_argo_probe_requires_websocket_101_and_requested_family
 test_argo_family_selection_never_crosses_family

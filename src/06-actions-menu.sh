@@ -21,7 +21,7 @@ do_primary_install() {
     if is_socks_enabled; then
         info "SOCKS5 已生成随机用户名和密码，安装后随节点链接显示。"
     fi
-    ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖安装失败，安装已停止"
+    ensure_reality_probe_dependencies || error "Reality 域名检查依赖不可用，安装已停止"
     select_reality_sni || error "未找到通过运行时检查的 Reality 伪装域名，安装已停止"
 
     while true; do

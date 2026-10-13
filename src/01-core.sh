@@ -56,23 +56,28 @@ ARGO_CF_DOMAINS=(
     "saas.sin.fan"
 )
 
-# Reality 候选必须是人工审核的直连站点。共享 CDN 域名（尤其 Cloudflare）
-# 不得加入。运行时会拒绝 Cloudflare 地址段；更新列表前必须重新核查 DNS、
-# 证书、TLS 1.3 和 HTTP/2。
+# Reality 候选通过实际 TLS 1.3 + HTTP/2 握手筛选，按成功率与延迟择优。
+# 不依赖第三方 ASN 查询，也不限制正常的 CNAME、多 IP 或 IPv6 解析。
+# Cloudflare 域名不列入候选，实际连接到 Cloudflare 地址的探测仍会被排除。
 REALITY_SNI_LIST=(
     "www.nazhumi.com"
     "portal.citygrainla.com"
+    "www.microsoft.com"
+    "www.apple.com"
+    "gateway.icloud.com"
+    "itunes.apple.com"
+    "www.tesla.com"
+    "www.intel.com"
+    "www.nvidia.com"
+    "www.amd.com"
+    "www.ibm.com"
+    "www.cisco.com"
+    "www.dell.com"
+    "www.hp.com"
+    "www.samsung.com"
+    "www.sony.com"
+    "www.oracle.com"
 )
-
-# 审核时记录的直连站点 ASN。运行时要求域名仍为单一 IPv4、无 CNAME/AAAA，
-# 且 Team Cymru 返回的起源 ASN 与记录一致；任一条件漂移即拒绝启用 Reality。
-reality_sni_expected_asn() {
-    case "${1:-}" in
-        www.nazhumi.com) echo "132203" ;;
-        portal.citygrainla.com) echo "25820" ;;
-        *) return 1 ;;
-    esac
-}
 
 # ─── 颜色 ─────────────────────────────────────────────────────
 RED='\033[0;31m'
