@@ -1608,11 +1608,11 @@ test_base_profile_is_reality_only() {
 }
 
 test_random_reality_port_is_high_and_available() {
-    local get_port_listeners_def port attempt tmp listener_checks
+    local get_port_listeners_def port tmp listener_checks
     get_port_listeners_def=$(declare -f get_port_listeners)
     get_port_listeners() { :; }
 
-    for attempt in $(seq 1 20); do
+    for _ in $(seq 1 20); do
         port=$(select_random_available_tcp_port)
         [[ "$port" =~ ^[0-9]+$ ]] || fail "random Reality port is not numeric"
         (( port >= 10000 && port <= 65535 )) || fail "random Reality port is outside high-port range: $port"
@@ -1957,7 +1957,7 @@ test_modify_nat_reality_port_with_xray() (
     trap 'rm -rf "$tmp"' EXIT
     UUID=old-uuid; SHORT_ID=old-short; PRIVATE_KEY=old-private; PUBLIC_KEY=old-public
     REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; REALITY_SNI=example.com; REALITY_BACKEND=xray
-    WS_PORT=8080; WS_PATH=/old-short; NODE_NAME=test
+    WS_PORT=8080; WS_PATH=/old-short; NODE_NAME="test"
     HY2_PORT=8443; HY2_PASSWORD=hy2-pass; HY2_SNI=example.com; HY2_ENABLED=false
     SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; ARGO_DOMAIN=""; ARGO_TOKEN=""
     LINK_IPV4_SELECTION=all; PUBLIC_IPV4_OVERRIDE=198.51.100.1; NAT_MODE=true
@@ -2094,7 +2094,7 @@ test_install_selected_services_and_failure() (
     install_deps() { :; }; ensure_time_sync() { :; }; install_singbox() { :; }
     generate_params() {
         REALITY_PORT=28000; SOCKS_PORT=28001; REALITY_SNI=example.com
-        NODE_NAME=test; ARGO_TOKEN=""; ARGO_DOMAIN=""; ARGO_ENABLED=false
+        NODE_NAME="test"; ARGO_TOKEN=""; ARGO_DOMAIN=""; ARGO_ENABLED=false
     }
     detect_install_network() { INSTALL_NETWORK_MODE=ipv4-only; }
     ensure_reality_probe_dependencies() { :; }
@@ -2208,7 +2208,7 @@ test_modify_menu_categories() (
     prompt_read() { read -r "$1"; }
     REALITY_PORT=20012; REALITY_PUBLIC_PORT=20001; NAT_MODE=true
     REALITY_SNI=example.com; HY2_PORT=8443; HY2_ENABLED=false
-    SOCKS_PORT=20023; SOCKS_ENABLED=false; NODE_NAME=test; UUID=12345678-abcd
+    SOCKS_PORT=20023; SOCKS_ENABLED=false; NODE_NAME="test"; UUID=12345678-abcd
     SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; PUBLIC_IPV4_OVERRIDE=198.51.100.1
     for category in reality hy2 socks identity argo network; do
         case "$category" in

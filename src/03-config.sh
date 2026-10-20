@@ -213,9 +213,9 @@ verify_reality_local_listener() {
 }
 
 select_random_available_tcp_port() {
-    local attempt candidate listeners reserved conflict
+    local candidate listeners reserved conflict
 
-    for attempt in $(seq 1 100); do
+    for _ in $(seq 1 100); do
         candidate=$((10000 + (((RANDOM << 15) | RANDOM) % 55536)))
         case "$candidate" in
             24630) continue ;;

@@ -425,7 +425,8 @@ do_upgrade() {
 do_uninstall() {
     menu_header "系统维护 / 卸载"
     warn "即将卸载 sing-box 和 Argo 隧道"
-    prompt_read confirm "  确认卸载？(y/N): "
+    local confirm=""
+    prompt_read confirm "  确认卸载？(y/N): " || true
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消"; press_enter; return; }
 
     service_stop sing-box 2>/dev/null || true

@@ -1,8 +1,8 @@
 # ─── 安装组件 ────────────────────────────────────────────────
 get_meminfo_kb() {
-    local key="$1" name value unit
+    local key="$1" name value
     [[ -r /proc/meminfo ]] || return 1
-    while read -r name value unit; do
+    while read -r name value _; do
         if [[ "$name" == "${key}:" && "$value" =~ ^[0-9]+$ ]]; then
             echo "$value"
             return 0

@@ -1,13 +1,10 @@
 # ─── 常量 ─────────────────────────────────────────────────────
 SCRIPT_VERSION="3.1.3"
-DEFAULT_REALITY_SNI="www.nazhumi.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
 SINGBOX_BIN_DIR="/usr/local/bin"
 SINGBOX_BIN_PATH="${SINGBOX_BIN_DIR}/sing-box"
-# 旧版 CF 优选文件，仅用于卸载清理。
-CF_DOMAINS_FILE="${CONFIG_DIR}/cf_domains.txt"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 SUBSCRIPTION_FILE="${CONFIG_DIR}/subscription.txt"
 SUBSCRIPTION_ENV_FILE="${CONFIG_DIR}/sbm-subscription.env"
@@ -32,8 +29,6 @@ CFOPT_CRON_PERIODIC="/etc/periodic/weekly/sbm-cfopt"
 CFOPT_CRON_D="/etc/cron.d/sbm-cfopt"
 XRAY_CONFIG_DIR="/etc/xray"
 XRAY_CONFIG_FILE="${XRAY_CONFIG_DIR}/config.json"
-XRAY_BIN="/usr/local/bin/xray"
-XRAY_OPENRC_SERVICE="/etc/init.d/xray"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 SINGBOX_SYSTEMD_DROPIN_DIR="/etc/systemd/system/sing-box.service.d"
 SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
@@ -83,14 +78,12 @@ REALITY_SNI_LIST=(
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 if [[ -n "${NO_COLOR:-}" || ! -t 1 ]]; then
-    RED='' GREEN='' YELLOW='' BLUE='' PURPLE='' CYAN='' BOLD='' DIM='' NC=''
+    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' DIM='' NC=''
 fi
 
 # ─── 辅助函数 ────────────────────────────────────────────────
@@ -165,6 +158,8 @@ press_enter() {
     prompt_read _ "按 Enter 返回${MENU_CONTEXT:-上级菜单}..." || true
 }
 
+# 第一个参数是接收输入的变量名，由 read 按名称赋值。
+# shellcheck disable=SC2229
 prompt_read() {
     local __var_name="$1"
     local __prompt="$2"

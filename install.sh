@@ -45,14 +45,11 @@ set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
 SCRIPT_VERSION="3.1.3"
-DEFAULT_REALITY_SNI="www.nazhumi.com"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
 SINGBOX_BIN_DIR="/usr/local/bin"
 SINGBOX_BIN_PATH="${SINGBOX_BIN_DIR}/sing-box"
-# 旧版 CF 优选文件，仅用于卸载清理。
-CF_DOMAINS_FILE="${CONFIG_DIR}/cf_domains.txt"
 LINK_FILE="${CONFIG_DIR}/share-links.txt"
 SUBSCRIPTION_FILE="${CONFIG_DIR}/subscription.txt"
 SUBSCRIPTION_ENV_FILE="${CONFIG_DIR}/sbm-subscription.env"
@@ -77,8 +74,6 @@ CFOPT_CRON_PERIODIC="/etc/periodic/weekly/sbm-cfopt"
 CFOPT_CRON_D="/etc/cron.d/sbm-cfopt"
 XRAY_CONFIG_DIR="/etc/xray"
 XRAY_CONFIG_FILE="${XRAY_CONFIG_DIR}/config.json"
-XRAY_BIN="/usr/local/bin/xray"
-XRAY_OPENRC_SERVICE="/etc/init.d/xray"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
 SINGBOX_SYSTEMD_DROPIN_DIR="/etc/systemd/system/sing-box.service.d"
 SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
@@ -128,14 +123,12 @@ REALITY_SNI_LIST=(
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 if [[ -n "${NO_COLOR:-}" || ! -t 1 ]]; then
-    RED='' GREEN='' YELLOW='' BLUE='' PURPLE='' CYAN='' BOLD='' DIM='' NC=''
+    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' DIM='' NC=''
 fi
 
 # ─── 辅助函数 ────────────────────────────────────────────────
@@ -210,6 +203,8 @@ press_enter() {
     prompt_read _ "按 Enter 返回${MENU_CONTEXT:-上级菜单}..." || true
 }
 
+# 第一个参数是接收输入的变量名，由 read 按名称赋值。
+# shellcheck disable=SC2229
 prompt_read() {
     local __var_name="$1"
     local __prompt="$2"
@@ -262,22 +257,13 @@ check_root() {
 }
 
 detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS=$ID
-    elif command -v lsb_release &>/dev/null; then
-        OS=$(lsb_release -si | tr '[:upper:]' '[:lower:]')
-    else
-        OS="unknown"
-    fi
-
     ARCH=$(uname -m)
     case "$ARCH" in
-        x86_64)  ARCH_CF="amd64"; ARCH_XRAY="64" ;;
-        aarch64) ARCH_CF="arm64"; ARCH_XRAY="arm64-v8a" ;;
-        armv7l)  ARCH_CF="arm";   ARCH_XRAY="arm32-v7a" ;;
-        i386|i686) ARCH_CF="amd64"; ARCH_XRAY="32" ;;
-        *) ARCH_CF="amd64"; ARCH_XRAY="64" ;;
+        x86_64)  ARCH_CF="amd64" ;;
+        aarch64) ARCH_CF="arm64" ;;
+        armv7l)  ARCH_CF="arm" ;;
+        i386|i686) ARCH_CF="386" ;;
+        *) ARCH_CF="amd64" ;;
     esac
 }
 
@@ -1141,9 +1127,9 @@ install_manager_command() {
 }
 # ─── 安装组件 ────────────────────────────────────────────────
 get_meminfo_kb() {
-    local key="$1" name value unit
+    local key="$1" name value
     [[ -r /proc/meminfo ]] || return 1
-    while read -r name value unit; do
+    while read -r name value _; do
         if [[ "$name" == "${key}:" && "$value" =~ ^[0-9]+$ ]]; then
             echo "$value"
             return 0
@@ -2018,9 +2004,9 @@ verify_reality_local_listener() {
 }
 
 select_random_available_tcp_port() {
-    local attempt candidate listeners reserved conflict
+    local candidate listeners reserved conflict
 
-    for attempt in $(seq 1 100); do
+    for _ in $(seq 1 100); do
         candidate=$((10000 + (((RANDOM << 15) | RANDOM) % 55536)))
         case "$candidate" in
             24630) continue ;;
@@ -3262,12 +3248,12 @@ reality_sni_is_approved() {
 }
 
 is_cloudflare_address() {
-    local ip="${1:-}" a b c d
+    local ip="${1:-}" a b c
     case "${ip,,}" in
         2400:cb00:*|2606:4700:*|2803:f800:*|2405:b500:*|2405:8100:*|2a06:98c[0-7]:*|2c0f:f248:*) return 0 ;;
     esac
     is_valid_ipv4 "$ip" || return 1
-    IFS=. read -r a b c d <<< "$ip"
+    IFS=. read -r a b c _ <<< "$ip"
     case "$a.$b" in
         173.245) (( c >= 48 && c <= 63 )) ;;
         103.21)  (( c >= 244 && c <= 247 )) ;;
@@ -3289,7 +3275,7 @@ is_cloudflare_address() {
 
 probe_reality_sni_candidate() {
     local idx="$1" sni="$2" result_file="$3" require_h2="${4:-1}"
-    local out http_ver appconnect remote_ip ms attempt
+    local out http_ver appconnect remote_ip ms
     local success_count=0 total_ms=0 max_ms=0 attempts=3
     # 用 HEAD(-I) 探测：仅取响应头即可拿到协议版本与握手耗时，不下载正文，
     # 对低带宽 / 低配 VPS 更省流量和时间(h2/ALPN 是连接级，与请求方法无关)。
@@ -3297,7 +3283,7 @@ probe_reality_sni_candidate() {
     # 仅当本机 curl 支持 h2 时才协商 h2，否则该 flag 会让 curl 直接报错。
     (( require_h2 )) && curl_opts+=(--http2)
 
-    for attempt in $(seq 1 "$attempts"); do
+    for _ in $(seq 1 "$attempts"); do
         # 连续取样，优先选择成功率高且平均/最大握手延迟低的目标。
         out=$(curl --noproxy '*' -o /dev/null -s -w '%{http_version} %{time_appconnect} %{remote_ip}' \
             "${curl_opts[@]}" "https://${sni}" 2>/dev/null) || continue
@@ -3651,14 +3637,14 @@ argo_cf_domain_is_candidate() {
 
 probe_argo_cf_domain() {
     local idx="$1" domain="$2" family="$3" result_file="$4" attempts="${5:-3}"
-    local output code appconnect ms attempt
+    local output code appconnect ms
     local -a family_args=()
     local success_count=0 total_ms=0 max_ms=0
     [[ "$family" == "4" ]] && family_args=(-4)
     [[ "$family" == "6" ]] && family_args=(-6)
     argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}" && is_valid_hostname "$domain" || return 0
 
-    for attempt in $(seq 1 "$attempts"); do
+    for _ in $(seq 1 "$attempts"); do
         output=$(curl --noproxy '*' "${family_args[@]}" --http1.1 -sS -o /dev/null \
             --connect-timeout 3 --max-time 8 \
             --connect-to "${ARGO_DOMAIN}:443:${domain}:443" \
@@ -4046,8 +4032,7 @@ verify_protocol_loopback() (
     timeout 12 sing-box run -c "$tmp/client.json" >/dev/null 2>&1 &
     client_pid=$!
 
-    local attempt
-    for attempt in 1 2; do
+    for _ in 1 2; do
         response=$(curl --noproxy '' --proxy "socks5h://127.0.0.1:${client_port}" \
             -fsS --connect-timeout 2 --max-time 4 "http://127.0.0.1:${http_port}/challenge" 2>/dev/null || true)
         [[ "$response" == "$nonce" ]] && return 0
@@ -5436,7 +5421,8 @@ do_upgrade() {
 do_uninstall() {
     menu_header "系统维护 / 卸载"
     warn "即将卸载 sing-box 和 Argo 隧道"
-    prompt_read confirm "  确认卸载？(y/N): "
+    local confirm=""
+    prompt_read confirm "  确认卸载？(y/N): " || true
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消"; press_enter; return; }
 
     service_stop sing-box 2>/dev/null || true
@@ -5681,8 +5667,8 @@ main() {
             ;;
         "") main_menu ;;
         *)
-            error "未知命令: ${1}"
-            echo "执行 'sbm --help' 查看可用命令"
+            echo -e "${RED}[ERROR]${NC} 未知命令: ${1}" >&2
+            echo "执行 'sbm --help' 查看可用命令" >&2
             return 1
             ;;
     esac

@@ -204,8 +204,8 @@ main() {
             ;;
         "") main_menu ;;
         *)
-            error "未知命令: ${1}"
-            echo "执行 'sbm --help' 查看可用命令"
+            echo -e "${RED}[ERROR]${NC} 未知命令: ${1}" >&2
+            echo "执行 'sbm --help' 查看可用命令" >&2
             return 1
             ;;
     esac

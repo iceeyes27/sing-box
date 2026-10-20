@@ -17,6 +17,9 @@ jobs:
       - name: Build installer
         run: bash scripts/build-install.sh
 
+      - name: Check generated installer is committed
+        run: git diff --exit-code -- install.sh || { echo "::error::install.sh is out of date; run 'make build' and commit it"; exit 1; }
+
       - name: Run tests
         run: bash scripts/test.sh
 
@@ -25,6 +28,9 @@ jobs:
 
       - name: Generate checksum
         run: bash scripts/checksum.sh
+
+      - name: Check committed checksum
+        run: git diff --exit-code -- dist/install.sh.sha256 || { echo "::error::dist/install.sh.sha256 is out of date; run 'make checksum' and commit it"; exit 1; }
 
   compatibility:
     runs-on: ubuntu-latest
