@@ -69,16 +69,21 @@ exit 0'
 test_singbox_systemd_override_enables_restart() {
     local tmp body
     local service_manager_def service_daemon_reload_def
-    local old_dropin_dir old_override_file
+    local old_dropin_dir old_override_file old_service old_unit_dirs
 
     tmp=$(mktemp -d)
     service_manager_def=$(declare -f service_manager)
     service_daemon_reload_def=$(declare -f service_daemon_reload)
     old_dropin_dir="$SINGBOX_SYSTEMD_DROPIN_DIR"
     old_override_file="$SINGBOX_SYSTEMD_OVERRIDE_FILE"
+    old_service="$SINGBOX_SYSTEMD_SERVICE"
+    old_unit_dirs=("${SINGBOX_PACKAGED_UNIT_DIRS[@]}")
 
     SINGBOX_SYSTEMD_DROPIN_DIR="${tmp}/sing-box.service.d"
     SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
+    SINGBOX_SYSTEMD_SERVICE="${tmp}/sing-box.service"
+    SINGBOX_PACKAGED_UNIT_DIRS=("${tmp}/packaged")
+    mkdir -p "${tmp}/packaged"
 
     service_manager() {
         echo "systemd"
@@ -94,9 +99,20 @@ test_singbox_systemd_override_enables_restart() {
     assert_contains "$body" "StartLimitIntervalSec=0" "sing-box systemd start limit"
     assert_contains "$body" "LimitNOFILE=1048576" "sing-box systemd file limit"
     [[ -f "${tmp}/daemon-reload" ]] || fail "sing-box systemd daemon-reload was not called"
+    body=$(<"$SINGBOX_SYSTEMD_SERVICE")
+    assert_contains "$body" "$SINGBOX_SYSTEMD_MANAGED_MARKER" "release install gets a managed systemd unit"
+    assert_contains "$body" "run -c ${CONFIG_FILE}" "managed systemd unit runs generated config"
+    assert_contains "$body" 'ExecReload=/bin/kill -HUP $MAINPID' "managed systemd unit keeps MAINPID literal"
+
+    rm -f "$SINGBOX_SYSTEMD_SERVICE"
+    : > "${tmp}/packaged/sing-box.service"
+    write_singbox_service
+    [[ ! -e "$SINGBOX_SYSTEMD_SERVICE" ]] || fail "packaged systemd unit must not be shadowed"
 
     SINGBOX_SYSTEMD_DROPIN_DIR="$old_dropin_dir"
     SINGBOX_SYSTEMD_OVERRIDE_FILE="$old_override_file"
+    SINGBOX_SYSTEMD_SERVICE="$old_service"
+    SINGBOX_PACKAGED_UNIT_DIRS=("${old_unit_dirs[@]}")
     unset -f service_manager service_daemon_reload
     eval "$service_manager_def"
     eval "$service_daemon_reload_def"
@@ -1025,8 +1041,56 @@ SH
 chmod +x "${tmp}/sing-box"
 EOF
     }
+    local old_bin_path="$SINGBOX_BIN_PATH"
+    SINGBOX_BIN_PATH="${tmp}/release/sing-box"
     PATH="${tmp}:$PATH" install_or_upgrade_singbox_package false
+    SINGBOX_BIN_PATH="$old_bin_path"
     rm -rf "$tmp"
+}
+
+test_vendored_singbox_fallback() (
+    local tmp arch version
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    SINGBOX_BIN_DIR="${tmp}/bin"
+    SINGBOX_BIN_PATH="${SINGBOX_BIN_DIR}/sing-box"
+    singbox_binary_available() { [[ -x "$SINGBOX_BIN_PATH" ]]; }
+    install_singbox_from_official_tarball() { return 1; }
+    # 仓库检出中应直接使用本地 vendor/ 文件，不访问网络。
+    curl() { echo "unexpected download: $*" >&2; return 1; }
+
+    assert_eq "$VENDORED_SINGBOX_VERSION" "$(<"${ROOT_DIR}/vendor/sing-box/VERSION")" "vendor VERSION matches script constant"
+    for arch in amd64 arm64 armv7 386; do
+        [[ -s "${ROOT_DIR}/vendor/sing-box/sing-box-${VENDORED_SINGBOX_VERSION}-linux-${arch}-musl.tar.gz" ]] \
+            || fail "vendored sing-box archive missing for ${arch}"
+    done
+
+    install_singbox_release_binary false >/dev/null 2>&1 || fail "vendored sing-box fallback failed"
+    version=$("$SINGBOX_BIN_PATH" version | awk 'NR == 1 { print $3 }')
+    assert_eq "$VENDORED_SINGBOX_VERSION" "$version" "vendored sing-box installed and runnable"
+
+    mkdir -p "${tmp}/ww/vendor/sing-box"
+    : > "${tmp}/ww/vendor/sing-box/archive.tar.gz"
+    chmod 0644 "${tmp}/ww/vendor/sing-box/archive.tar.gz"
+    chmod 0755 "${tmp}/ww/vendor/sing-box" "${tmp}/ww/vendor"
+    trusted_local_file "${tmp}/ww/vendor/sing-box/archive.tar.gz" || fail "owned local vendor archive rejected"
+    chmod 0777 "${tmp}/ww/vendor"
+    if trusted_local_file "${tmp}/ww/vendor/sing-box/archive.tar.gz"; then
+        fail "local vendor archive under a world-writable directory must not be trusted"
+    fi
+
+    installed_singbox_version() { echo 99.0.0; }
+    if install_singbox_from_vendored_tarball true >/dev/null 2>&1; then
+        fail "vendored fallback must not downgrade during upgrade"
+    fi
+)
+
+test_version_at_least() {
+    version_at_least 1.14.3 1.14.3 || fail "equal versions"
+    version_at_least 1.15.0 1.14.3 || fail "newer minor version"
+    version_at_least 1.14.10 1.14.9 || fail "numeric patch comparison"
+    version_at_least 1.15.0-alpha.1 1.14.3 || fail "pre-release suffix ignored"
+    if version_at_least 1.13.9 1.14.3; then fail "older version accepted"; fi
 }
 
 test_low_memory_without_swap_skips_optional_deps() {
@@ -2468,6 +2532,8 @@ test_only_primary_deployment_entrypoints_remain
 test_alpine_package_fallback
 test_official_tarball_install_streams_without_mktemp
 test_non_alpine_package_verifies_binary
+test_vendored_singbox_fallback
+test_version_at_least
 test_low_memory_without_swap_skips_optional_deps
 test_low_cpu_uses_low_priority_runner
 test_alpine_cloudflared_prefers_apk

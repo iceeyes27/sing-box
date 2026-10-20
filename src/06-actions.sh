@@ -443,6 +443,7 @@ do_uninstall() {
     rm -f "$SINGBOX_OPENRC_SERVICE"
     rm -f "$SINGBOX_SYSTEMD_OVERRIDE_FILE"
     rmdir "$SINGBOX_SYSTEMD_DROPIN_DIR" 2>/dev/null || true
+    remove_singbox_release_install
     service_daemon_reload
 
     case "$(package_manager)" in

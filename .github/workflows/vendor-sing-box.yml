@@ -1,0 +1,45 @@
+name: Update vendored sing-box
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "sing-box version (empty = latest release)"
+        required: false
+        default: ""
+      force:
+        description: "Re-download even if the version is unchanged"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download official release archives
+        env:
+          FORCE: ${{ inputs.force && '1' || '0' }}
+          SING_BOX_VERSION: ${{ inputs.version }}
+        run: bash scripts/update-vendored-singbox.sh "$SING_BOX_VERSION"
+
+      - name: Run tests
+        run: bash scripts/test.sh
+
+      - name: Commit changes
+        run: |
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard vendor)" ]; then
+            echo "No changes"
+            exit 0
+          fi
+          version=$(cat vendor/sing-box/VERSION)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A vendor/sing-box src/01-core.sh install.sh dist/install.sh.sha256
+          git commit -m "chore: update vendored sing-box to v${version}"
+          git push

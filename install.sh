@@ -75,7 +75,13 @@ CFOPT_CRON_D="/etc/cron.d/sbm-cfopt"
 XRAY_CONFIG_DIR="/etc/xray"
 XRAY_CONFIG_FILE="${XRAY_CONFIG_DIR}/config.json"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
+SINGBOX_SYSTEMD_SERVICE="/etc/systemd/system/sing-box.service"
+SINGBOX_SYSTEMD_MANAGED_MARKER="# Managed by sbm: sing-box installed from release tarball"
+SINGBOX_PACKAGED_UNIT_DIRS=(/lib/systemd/system /usr/lib/systemd/system)
 SINGBOX_SYSTEMD_DROPIN_DIR="/etc/systemd/system/sing-box.service.d"
+# 仓库内置的 sing-box 备份 (vendor/sing-box/)：官方安装渠道均不可用时使用。
+VENDORED_SINGBOX_VERSION="1.14.3"
+VENDORED_SINGBOX_BASE_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/vendor/sing-box"
 SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"
@@ -1425,11 +1431,12 @@ get_singbox_release_arch() {
 get_latest_singbox_version() {
     local version latest_url
 
-    version=$(curl -fsSL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
+    version=$(curl -fsSL --connect-timeout 10 --max-time 20 \
+        "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
         | awk -F'"' '/"tag_name"/ { gsub(/^v/, "", $4); print $4; exit }' || true)
 
     if [[ -z "$version" ]]; then
-        latest_url=$(curl -fsSIL -o /dev/null -w '%{url_effective}' \
+        latest_url=$(curl -fsSIL --connect-timeout 10 --max-time 20 -o /dev/null -w '%{url_effective}' \
             "https://github.com/SagerNet/sing-box/releases/latest" 2>/dev/null || true)
         version="${latest_url##*/v}"
     fi
@@ -1438,26 +1445,25 @@ get_latest_singbox_version() {
     echo "$version"
 }
 
-install_singbox_from_official_tarball() {
-    local version arch url tmp_bin archive_member
-
-    arch=$(get_singbox_release_arch) || return 1
-    version=$(get_latest_singbox_version) || return 1
-    url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}-musl.tar.gz"
-    archive_member="sing-box-${version}-linux-${arch}-musl/sing-box"
+# 用 "$@" 输出 tar.gz 字节流，解出 $1 指定的成员并原子替换 SINGBOX_BIN_PATH。
+install_singbox_archive() {
+    local archive_member="$1" tmp_bin
+    shift
     tmp_bin="${SINGBOX_BIN_DIR}/.sing-box.${$}.tmp"
 
-    info "下载 sing-box 官方二进制: v${version} (${arch}-musl)"
     if ! mkdir -p "$SINGBOX_BIN_DIR"; then
         return 1
     fi
-    if ! curl -fL --retry 3 --connect-timeout 15 "$url" \
-        | tar -xzO "$archive_member" > "$tmp_bin"; then
+    if ! "$@" | tar -xzO "$archive_member" > "$tmp_bin"; then
         rm -f "$tmp_bin"
         return 1
     fi
 
     chmod 755 "$tmp_bin"
+    if ! "$tmp_bin" version >/dev/null 2>&1; then
+        rm -f "$tmp_bin"
+        return 1
+    fi
     mv -f "$tmp_bin" "$SINGBOX_BIN_PATH"
 
     hash -r 2>/dev/null || true
@@ -1469,18 +1475,114 @@ install_singbox_from_official_tarball() {
     singbox_binary_available
 }
 
+install_singbox_from_official_tarball() {
+    local version arch
+
+    arch=$(get_singbox_release_arch) || return 1
+    version=$(get_latest_singbox_version) || return 1
+    info "下载 sing-box 官方二进制: v${version} (${arch}-musl)"
+    install_singbox_archive "sing-box-${version}-linux-${arch}-musl/sing-box" \
+        curl -fL --retry 3 --connect-timeout 15 \
+        "https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}-musl.tar.gz"
+}
+
+installed_singbox_version() {
+    singbox_binary_available || return 1
+    sing-box version 2>/dev/null | awk 'NR == 1 { print $3; exit }'
+}
+
+# $1 >= $2 时返回 0；只比较 主.次.修订，忽略预发布后缀。
+version_at_least() {
+    local -a have want
+    local i x y
+    IFS=. read -r -a have <<< "${1%%-*}"
+    IFS=. read -r -a want <<< "${2%%-*}"
+    for i in 0 1 2; do
+        x="${have[i]:-0}"; y="${want[i]:-0}"
+        [[ "$x" =~ ^[0-9]+$ ]] || x=0
+        [[ "$y" =~ ^[0-9]+$ ]] || y=0
+        (( 10#$x > 10#$y )) && return 0
+        (( 10#$x < 10#$y )) && return 1
+    done
+    return 0
+}
+
+# 脚本可能从 /tmp 运行：本地文件及其两级父目录须属于当前用户且组/其他用户不可写，防止被他人替换。
+trusted_local_file() {
+    local path="$1" dir
+    dir=$(dirname "$path")
+    for path in "$path" "$dir" "$(dirname "$dir")"; do
+        [[ -O "$path" ]] || return 1
+        [[ -z "$(find "$path" -maxdepth 0 \( -perm -0002 -o -perm -0020 \) 2>/dev/null)" ]] || return 1
+    done
+}
+
+# 官方渠道均不可用时的兜底：优先使用脚本同目录的 vendor/sing-box/，否则从本仓库下载。
+install_singbox_from_vendored_tarball() {
+    local upgrade="${1:-false}" arch name current script_dir local_archive
+
+    arch=$(get_singbox_release_arch) || return 1
+    name="sing-box-${VENDORED_SINGBOX_VERSION}-linux-${arch}-musl"
+    if [[ "$upgrade" == "true" ]] && current=$(installed_singbox_version) && [[ -n "$current" ]] \
+        && version_at_least "$current" "$VENDORED_SINGBOX_VERSION"; then
+        warn "当前 sing-box v${current} 不低于仓库内置版本 v${VENDORED_SINGBOX_VERSION}，无可用更新"
+        return 1
+    fi
+
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || script_dir=""
+    local_archive="${script_dir}/vendor/sing-box/${name}.tar.gz"
+    if [[ -n "$script_dir" && -f "$local_archive" ]] && trusted_local_file "$local_archive"; then
+        info "使用本地内置 sing-box: v${VENDORED_SINGBOX_VERSION} (${arch}-musl)"
+        install_singbox_archive "${name}/sing-box" cat "$local_archive"
+    else
+        info "下载仓库内置 sing-box: v${VENDORED_SINGBOX_VERSION} (${arch}-musl)"
+        install_singbox_archive "${name}/sing-box" \
+            curl -fL --retry 3 --connect-timeout 15 "${VENDORED_SINGBOX_BASE_URL}/${name}.tar.gz"
+    fi
+}
+
+install_singbox_release_binary() {
+    local upgrade="${1:-false}"
+    install_singbox_from_official_tarball && return 0
+    warn "sing-box 官方二进制不可用，改用仓库内置版本 v${VENDORED_SINGBOX_VERSION}"
+    install_singbox_from_vendored_tarball "$upgrade"
+}
+
+# 软件包安装成功后，移除此前由 release 包安装的二进制和 systemd 单元，避免遮蔽软件包版本。
+remove_singbox_release_install() {
+    if [[ -L /usr/bin/sing-box && "$(readlink /usr/bin/sing-box)" == "$SINGBOX_BIN_PATH" ]]; then
+        rm -f /usr/bin/sing-box
+    fi
+    rm -f "$SINGBOX_BIN_PATH"
+    if [[ -f "$SINGBOX_SYSTEMD_SERVICE" ]] && grep -qF "$SINGBOX_SYSTEMD_MANAGED_MARKER" "$SINGBOX_SYSTEMD_SERVICE"; then
+        rm -f "$SINGBOX_SYSTEMD_SERVICE"
+        service_daemon_reload
+    fi
+    hash -r 2>/dev/null || true
+}
+
 install_or_upgrade_singbox_package() {
     local upgrade="${1:-false}"
     local apk_args=(add --no-cache)
+    local packaged=false
 
     if [[ "$(package_manager)" == "apk" ]]; then
         [[ "$upgrade" == "true" ]] && apk_args+=(--upgrade)
-        if ! run_low_resource apk "${apk_args[@]}" sing-box > /dev/null 2>&1 || ! singbox_binary_available; then
+        if run_low_resource apk "${apk_args[@]}" sing-box > /dev/null 2>&1 && singbox_binary_available; then
+            packaged=true
+        else
             warn "Alpine 软件源安装 sing-box 失败，改用官方 musl 二进制"
-            install_singbox_from_official_tarball || return 1
+            install_singbox_release_binary "$upgrade" || return 1
         fi
+    elif curl -fsSL --connect-timeout 15 https://sing-box.app/install.sh | sh; then
+        packaged=true
     else
-        curl -fsSL https://sing-box.app/install.sh | sh || return 1
+        warn "sing-box 官方安装脚本不可用，改用官方 musl 二进制"
+        install_singbox_release_binary "$upgrade" || return 1
+    fi
+    # 软件包装在 /usr/bin；此前的 release 安装位于 /usr/local/bin，会在 PATH 中优先而遮蔽新版本。
+    if [[ "$packaged" == "true" && -f /usr/bin/sing-box && ! -L /usr/bin/sing-box ]]; then
+        remove_singbox_release_install
     fi
 
     singbox_binary_available
@@ -1741,6 +1843,41 @@ install_cloudflared() {
     success "cloudflared 安装完成"
 }
 
+# release 包不带 systemd 单元；软件包未提供 sing-box.service 时由脚本写入自管单元。
+write_singbox_systemd_unit_if_needed() {
+    local singbox_bin unit_dir
+    if [[ ! -f "$SINGBOX_SYSTEMD_SERVICE" ]] || ! grep -qF "$SINGBOX_SYSTEMD_MANAGED_MARKER" "$SINGBOX_SYSTEMD_SERVICE"; then
+        [[ -f "$SINGBOX_SYSTEMD_SERVICE" ]] && return 0
+        for unit_dir in "${SINGBOX_PACKAGED_UNIT_DIRS[@]}"; do
+            [[ -f "${unit_dir}/sing-box.service" ]] && return 0
+        done
+    fi
+
+    singbox_bin=$(command -v sing-box 2>/dev/null || echo "$SINGBOX_BIN_PATH")
+    if ! cat > "$SINGBOX_SYSTEMD_SERVICE" << EOF
+${SINGBOX_SYSTEMD_MANAGED_MARKER}
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=${singbox_bin} run -c ${CONFIG_FILE}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    then
+        warn "无法写入 sing-box systemd 服务"
+        return 1
+    fi
+}
+
 write_singbox_service() {
     case "$(service_manager)" in
         openrc)
@@ -1765,6 +1902,7 @@ EOF
             chmod 755 "$SINGBOX_OPENRC_SERVICE"
             ;;
         systemd)
+            write_singbox_systemd_unit_if_needed || return 1
             if ! mkdir -p "$SINGBOX_SYSTEMD_DROPIN_DIR" 2>/dev/null; then
                 warn "无法创建 sing-box systemd 自恢复目录，继续使用默认服务"
                 return 0
@@ -5439,6 +5577,7 @@ do_uninstall() {
     rm -f "$SINGBOX_OPENRC_SERVICE"
     rm -f "$SINGBOX_SYSTEMD_OVERRIDE_FILE"
     rmdir "$SINGBOX_SYSTEMD_DROPIN_DIR" 2>/dev/null || true
+    remove_singbox_release_install
     service_daemon_reload
 
     case "$(package_manager)" in

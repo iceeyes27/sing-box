@@ -8,7 +8,7 @@
 
 ## ✨ 说明
 
-- 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box；启用 Argo 时安装 cloudflared 与本地订阅网关依赖。
+- 🚀 **自动化安装** — 自动拉取官方核心并配置 sing-box；官方渠道不可用时改用本仓库 [vendor/sing-box/](vendor/sing-box/) 内置的版本。启用 Argo 时安装 cloudflared 与本地订阅网关依赖。
 - 🔧 **稳定优先链路** — 新安装 IPv4-only / 双栈默认启用 VLESS Reality；IPv6-only 默认启用 Reality 与 Argo。安装时可直接勾选 Argo 和带认证 SOCKS5，Hysteria2 保持默认关闭。
 - 🎯 **网络测速工具集** — 内置辅助脚本可自动侦测服务器到指定域名的网络连通性，自动择优分配高连通率测试节点。
 - 🎛️ **交互式管理方案** — 内置终端管理控制面板，支持实时快捷修改端口参数、HTTPS 订阅链接、Argo 订阅链接、重载配置、监控日志与开机自启。
@@ -176,10 +176,13 @@ sbm links
 ```bash
 make build    # 由 src/ 重新生成 install.sh
 make test     # 构建并运行 Bash 语法检查与回归测试
-make lint     # 运行 ShellCheck，未安装时跳过
+make lint     # 运行 ShellCheck (warning 级别即失败)，未安装时跳过
 make check    # build + test + lint + checksum
 ```
 
+`install.sh` 和 `dist/install.sh.sha256` 是生成文件，修改 `src/` 后需一并提交；CI 会检查两者是否与源码一致。
+
+内置 sing-box 备份位于 [vendor/sing-box/](vendor/sing-box/)。更新到最新官方版本：在 GitHub Actions 手动运行 “Update vendored sing-box”，或在本地执行 `bash scripts/update-vendored-singbox.sh [版本号]` 后提交。
 CI 会在 Debian、Ubuntu、Fedora、Alpine 容器中运行 smoke checks；兼容性矩阵见 [docs/compatibility.md](docs/compatibility.md)。
 
 ## 📄 License
