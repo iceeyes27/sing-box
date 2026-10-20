@@ -8,12 +8,19 @@ SRC_DIR="${ROOT_DIR}/src"
 modules=(
     00-header.sh
     01-core.sh
+    01-system.sh
+    01-network.sh
+    01-params.sh
+    01-manager.sh
     02-install.sh
     03-config.sh
     04-argo-subscription.sh
     05-links.sh
     05-verify.sh
-    06-actions-menu.sh
+    06-install.sh
+    06-modify.sh
+    06-actions.sh
+    07-menu.sh
 )
 
 tmp_file=$(mktemp "${OUT_FILE}.XXXXXX")
