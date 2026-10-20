@@ -2025,6 +2025,25 @@ test_modify_nat_reality_port_with_xray() (
     assert_eq 20012 "$REALITY_PORT" "canceled NAT local port restored"
 )
 
+test_modify_socks_cancel_restores_params() (
+    UUID=old-uuid; SHORT_ID=old-short; PRIVATE_KEY=old-private; PUBLIC_KEY=old-public
+    REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; REALITY_SNI=example.com; REALITY_BACKEND=singbox
+    WS_PORT=8080; WS_PATH=/old-short; NODE_NAME="test"
+    HY2_PORT=8443; HY2_PASSWORD=hy2-pass; HY2_SNI=example.com; HY2_ENABLED=false
+    SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; ARGO_DOMAIN=""; ARGO_TOKEN=""
+    LINK_IPV4_SELECTION=all; PUBLIC_IPV4_OVERRIDE=198.51.100.1; NAT_MODE=true
+    SOCKS_PORT=20023; SOCKS_USERNAME=user; SOCKS_PASSWORD=pass; SOCKS_ENABLED=false; SOCKS_PUBLIC_PORT=20023
+    clear() { :; }; press_enter() { :; }
+    load_params() { :; }; prompt_read() { read -r "$1"; }
+    validate_port() { :; }
+
+    # 启用 SOCKS5 时在 NAT 公网端口处中断：已输入的本机端口不得残留在内存参数中。
+    do_modify_config socks < <(printf '1\ny\n20030\n') >/dev/null || true
+    assert_eq 20023 "$SOCKS_PORT" "canceled SOCKS5 enable restores local port"
+    assert_eq 20023 "$SOCKS_PUBLIC_PORT" "canceled SOCKS5 enable restores public port"
+    assert_eq false "$SOCKS_ENABLED" "canceled SOCKS5 enable keeps SOCKS5 disabled"
+)
+
 test_install_network_failure_selection() (
     prompt_read() { read -r "$1"; }
     refresh_public_ip_stack() { return 1; }
@@ -2418,6 +2437,7 @@ test_subscription_payload_requires_matching_data
 test_reality_listener_validation
 test_bounded_service_restart
 test_modify_nat_reality_port_with_xray
+test_modify_socks_cancel_restores_params
 test_install_network_failure_selection
 test_argo_edge_family_services
 test_install_selected_services_and_failure
