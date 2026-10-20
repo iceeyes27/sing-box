@@ -10,5 +10,5 @@ if ! command -v shellcheck >/dev/null 2>&1; then
 fi
 
 # install.sh is generated from src/, so lint the generated release artifact plus tests/tooling.
-# Use error-level gating first; warning-level cleanup can be tightened once legacy findings are triaged.
-shellcheck -S error install.sh tests/regression.sh tests/protocol-integration.sh scripts/*.sh
+# Warning-level findings fail the build; silence intentional patterns with inline directives.
+shellcheck -S warning install.sh tests/regression.sh tests/protocol-integration.sh scripts/*.sh

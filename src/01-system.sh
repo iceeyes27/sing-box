@@ -4,22 +4,13 @@ check_root() {
 }
 
 detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS=$ID
-    elif command -v lsb_release &>/dev/null; then
-        OS=$(lsb_release -si | tr '[:upper:]' '[:lower:]')
-    else
-        OS="unknown"
-    fi
-
     ARCH=$(uname -m)
     case "$ARCH" in
-        x86_64)  ARCH_CF="amd64"; ARCH_XRAY="64" ;;
-        aarch64) ARCH_CF="arm64"; ARCH_XRAY="arm64-v8a" ;;
-        armv7l)  ARCH_CF="arm";   ARCH_XRAY="arm32-v7a" ;;
-        i386|i686) ARCH_CF="amd64"; ARCH_XRAY="32" ;;
-        *) ARCH_CF="amd64"; ARCH_XRAY="64" ;;
+        x86_64)  ARCH_CF="amd64" ;;
+        aarch64) ARCH_CF="arm64" ;;
+        armv7l)  ARCH_CF="arm" ;;
+        i386|i686) ARCH_CF="386" ;;
+        *) ARCH_CF="amd64" ;;
     esac
 }
 

@@ -35,8 +35,7 @@ verify_protocol_loopback() (
     timeout 12 sing-box run -c "$tmp/client.json" >/dev/null 2>&1 &
     client_pid=$!
 
-    local attempt
-    for attempt in 1 2; do
+    for _ in 1 2; do
         response=$(curl --noproxy '' --proxy "socks5h://127.0.0.1:${client_port}" \
             -fsS --connect-timeout 2 --max-time 4 "http://127.0.0.1:${http_port}/challenge" 2>/dev/null || true)
         [[ "$response" == "$nonce" ]] && return 0

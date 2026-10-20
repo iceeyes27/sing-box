@@ -38,12 +38,12 @@ reality_sni_is_approved() {
 }
 
 is_cloudflare_address() {
-    local ip="${1:-}" a b c d
+    local ip="${1:-}" a b c
     case "${ip,,}" in
         2400:cb00:*|2606:4700:*|2803:f800:*|2405:b500:*|2405:8100:*|2a06:98c[0-7]:*|2c0f:f248:*) return 0 ;;
     esac
     is_valid_ipv4 "$ip" || return 1
-    IFS=. read -r a b c d <<< "$ip"
+    IFS=. read -r a b c _ <<< "$ip"
     case "$a.$b" in
         173.245) (( c >= 48 && c <= 63 )) ;;
         103.21)  (( c >= 244 && c <= 247 )) ;;
@@ -65,7 +65,7 @@ is_cloudflare_address() {
 
 probe_reality_sni_candidate() {
     local idx="$1" sni="$2" result_file="$3" require_h2="${4:-1}"
-    local out http_ver appconnect remote_ip ms attempt
+    local out http_ver appconnect remote_ip ms
     local success_count=0 total_ms=0 max_ms=0 attempts=3
     # 用 HEAD(-I) 探测：仅取响应头即可拿到协议版本与握手耗时，不下载正文，
     # 对低带宽 / 低配 VPS 更省流量和时间(h2/ALPN 是连接级，与请求方法无关)。
@@ -73,7 +73,7 @@ probe_reality_sni_candidate() {
     # 仅当本机 curl 支持 h2 时才协商 h2，否则该 flag 会让 curl 直接报错。
     (( require_h2 )) && curl_opts+=(--http2)
 
-    for attempt in $(seq 1 "$attempts"); do
+    for _ in $(seq 1 "$attempts"); do
         # 连续取样，优先选择成功率高且平均/最大握手延迟低的目标。
         out=$(curl --noproxy '*' -o /dev/null -s -w '%{http_version} %{time_appconnect} %{remote_ip}' \
             "${curl_opts[@]}" "https://${sni}" 2>/dev/null) || continue
@@ -427,14 +427,14 @@ argo_cf_domain_is_candidate() {
 
 probe_argo_cf_domain() {
     local idx="$1" domain="$2" family="$3" result_file="$4" attempts="${5:-3}"
-    local output code appconnect ms attempt
+    local output code appconnect ms
     local -a family_args=()
     local success_count=0 total_ms=0 max_ms=0
     [[ "$family" == "4" ]] && family_args=(-4)
     [[ "$family" == "6" ]] && family_args=(-6)
     argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}" && is_valid_hostname "$domain" || return 0
 
-    for attempt in $(seq 1 "$attempts"); do
+    for _ in $(seq 1 "$attempts"); do
         output=$(curl --noproxy '*' "${family_args[@]}" --http1.1 -sS -o /dev/null \
             --connect-timeout 3 --max-time 8 \
             --connect-to "${ARGO_DOMAIN}:443:${domain}:443" \
