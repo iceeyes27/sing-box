@@ -256,7 +256,6 @@ prompt_multiline() {
 
     printf -v "$__var_name" '%s' "$__content"
 }
-
 # ─── 权限 / 系统检测 ─────────────────────────────────────────
 check_root() {
     [[ $EUID -eq 0 ]] || error "请使用 root 权限运行: sudo bash $0"
@@ -423,7 +422,7 @@ service_logs() {
         *) return 1 ;;
     esac
 }
-
+# ─── 公网地址 / NAT ─────────────────────────────────────────
 is_valid_ipv4() {
     local ip="$1" octet
     local -a octets
@@ -701,7 +700,6 @@ link_ipv4_selection_label() {
         echo "${LINK_IPV4_SELECTION}"
     fi
 }
-
 # ─── 参数持久化 ──────────────────────────────────────────────
 PARAM_KEYS=(
     UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV REALITY_BACKEND WS_PORT WS_PATH NODE_NAME
@@ -966,6 +964,49 @@ load_params() {
     return 1
 }
 
+clear_argo_best_cf_cache() {
+    ARGO_BEST_CF_DOMAIN=""
+    ARGO_BEST_CF_DOMAIN_IPV4=""
+    ARGO_BEST_CF_DOMAIN_IPV6=""
+    ARGO_CF_CACHE_DOMAIN=""
+    ARGO_CF_CACHE_VERSION=""
+}
+
+restore_runtime_params() {
+    UUID="$1"
+    SHORT_ID="$2"
+    PRIVATE_KEY="$3"
+    PUBLIC_KEY="$4"
+    REALITY_PORT="$5"
+    REALITY_SNI="$6"
+    WS_PORT="$7"
+    WS_PATH="$8"
+    NODE_NAME="$9"
+    HY2_PORT="${10}"
+    HY2_PASSWORD="${11}"
+    HY2_SNI="${12}"
+    HY2_MASQUERADE_URL="${13:-${HY2_DEFAULT_MASQUERADE_URL}}"
+    SUBSCRIPTION_PORT="${14}"
+    ARGO_DOMAIN="${15}"
+    ARGO_TOKEN="${16}"
+    ARGO_BEST_CF_DOMAIN="${17}"
+    ARGO_BEST_CF_DOMAIN_IPV4="${18}"
+    ARGO_BEST_CF_DOMAIN_IPV6="${19}"
+    LINK_IPV4_SELECTION="${20:-all}"
+    PUBLIC_IPV4_OVERRIDE="${21:-}"
+    NAT_MODE="${22:-false}"
+    REALITY_PUBLIC_PORT="${23:-${REALITY_PORT}}"
+    HY2_PUBLIC_PORT="${24:-${HY2_PORT}}"
+    ARGO_ENABLED="${25:-false}"
+    HY2_ENABLED="${26:-false}"
+    SOCKS_PORT="${27:-}"
+    SOCKS_USERNAME="${28:-}"
+    SOCKS_PASSWORD="${29:-}"
+    SOCKS_ENABLED="${30:-false}"
+    SOCKS_PUBLIC_PORT="${31:-${SOCKS_PORT}}"
+    reset_public_ip_cache
+}
+# ─── 管理命令 (sbm) ─────────────────────────────────────────
 ensure_command_aliases() {
     [[ -f "$MANAGER_COMMAND" ]] || return 0
     ensure_command_link "$MANAGER_COMMAND" "$MANAGER_ALIAS_COMMAND"
@@ -1097,49 +1138,6 @@ install_manager_command() {
 
     warn "未能安装 sbm 命令，当前安装流程继续；请稍后重新执行在线安装命令修复"
     return 0
-}
-
-clear_argo_best_cf_cache() {
-    ARGO_BEST_CF_DOMAIN=""
-    ARGO_BEST_CF_DOMAIN_IPV4=""
-    ARGO_BEST_CF_DOMAIN_IPV6=""
-    ARGO_CF_CACHE_DOMAIN=""
-    ARGO_CF_CACHE_VERSION=""
-}
-
-restore_runtime_params() {
-    UUID="$1"
-    SHORT_ID="$2"
-    PRIVATE_KEY="$3"
-    PUBLIC_KEY="$4"
-    REALITY_PORT="$5"
-    REALITY_SNI="$6"
-    WS_PORT="$7"
-    WS_PATH="$8"
-    NODE_NAME="$9"
-    HY2_PORT="${10}"
-    HY2_PASSWORD="${11}"
-    HY2_SNI="${12}"
-    HY2_MASQUERADE_URL="${13:-${HY2_DEFAULT_MASQUERADE_URL}}"
-    SUBSCRIPTION_PORT="${14}"
-    ARGO_DOMAIN="${15}"
-    ARGO_TOKEN="${16}"
-    ARGO_BEST_CF_DOMAIN="${17}"
-    ARGO_BEST_CF_DOMAIN_IPV4="${18}"
-    ARGO_BEST_CF_DOMAIN_IPV6="${19}"
-    LINK_IPV4_SELECTION="${20:-all}"
-    PUBLIC_IPV4_OVERRIDE="${21:-}"
-    NAT_MODE="${22:-false}"
-    REALITY_PUBLIC_PORT="${23:-${REALITY_PORT}}"
-    HY2_PUBLIC_PORT="${24:-${HY2_PORT}}"
-    ARGO_ENABLED="${25:-false}"
-    HY2_ENABLED="${26:-false}"
-    SOCKS_PORT="${27:-}"
-    SOCKS_USERNAME="${28:-}"
-    SOCKS_PASSWORD="${29:-}"
-    SOCKS_ENABLED="${30:-false}"
-    SOCKS_PUBLIC_PORT="${31:-${SOCKS_PORT}}"
-    reset_public_ip_cache
 }
 # ─── 安装组件 ────────────────────────────────────────────────
 get_meminfo_kb() {
@@ -4352,7 +4350,6 @@ do_primary_install() {
 
     press_enter
 }
-
 # ─── 修改配置 ────────────────────────────────────────────────
 prompt_modify_action() {
     local output_var="$1" category="$2" menu_choice action
@@ -4964,7 +4961,6 @@ do_modify_config() {
         fi
     done
 }
-
 # ─── 查看链接 ────────────────────────────────────────────────
 do_show_links() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
@@ -5431,7 +5427,6 @@ do_uninstall() {
     success "卸载完成"
     press_enter
 }
-
 # ─── Banner ──────────────────────────────────────────────────
 show_banner() {
     clear
