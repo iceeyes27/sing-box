@@ -30,7 +30,13 @@ CFOPT_CRON_D="/etc/cron.d/sbm-cfopt"
 XRAY_CONFIG_DIR="/etc/xray"
 XRAY_CONFIG_FILE="${XRAY_CONFIG_DIR}/config.json"
 SINGBOX_OPENRC_SERVICE="/etc/init.d/sing-box"
+SINGBOX_SYSTEMD_SERVICE="/etc/systemd/system/sing-box.service"
+SINGBOX_SYSTEMD_MANAGED_MARKER="# Managed by sbm: sing-box installed from release tarball"
+SINGBOX_PACKAGED_UNIT_DIRS=(/lib/systemd/system /usr/lib/systemd/system)
 SINGBOX_SYSTEMD_DROPIN_DIR="/etc/systemd/system/sing-box.service.d"
+# 仓库内置的 sing-box 备份 (vendor/sing-box/)：官方安装渠道均不可用时使用。
+VENDORED_SINGBOX_VERSION="1.14.3"
+VENDORED_SINGBOX_BASE_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/vendor/sing-box"
 SINGBOX_SYSTEMD_OVERRIDE_FILE="${SINGBOX_SYSTEMD_DROPIN_DIR}/override.conf"
 HY2_DEFAULT_PORT=8443
 HY2_DEFAULT_SNI="bing.com"

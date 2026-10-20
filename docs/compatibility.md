@@ -19,7 +19,17 @@
 | `x86_64` / `amd64` | `amd64` | `amd64` | 常见 x86_64 VPS |
 | `aarch64` / `arm64` | `arm64` | `arm64` | ARM64 VPS |
 | `armv7l` / `armhf` | `armv7` | `arm` | 32 位 ARM |
-| `i386` / `i686` | `386` | 默认 `amd64` 不保证 | sing-box 支持，cloudflared 需实机确认 |
+| `i386` / `i686` | `386` | `386` | 32 位 x86 |
+
+## sing-box 安装来源
+
+按顺序尝试，前一个失败才使用下一个：
+
+1. 系统软件包：Alpine 使用 `apk`，其他系统使用 `sing-box.app` 官方安装脚本（deb / rpm）。
+2. 官方 GitHub release 的 `linux-<arch>-musl` 二进制包。
+3. 本仓库 [vendor/sing-box/](../vendor/sing-box/) 内置的同名 musl 包（版本见 `VERSION`）：从仓库检出运行时直接读取本地文件，否则从本仓库 raw 地址下载。
+
+第 2、3 步安装到 `/usr/local/bin/sing-box`；systemd 系统上若没有软件包提供的 `sing-box.service`，脚本会写入带 `# Managed by sbm` 标记的 `/etc/systemd/system/sing-box.service`。之后若改用软件包安装成功，会移除这两个文件，避免遮蔽软件包版本。`sbm` 更新 sing-box 时，内置包只在版本高于当前已安装版本时才会使用。
 
 ## 低资源策略
 

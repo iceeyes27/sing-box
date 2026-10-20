@@ -19,7 +19,7 @@ make check
 - 重新生成 `install.sh`
 - Bash 语法检查
 - 回归测试
-- ShellCheck（本机未安装时会跳过）
+- ShellCheck warning 级别（本机未安装时会跳过）
 - 生成 `dist/install.sh.sha256`
 
 ## 3. 创建版本标签
