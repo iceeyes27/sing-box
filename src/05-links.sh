@@ -558,6 +558,7 @@ build_share_links() {
     case "${IP_STACK_MODE:-}" in
         dual-stack)
             build_direct_share_links_for_selected_ipv4s
+            build_socks_link_for_ip "${PUBLIC_IPV6:-}"
             ;;
         ipv6-only)
             build_socks_link_for_ip "${PUBLIC_IPV6:-${PUBLIC_IP:-}}"

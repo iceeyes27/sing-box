@@ -92,6 +92,8 @@ NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持
 - 放行对应 TCP 端口并重启 sing-box；
 - 输出可直接粘贴到代理池的 `socks5://用户名:密码@IP:端口` 链接。
 
+双栈 VPS 同时输出 IPv4 和 IPv6 SOCKS5 链接，IPv6 地址使用方括号：`socks5://用户名:密码@[IPv6]:端口`。
+
 SOCKS5 不会加入 VLESS/Hysteria2 订阅内容，只写入终端输出和 `/etc/sing-box/share-links.txt`。公网使用时应在 VPS 安全组中把 SOCKS5 端口限制为业务服务器的固定出口 IP。
 
 ## 🧭 部署方式
