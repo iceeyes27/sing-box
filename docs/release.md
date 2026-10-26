@@ -1,5 +1,10 @@
 # 发布流程
 
+## 0. 更新版本号
+
+更新 `src/01-core.sh` 中的 `SCRIPT_VERSION`，并同步 README 中的面板版本示例。
+功能改动、版本号、重新生成的 `install.sh` 和 `dist/install.sh.sha256` 应一并提交，推送前确认版本一致。
+
 ## 1. 构建单文件安装脚本
 
 开发态源码位于 `src/`，发布态脚本为仓库根目录的 `install.sh`。
