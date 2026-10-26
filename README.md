@@ -48,17 +48,19 @@ sbm
 
 **面板概览：**
 ```text
-  sing-box 管理面板  v3.1.3
+  sing-box 管理面板  v3.1.4
   ────────────────────────────────────────
   sing-box: ● 运行中    argo-tunnel: ● 运行中
 
   主菜单
-   1) 节点与协议     安装 / Reality / Hysteria2 / SOCKS5 / 节点身份
+   1) 节点与协议     安装 / Reality / Hysteria2 / SOCKS5 / Argo / 节点身份
    2) 连接与订阅     Argo / NAT / IPv4 / 链接与订阅
    3) 服务与诊断     启动 / 停止 / 重启 / 状态 / 日志 / 自启 / 协议自检
    4) 系统维护       更新 / 配置同步 / 卸载
    0) 退出
 ```
+
+在“节点与协议 → Argo 隧道”中可启用、停用或修改 Argo，“连接与订阅”保留原入口。Argo 是可选的 Cloudflare 隧道；Reality、Hysteria2 和 SOCKS5 使用独立直连入口，Reality 伪装域名继续排除 Cloudflare 地址。
 
 ## ⌨️ 命令行快捷操作
 

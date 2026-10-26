@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.1.3"
+SCRIPT_VERSION="3.1.4"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -4520,9 +4520,10 @@ prompt_modify_action() {
                 menu_item 2 "重新生成 UUID"
                 ;;
             argo)
-                menu_header "连接与订阅 / Argo"
+                menu_header "${MENU_CONTEXT:-连接与订阅} / Argo"
                 menu_section "当前状态"
                 echo "  $(argo_mode_label) · 订阅本机端口 ${SUBSCRIPTION_PORT}/TCP"
+                echo "  Argo 通过 Cloudflare 隧道连接，其他协议保持直连。"
                 menu_section "隧道与订阅"
                 menu_item 1 "修改隧道模式、Token 或域名"
                 menu_item 2 "更新订阅链接"
@@ -5051,7 +5052,7 @@ apply_modified_config() {
 
 do_modify_config() {
     local category="${1:-reality}" selected_action choice
-    local MENU_CONTEXT="当前配置页"
+    local MENU_CONTEXT="${MENU_CONTEXT:-当前配置页}"
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
     while true; do
@@ -5628,7 +5629,7 @@ show_banner() {
 # ─── 主菜单 ──────────────────────────────────────────────────
 show_menu() {
     menu_section "主菜单"
-    menu_item 1 "节点与协议" "安装 / Reality / Hysteria2 / SOCKS5"
+    menu_item 1 "节点与协议" "安装 / Reality / Hysteria2 / SOCKS5 / Argo"
     menu_item 2 "连接与订阅" "Argo / NAT / 链接"
     menu_item 3 "服务与诊断" "运行 / 状态 / 日志"
     menu_item 4 "系统维护" "更新 / 配置同步 / 卸载"
@@ -5647,15 +5648,17 @@ node_menu() {
         menu_item 2 "Reality"
         menu_item 3 "Hysteria2"
         menu_item 4 "SOCKS5"
-        menu_item 5 "节点身份"
+        menu_item 5 "Argo 隧道" "可选"
+        menu_item 6 "节点身份"
         menu_back
-        prompt_read choice "  选择 [0-5]: " || return
+        prompt_read choice "  选择 [0-6]: " || return
         case "$choice" in
             1) do_primary_install ;;
             2) do_modify_config reality ;;
             3) do_modify_config hy2 ;;
             4) do_modify_config socks ;;
-            5) do_modify_config identity ;;
+            5) do_modify_config argo ;;
+            6) do_modify_config identity ;;
             0) return ;;
             *) warn "无效选项" ;;
         esac

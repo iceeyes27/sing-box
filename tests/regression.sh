@@ -2244,8 +2244,9 @@ test_menu_navigation_and_actions() (
     do_uninstall() { echo uninstall >> "$tmp/actions"; }
     press_enter() { :; }
 
-    node_menu <<< $'1\n2\n3\n4\n5\n0\n' > "$tmp/node"
-    assert_eq $'install\nconfig:reality\nconfig:hy2\nconfig:socks\nconfig:identity' "$(<"$tmp/actions")" "node menu dispatch"
+    node_menu <<< $'1\n2\n3\n4\n5\n6\n0\n' > "$tmp/node"
+    assert_eq $'install\nconfig:reality\nconfig:hy2\nconfig:socks\nconfig:argo\nconfig:identity' "$(<"$tmp/actions")" "node menu dispatch"
+    assert_contains "$(<"$tmp/node")" '5) Argo 隧道' "Argo is listed with protocols"
     : > "$tmp/actions"
     connection_menu <<< $'1\n2\n3\n0\n' > "$tmp/connection"
     assert_eq $'config:argo\nlinks\nconfig:network' "$(<"$tmp/actions")" "connection menu dispatch"
@@ -2302,6 +2303,14 @@ test_modify_menu_categories() (
         prompt_modify_action selected "$category" <<< "$input" > /dev/null
         assert_eq "$expected" "$selected" "$category option $input mapping"
     done
+    local MENU_CONTEXT="节点与协议"
+    prompt_modify_action selected argo <<< '0' > "$tmp/argo-node"
+    assert_contains "$(<"$tmp/argo-node")" '节点与协议 / Argo' "Argo breadcrumb from node menu"
+    assert_contains "$(<"$tmp/argo-node")" 'Argo 通过 Cloudflare 隧道连接，其他协议保持直连。' "Argo dependency explained"
+    assert_eq false "$ARGO_ENABLED" "viewing Argo settings does not enable the tunnel"
+    MENU_CONTEXT="连接与订阅"
+    prompt_modify_action selected argo <<< '0' > "$tmp/argo-connection"
+    assert_contains "$(<"$tmp/argo-connection")" '连接与订阅 / Argo' "Argo breadcrumb from connection menu"
     assert_not_contains "$(menu_header '菜单预览')" $'\033' "redirected menu has no ANSI escape"
 )
 

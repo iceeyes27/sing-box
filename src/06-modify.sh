@@ -45,9 +45,10 @@ prompt_modify_action() {
                 menu_item 2 "重新生成 UUID"
                 ;;
             argo)
-                menu_header "连接与订阅 / Argo"
+                menu_header "${MENU_CONTEXT:-连接与订阅} / Argo"
                 menu_section "当前状态"
                 echo "  $(argo_mode_label) · 订阅本机端口 ${SUBSCRIPTION_PORT}/TCP"
+                echo "  Argo 通过 Cloudflare 隧道连接，其他协议保持直连。"
                 menu_section "隧道与订阅"
                 menu_item 1 "修改隧道模式、Token 或域名"
                 menu_item 2 "更新订阅链接"
@@ -576,7 +577,7 @@ apply_modified_config() {
 
 do_modify_config() {
     local category="${1:-reality}" selected_action choice
-    local MENU_CONTEXT="当前配置页"
+    local MENU_CONTEXT="${MENU_CONTEXT:-当前配置页}"
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
     while true; do

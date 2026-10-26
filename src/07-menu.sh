@@ -26,7 +26,7 @@ show_banner() {
 # ─── 主菜单 ──────────────────────────────────────────────────
 show_menu() {
     menu_section "主菜单"
-    menu_item 1 "节点与协议" "安装 / Reality / Hysteria2 / SOCKS5"
+    menu_item 1 "节点与协议" "安装 / Reality / Hysteria2 / SOCKS5 / Argo"
     menu_item 2 "连接与订阅" "Argo / NAT / 链接"
     menu_item 3 "服务与诊断" "运行 / 状态 / 日志"
     menu_item 4 "系统维护" "更新 / 配置同步 / 卸载"
@@ -45,15 +45,17 @@ node_menu() {
         menu_item 2 "Reality"
         menu_item 3 "Hysteria2"
         menu_item 4 "SOCKS5"
-        menu_item 5 "节点身份"
+        menu_item 5 "Argo 隧道" "可选"
+        menu_item 6 "节点身份"
         menu_back
-        prompt_read choice "  选择 [0-5]: " || return
+        prompt_read choice "  选择 [0-6]: " || return
         case "$choice" in
             1) do_primary_install ;;
             2) do_modify_config reality ;;
             3) do_modify_config hy2 ;;
             4) do_modify_config socks ;;
-            5) do_modify_config identity ;;
+            5) do_modify_config argo ;;
+            6) do_modify_config identity ;;
             0) return ;;
             *) warn "无效选项" ;;
         esac
