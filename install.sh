@@ -623,6 +623,25 @@ nat_mode_enabled() {
     [[ "${NAT_MODE:-false}" == "true" ]]
 }
 
+# 出站 IP 优先级：default 不写 DNS/解析策略，保持 sing-box 默认行为；
+# 其余取值直接作为 direct 出站 domain_resolver.strategy。
+is_valid_outbound_ip_strategy() {
+    case "${1:-}" in
+        default|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only) return 0 ;;
+    esac
+    return 1
+}
+
+outbound_ip_strategy_label() {
+    case "${1:-${OUTBOUND_IP_STRATEGY:-default}}" in
+        prefer_ipv4) echo "优先 IPv4" ;;
+        prefer_ipv6) echo "优先 IPv6" ;;
+        ipv4_only)   echo "仅 IPv4" ;;
+        ipv6_only)   echo "仅 IPv6" ;;
+        *)           echo "默认" ;;
+    esac
+}
+
 reality_share_port() {
     if nat_mode_enabled; then
         printf '%s' "${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
@@ -722,6 +741,7 @@ PARAM_KEYS=(
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
     SOCKS_PORT SOCKS_USERNAME SOCKS_PASSWORD SOCKS_ENABLED
     NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT SOCKS_PUBLIC_PORT
+    OUTBOUND_IP_STRATEGY
 )
 
 is_param_key() {
@@ -971,6 +991,10 @@ load_params() {
             SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
             need_save=true
         fi
+        if ! is_valid_outbound_ip_strategy "${OUTBOUND_IP_STRATEGY:-}"; then
+            OUTBOUND_IP_STRATEGY="default"
+            need_save=true
+        fi
         [[ "$need_save" == "true" ]] && save_params
         return 0
     fi
@@ -1017,6 +1041,7 @@ restore_runtime_params() {
     SOCKS_PASSWORD="${29:-}"
     SOCKS_ENABLED="${30:-false}"
     SOCKS_PUBLIC_PORT="${31:-${SOCKS_PORT}}"
+    OUTBOUND_IP_STRATEGY="${32:-default}"
     reset_public_ip_cache
 }
 # ─── 管理命令 (sbm) ─────────────────────────────────────────
@@ -1998,6 +2023,13 @@ generate_params() {
     SOCKS_PASSWORD=$(random_hex 16)
     SOCKS_ENABLED="false"
 
+    # 出站 IP 优先级，可通过环境变量 OUTBOUND_IP_STRATEGY=prefer_ipv6 等在安装时指定。
+    OUTBOUND_IP_STRATEGY="${OUTBOUND_IP_STRATEGY:-default}"
+    if ! is_valid_outbound_ip_strategy "$OUTBOUND_IP_STRATEGY"; then
+        warn "无效的 OUTBOUND_IP_STRATEGY=${OUTBOUND_IP_STRATEGY}，已使用默认出站策略"
+        OUTBOUND_IP_STRATEGY="default"
+    fi
+
     success "参数生成完成"
 }
 
@@ -2756,6 +2788,10 @@ write_singbox_config() {
     if [[ -n "$missing" ]]; then
         error "配置生成失败: 以下关键变量为空: ${missing}"
     fi
+    local outbound_ip_strategy="${OUTBOUND_IP_STRATEGY:-default}"
+    if ! is_valid_outbound_ip_strategy "$outbound_ip_strategy"; then
+        error "配置生成失败: 无效的出站 IP 优先级: ${outbound_ip_strategy}"
+    fi
 
     local json_uuid json_reality_sni json_private_key json_short_id json_ws_path argo_inbound hy2_inbound
     local json_hy2_password json_hy2_sni json_key_path json_cert_path
@@ -2895,6 +2931,32 @@ REALITY_EOF
         fi
     done
 
+    # 出站 IP 优先级：sing-box 1.12+ 已移除 direct.domain_strategy，
+    # 改为 domain_resolver 指向本机系统 DNS 并携带 strategy。
+    local dns_section="" direct_resolver=""
+    if [[ "$outbound_ip_strategy" != "default" ]]; then
+        dns_section=$(cat << DNS_EOF
+
+    "dns": {
+        "servers": [
+            {
+                "type": "local",
+                "tag": "local"
+            }
+        ]
+    },
+DNS_EOF
+)
+        direct_resolver=$(cat << RESOLVER_EOF
+,
+            "domain_resolver": {
+                "server": "local",
+                "strategy": "${outbound_ip_strategy}"
+            }
+RESOLVER_EOF
+)
+    fi
+
     cat > "$CONFIG_FILE" << SINGBOX_EOF
 {
     "log": {
@@ -2903,11 +2965,11 @@ REALITY_EOF
     },
     "inbounds": [
 ${inbounds_joined}
-    ],
+    ],${dns_section}
     "outbounds": [
         {
             "type": "direct",
-            "tag": "direct"
+            "tag": "direct"${direct_resolver}
         },
         {
             "type": "block",
@@ -4041,6 +4103,9 @@ generate_and_show_links() {
     if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" || $(public_ipv4_candidate_count) -gt 1 ]]; then
         echo -e "  IPv4 策略:     ${BOLD}$(link_ipv4_selection_label)${NC}"
     fi
+    if [[ "${OUTBOUND_IP_STRATEGY:-default}" != "default" ]]; then
+        echo -e "  出站优先级:    ${BOLD}$(outbound_ip_strategy_label)${NC}"
+    fi
     if [[ "${IP_STACK_MODE:-}" == "unknown" ]]; then
         echo -e "  ${DIM}提示: 可在 [连接与订阅] -> [公网 IPv4 与 NAT] 设置正确公网 IP 后重新生成链接。${NC}"
     fi
@@ -4592,10 +4657,12 @@ prompt_modify_action() {
                 menu_header "连接与订阅 / 公网与 NAT"
                 menu_section "当前状态"
                 echo "  NAT $(nat_mode_enabled && printf '已启用' || printf '未启用') · $(public_ipv4_override_label)"
+                echo "  出站 IP 优先级: $(outbound_ip_strategy_label)"
                 menu_section "公网设置"
                 menu_item 1 "修改 NAT 公网映射"
                 menu_item 2 "修改直连公网 IPv4"
                 menu_item 3 "修改 IPv4 链接策略"
+                menu_item 4 "修改出站 IP 优先级" "$(outbound_ip_strategy_label)"
                 ;;
             *) warn "未知配置分类: ${category}"; return 1 ;;
         esac
@@ -4611,6 +4678,7 @@ prompt_modify_action() {
             identity:1) action=5 ;; identity:2) action=3 ;;
             argo:1) action=10 ;; argo:2) action=11 ;; argo:3) action=12 ;;
             network:1) action=15 ;; network:2) action=14 ;; network:3) action=13 ;;
+            network:4) action=18 ;;
         esac
         if [[ -n "$action" ]]; then
             printf -v "$output_var" '%s' "$action"
@@ -4958,6 +5026,61 @@ modify_socks() {
     restart_singbox=true
 }
 
+modify_outbound_ip_strategy() {
+    local sub_choice="" new_strategy=""
+    menu_header "连接与订阅 / 公网与 NAT / 出站 IP 优先级"
+    menu_section "当前: $(outbound_ip_strategy_label)"
+    echo "  决定代理访问目标网站时走 IPv4 还是 IPv6，与客户端用哪种 IP 连入无关。"
+    echo "  仅对客户端交给服务端解析的域名生效（远程 DNS / socks5h）。"
+    menu_item 1 "默认" "sing-box 自动选择"
+    menu_item 2 "优先 IPv4" "目标无 IPv4 时使用 IPv6"
+    menu_item 3 "优先 IPv6" "目标无 IPv6 时使用 IPv4"
+    menu_item 4 "仅 IPv4"
+    menu_item 5 "仅 IPv6" "仅有 IPv4 的网站将无法访问"
+    menu_back "取消"
+    prompt_read sub_choice "  请选择 [0]: " || return 1
+    case "${sub_choice:-0}" in
+        1) new_strategy="default" ;;
+        2) new_strategy="prefer_ipv4" ;;
+        3) new_strategy="prefer_ipv6" ;;
+        4) new_strategy="ipv4_only" ;;
+        5) new_strategy="ipv6_only" ;;
+        0) return 1 ;;
+        *) warn "无效选项"; return 1 ;;
+    esac
+    if [[ "$new_strategy" == "$old_outbound_ip_strategy" ]]; then
+        info "出站 IP 优先级未变化"
+        press_enter
+        return 1
+    fi
+    case "$new_strategy" in
+        prefer_ipv6|ipv6_only)
+            if ! fetch_public_ipv6 >/dev/null; then
+                if [[ "$new_strategy" == "ipv6_only" ]]; then
+                    warn "未检测到 IPv6 出站，不能设为仅 IPv6"
+                    press_enter
+                    return 1
+                fi
+                warn "未检测到 IPv6 出站，优先 IPv6 实际仍会使用 IPv4"
+            fi
+            ;;
+        ipv4_only)
+            if ! fetch_public_ipv4 >/dev/null; then
+                warn "未检测到 IPv4 出站，不能设为仅 IPv4"
+                press_enter
+                return 1
+            fi
+            ;;
+    esac
+    if [[ "${REALITY_BACKEND:-singbox}" == "xray" ]]; then
+        warn "Reality 由 Xray 承载，此设置不影响 Reality 流量的出站"
+    fi
+    OUTBOUND_IP_STRATEGY="$new_strategy"
+    info "出站 IP 优先级: $(outbound_ip_strategy_label)"
+    changed=true
+    restart_singbox=true
+}
+
 modify_config_action() {
     case "$1" in
         1)  modify_reality_port ;;
@@ -4975,6 +5098,7 @@ modify_config_action() {
         15) modify_nat_mapping ;;
         16) modify_hy2_enabled ;;
         17) modify_socks ;;
+        18) modify_outbound_ip_strategy ;;
         *)  return 1 ;;
     esac
 }
@@ -5146,6 +5270,7 @@ do_modify_config() {
         local old_socks_password="${SOCKS_PASSWORD}"
         local old_socks_enabled="${SOCKS_ENABLED:-false}"
         local old_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
+        local old_outbound_ip_strategy="${OUTBOUND_IP_STRATEGY:-default}"
         local old_socks_active_port=""
         [[ "$old_socks_enabled" == "true" ]] && old_socks_active_port="$old_socks_port"
         local -a old_runtime_params=(
@@ -5157,6 +5282,7 @@ do_modify_config() {
             "$old_link_ipv4_selection" "$old_public_ipv4_override" "$old_nat_mode"
             "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
             "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
+            "$old_outbound_ip_strategy"
         )
         prompt_modify_action selected_action "$category" || return
         choice="$selected_action"

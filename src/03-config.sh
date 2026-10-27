@@ -48,6 +48,13 @@ generate_params() {
     SOCKS_PASSWORD=$(random_hex 16)
     SOCKS_ENABLED="false"
 
+    # 出站 IP 优先级，可通过环境变量 OUTBOUND_IP_STRATEGY=prefer_ipv6 等在安装时指定。
+    OUTBOUND_IP_STRATEGY="${OUTBOUND_IP_STRATEGY:-default}"
+    if ! is_valid_outbound_ip_strategy "$OUTBOUND_IP_STRATEGY"; then
+        warn "无效的 OUTBOUND_IP_STRATEGY=${OUTBOUND_IP_STRATEGY}，已使用默认出站策略"
+        OUTBOUND_IP_STRATEGY="default"
+    fi
+
     success "参数生成完成"
 }
 
@@ -806,6 +813,10 @@ write_singbox_config() {
     if [[ -n "$missing" ]]; then
         error "配置生成失败: 以下关键变量为空: ${missing}"
     fi
+    local outbound_ip_strategy="${OUTBOUND_IP_STRATEGY:-default}"
+    if ! is_valid_outbound_ip_strategy "$outbound_ip_strategy"; then
+        error "配置生成失败: 无效的出站 IP 优先级: ${outbound_ip_strategy}"
+    fi
 
     local json_uuid json_reality_sni json_private_key json_short_id json_ws_path argo_inbound hy2_inbound
     local json_hy2_password json_hy2_sni json_key_path json_cert_path
@@ -945,6 +956,32 @@ REALITY_EOF
         fi
     done
 
+    # 出站 IP 优先级：sing-box 1.12+ 已移除 direct.domain_strategy，
+    # 改为 domain_resolver 指向本机系统 DNS 并携带 strategy。
+    local dns_section="" direct_resolver=""
+    if [[ "$outbound_ip_strategy" != "default" ]]; then
+        dns_section=$(cat << DNS_EOF
+
+    "dns": {
+        "servers": [
+            {
+                "type": "local",
+                "tag": "local"
+            }
+        ]
+    },
+DNS_EOF
+)
+        direct_resolver=$(cat << RESOLVER_EOF
+,
+            "domain_resolver": {
+                "server": "local",
+                "strategy": "${outbound_ip_strategy}"
+            }
+RESOLVER_EOF
+)
+    fi
+
     cat > "$CONFIG_FILE" << SINGBOX_EOF
 {
     "log": {
@@ -953,11 +990,11 @@ REALITY_EOF
     },
     "inbounds": [
 ${inbounds_joined}
-    ],
+    ],${dns_section}
     "outbounds": [
         {
             "type": "direct",
-            "tag": "direct"
+            "tag": "direct"${direct_resolver}
         },
         {
             "type": "block",

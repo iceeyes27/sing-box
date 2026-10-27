@@ -7,6 +7,7 @@ PARAM_KEYS=(
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
     SOCKS_PORT SOCKS_USERNAME SOCKS_PASSWORD SOCKS_ENABLED
     NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT SOCKS_PUBLIC_PORT
+    OUTBOUND_IP_STRATEGY
 )
 
 is_param_key() {
@@ -256,6 +257,10 @@ load_params() {
             SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
             need_save=true
         fi
+        if ! is_valid_outbound_ip_strategy "${OUTBOUND_IP_STRATEGY:-}"; then
+            OUTBOUND_IP_STRATEGY="default"
+            need_save=true
+        fi
         [[ "$need_save" == "true" ]] && save_params
         return 0
     fi
@@ -302,5 +307,6 @@ restore_runtime_params() {
     SOCKS_PASSWORD="${29:-}"
     SOCKS_ENABLED="${30:-false}"
     SOCKS_PUBLIC_PORT="${31:-${SOCKS_PORT}}"
+    OUTBOUND_IP_STRATEGY="${32:-default}"
     reset_public_ip_cache
 }

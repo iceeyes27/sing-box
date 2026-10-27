@@ -207,6 +207,25 @@ nat_mode_enabled() {
     [[ "${NAT_MODE:-false}" == "true" ]]
 }
 
+# 出站 IP 优先级：default 不写 DNS/解析策略，保持 sing-box 默认行为；
+# 其余取值直接作为 direct 出站 domain_resolver.strategy。
+is_valid_outbound_ip_strategy() {
+    case "${1:-}" in
+        default|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only) return 0 ;;
+    esac
+    return 1
+}
+
+outbound_ip_strategy_label() {
+    case "${1:-${OUTBOUND_IP_STRATEGY:-default}}" in
+        prefer_ipv4) echo "优先 IPv4" ;;
+        prefer_ipv6) echo "优先 IPv6" ;;
+        ipv4_only)   echo "仅 IPv4" ;;
+        ipv6_only)   echo "仅 IPv6" ;;
+        *)           echo "默认" ;;
+    esac
+}
+
 reality_share_port() {
     if nat_mode_enabled; then
         printf '%s' "${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"

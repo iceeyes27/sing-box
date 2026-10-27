@@ -83,6 +83,8 @@ sbm uninstall       # 完全卸载本项目及其生成的所有缓存与配置
 
 NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持服务使用本机监听端口。Reality 的公网端口与本机监听端口可在“修改 Reality 端口”中一次确认；其他协议的公网端口可在“修改 NAT 公网映射”中更新。脚本会检查 Reality 新端口在本机监听，但无法修改或验证服务商面板的实际映射。
 
+代理访问目标网站时走 IPv4 还是 IPv6，与客户端用哪种 IP 连入无关，可在“连接与订阅”→“公网与 NAT”→“修改出站 IP 优先级”中设置：默认、优先 IPv4、优先 IPv6、仅 IPv4、仅 IPv6；安装时也可用环境变量 `OUTBOUND_IP_STRATEGY=prefer_ipv6` 等指定。非默认值会写入 sing-box `direct` 出站的 `domain_resolver`（系统 DNS + `strategy`），重新生成配置时保持不变。该设置只对客户端交给服务端解析的域名生效（远程 DNS / `socks5h`），不影响由 Xray 承载的 Reality。
+
 ## 🔌 可选 SOCKS5 代理
 
 主节点安装完成后运行 `sbm`，依次进入“节点与协议”→“SOCKS5”→“管理 SOCKS5 代理”。启用后脚本会：

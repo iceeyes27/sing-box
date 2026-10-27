@@ -230,6 +230,7 @@ EOF
     assert_eq "$SOCKS_PORT" "$SOCKS_PUBLIC_PORT" "legacy SOCKS5 public port migration"
     assert_eq "false" "$ARGO_ENABLED" "legacy empty Argo remains disabled"
     assert_eq "singbox" "$REALITY_BACKEND" "legacy Reality backend defaults to sing-box"
+    assert_eq "default" "$OUTBOUND_IP_STRATEGY" "legacy outbound IP strategy keeps sing-box default"
     XRAY_CONFIG_FILE="$old_xray_config"
     rm -rf "$tmp"
 }
@@ -786,7 +787,7 @@ test_runtime_param_restore_is_complete() {
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
         "198.51.100.20" "true" "30443" "30444" "true" "false" \
-        "10808" "proxy-old" "socks-old" "true" "31080"
+        "10808" "proxy-old" "socks-old" "true" "31080" "prefer_ipv6"
 
     UUID="uuid-new"
     SHORT_ID="sid-new"
@@ -819,6 +820,7 @@ test_runtime_param_restore_is_complete() {
     SOCKS_PASSWORD="socks-new"
     SOCKS_ENABLED="false"
     SOCKS_PUBLIC_PORT="31081"
+    OUTBOUND_IP_STRATEGY="ipv4_only"
 
     restore_runtime_params \
         "uuid-old" "sid-old" "private-old" "public-old" \
@@ -827,7 +829,7 @@ test_runtime_param_restore_is_complete() {
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
         "198.51.100.20" "true" "30443" "30444" "true" "false" \
-        "10808" "proxy-old" "socks-old" "true" "31080"
+        "10808" "proxy-old" "socks-old" "true" "31080" "prefer_ipv6"
 
     assert_eq "uuid-old" "$UUID" "restore UUID"
     assert_eq "sid-old" "$SHORT_ID" "restore Short ID"
@@ -860,6 +862,7 @@ test_runtime_param_restore_is_complete() {
     assert_eq "socks-old" "$SOCKS_PASSWORD" "restore SOCKS5 password"
     assert_eq "true" "$SOCKS_ENABLED" "restore SOCKS5 enabled state"
     assert_eq "31080" "$SOCKS_PUBLIC_PORT" "restore SOCKS5 public port"
+    assert_eq "prefer_ipv6" "$OUTBOUND_IP_STRATEGY" "restore outbound IP strategy"
 }
 
 test_hysteria2_config_uses_static_masquerade() {
@@ -981,6 +984,49 @@ test_optional_inbounds_follow_feature_state() {
     assert_contains "$config_with_socks" '"password": "pass\\word"' "SOCKS5 password JSON escaping"
     SOCKS_ENABLED="false"
 }
+
+test_outbound_ip_strategy_controls_direct_resolver() (
+    local tmp config strategy
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    chown() { return 0; }
+    sing-box() { [[ "${1:-}" == "check" ]]; }
+    CONFIG_DIR="$tmp"
+    CONFIG_FILE="${tmp}/config.json"
+    UUID="uuid-1"; REALITY_PORT="443"; REALITY_SNI="www.microsoft.com"
+    PRIVATE_KEY="private"; SHORT_ID="abcd1234"; WS_PORT="18080"; WS_PATH="/abcd1234"
+    HY2_ENABLED="false"; SOCKS_ENABLED="false"; REALITY_BACKEND="singbox"
+    ARGO_ENABLED="false"; ARGO_TOKEN=""; ARGO_DOMAIN=""
+
+    OUTBOUND_IP_STRATEGY="default"
+    write_singbox_config >/dev/null
+    python3 -m json.tool "$CONFIG_FILE" >/dev/null || fail "default outbound config is not valid JSON"
+    config=$(<"$CONFIG_FILE")
+    assert_not_contains "$config" '"dns"' "default outbound strategy omits DNS section"
+    assert_not_contains "$config" '"domain_resolver"' "default outbound strategy omits resolver"
+
+    for strategy in prefer_ipv4 prefer_ipv6 ipv4_only ipv6_only; do
+        OUTBOUND_IP_STRATEGY="$strategy"
+        write_singbox_config >/dev/null
+        python3 - "$CONFIG_FILE" "$strategy" <<'PY' || fail "${strategy} outbound config mismatch"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    config = json.load(handle)
+assert config["dns"]["servers"] == [{"type": "local", "tag": "local"}]
+direct = config["outbounds"][0]
+assert direct["type"] == "direct"
+assert direct["domain_resolver"] == {"server": "local", "strategy": sys.argv[2]}
+assert "domain_strategy" not in direct
+PY
+    done
+
+    OUTBOUND_IP_STRATEGY='prefer_ipv6", "x": "y'
+    if (write_singbox_config >/dev/null 2>&1); then
+        fail "invalid outbound IP strategy accepted"
+    fi
+)
 
 test_only_primary_deployment_entrypoints_remain() {
     local output check_root_def detect_os_def install_manager_command_def
@@ -2162,6 +2208,61 @@ test_modify_socks_cancel_restores_params() (
     assert_eq false "$SOCKS_ENABLED" "canceled SOCKS5 enable keeps SOCKS5 disabled"
 )
 
+test_modify_outbound_ip_strategy() (
+    local tmp output
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    UUID=uuid; SHORT_ID=short; PRIVATE_KEY=private; PUBLIC_KEY=public
+    REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; REALITY_SNI=example.com; REALITY_BACKEND=singbox
+    WS_PORT=8080; WS_PATH=/short; NODE_NAME=test
+    HY2_PORT=8443; HY2_PASSWORD=hy2-pass; HY2_SNI=example.com; HY2_ENABLED=false
+    SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; ARGO_DOMAIN=""; ARGO_TOKEN=""
+    LINK_IPV4_SELECTION=all; PUBLIC_IPV4_OVERRIDE=""; NAT_MODE=false
+    SOCKS_PORT=20023; SOCKS_USERNAME=user; SOCKS_PASSWORD=pass; SOCKS_ENABLED=true; SOCKS_PUBLIC_PORT=20023
+    OUTBOUND_IP_STRATEGY=default
+
+    clear() { :; }; press_enter() { :; }; sleep() { :; }
+    load_params() { :; }; prompt_read() { read -r "$1"; }
+    validate_service_ports() { :; }; open_service_ports() { :; }
+    generate_tls_cert() { :; }; write_singbox_service() { :; }
+    write_singbox_config() { printf '%s\n' "$OUTBOUND_IP_STRATEGY" >> "$tmp/configs"; }
+    save_params() { printf '%s\n' "$OUTBOUND_IP_STRATEGY" >> "$tmp/saved"; }
+    service_restart_bounded() { printf '%s\n' "$1" >> "$tmp/restarts"; }
+    service_is_active() { [[ "${singbox_ready:-true}" == true ]]; }
+    fetch_public_ipv6() { [[ "${has_ipv6:-true}" == true ]] && printf '2001:db8::1'; }
+    fetch_public_ipv4() { printf '198.51.100.1'; }
+    generate_and_show_links() { :; }; show_subscription_url() { :; }; verify_enabled_protocols() { :; }
+
+    do_modify_config network <<< $'4\n3\n0\n' > "$tmp/output"
+    output=$(<"$tmp/output")
+    assert_contains "$output" '出站 IP 优先级: 默认' "network menu shows current outbound strategy"
+    assert_eq prefer_ipv6 "$OUTBOUND_IP_STRATEGY" "outbound strategy switched to prefer IPv6"
+    assert_eq prefer_ipv6 "$(tail -n1 "$tmp/configs")" "sing-box config rewritten with new strategy"
+    assert_eq prefer_ipv6 "$(tail -n1 "$tmp/saved")" "new outbound strategy persisted"
+    assert_contains "$(<"$tmp/restarts")" sing-box "sing-box restarted after outbound strategy change"
+    assert_contains "$output" '配置已更新并重启' "outbound strategy change reports restart"
+
+    : > "$tmp/restarts"
+    do_modify_config network <<< $'4\n3\n0\n' > "$tmp/output"
+    assert_contains "$(<"$tmp/output")" '出站 IP 优先级未变化' "unchanged outbound strategy is a no-op"
+    assert_eq '' "$(<"$tmp/restarts")" "unchanged outbound strategy does not restart"
+
+    has_ipv6=false
+    do_modify_config network <<< $'4\n5\n0\n' > "$tmp/output"
+    assert_contains "$(<"$tmp/output")" '未检测到 IPv6 出站，不能设为仅 IPv6' "IPv6-only requires IPv6 egress"
+    assert_eq prefer_ipv6 "$OUTBOUND_IP_STRATEGY" "IPv6-only rejected without IPv6 egress"
+    assert_eq '' "$(<"$tmp/restarts")" "rejected IPv6-only does not restart"
+
+    has_ipv6=true
+    singbox_ready=false
+    do_modify_config network <<< $'4\n4\n0\n' > "$tmp/output"
+    output=$(<"$tmp/output")
+    assert_contains "$output" '正在恢复旧配置' "failed restart rolls back outbound strategy"
+    assert_eq prefer_ipv6 "$OUTBOUND_IP_STRATEGY" "outbound strategy restored after failed restart"
+    assert_eq prefer_ipv6 "$(tail -n1 "$tmp/configs")" "sing-box config restored after failed restart"
+    assert_eq prefer_ipv6 "$(tail -n1 "$tmp/saved")" "old outbound strategy saved after failed restart"
+)
+
 test_install_network_failure_selection() (
     prompt_read() { read -r "$1"; }
     refresh_public_ip_stack() { return 1; }
@@ -2351,7 +2452,7 @@ test_modify_menu_categories() (
         hy2:1:16 hy2:2:7 hy2:3:8 socks:1:17 \
         identity:1:5 identity:2:3 \
         argo:1:10 argo:2:11 argo:3:12 \
-        network:1:15 network:2:14 network:3:13; do
+        network:1:15 network:2:14 network:3:13 network:4:18; do
         IFS=: read -r category input expected <<< "$item"
         selected=""
         prompt_modify_action selected "$category" <<< "$input" > /dev/null
@@ -2573,6 +2674,7 @@ test_subscription_payload_requires_matching_data
 test_reality_listener_validation
 test_bounded_service_restart
 test_modify_nat_reality_port_with_xray
+test_modify_outbound_ip_strategy
 test_modify_socks_cancel_restores_params
 test_install_network_failure_selection
 test_argo_edge_family_services
@@ -2602,6 +2704,7 @@ test_time_sync_is_only_checked_during_install
 test_runtime_param_restore_is_complete
 test_hysteria2_config_uses_static_masquerade
 test_optional_inbounds_follow_feature_state
+test_outbound_ip_strategy_controls_direct_resolver
 test_only_primary_deployment_entrypoints_remain
 test_alpine_package_fallback
 test_official_tarball_install_streams_without_mktemp

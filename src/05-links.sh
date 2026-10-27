@@ -672,6 +672,9 @@ generate_and_show_links() {
     if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" || $(public_ipv4_candidate_count) -gt 1 ]]; then
         echo -e "  IPv4 策略:     ${BOLD}$(link_ipv4_selection_label)${NC}"
     fi
+    if [[ "${OUTBOUND_IP_STRATEGY:-default}" != "default" ]]; then
+        echo -e "  出站优先级:    ${BOLD}$(outbound_ip_strategy_label)${NC}"
+    fi
     if [[ "${IP_STACK_MODE:-}" == "unknown" ]]; then
         echo -e "  ${DIM}提示: 可在 [连接与订阅] -> [公网 IPv4 与 NAT] 设置正确公网 IP 后重新生成链接。${NC}"
     fi
