@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.1.5"
+SCRIPT_VERSION="3.1.6"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -478,6 +478,27 @@ fetch_public_ipv6() {
         fi
     done
     return 1
+}
+
+# 出口查询可能返回宿主机的 NAT66 地址；入站链接只能自动选择本机已分配的公网地址。
+get_inbound_ipv6() {
+    local address
+    command -v ip &>/dev/null || return 1
+    address=$(ip -6 -o addr show scope global 2>/dev/null | awk '
+        / (tentative|dadfailed|deprecated)( |$)/ { next }
+        {
+            split($4, parts, "/")
+            if (parts[1] !~ /^[23][[:xdigit:]]*:/) next
+            if ($0 !~ / temporary( |$)/ && stable == "") stable = parts[1]
+            if (temporary == "") temporary = parts[1]
+        }
+        END {
+            if (stable != "") print stable
+            else if (temporary != "") print temporary
+        }
+    ') || return 1
+    [[ -n "$address" ]] || return 1
+    printf '%s' "$address"
 }
 
 append_public_ipv4_candidate() {
@@ -3693,14 +3714,20 @@ socks_share_link_available() {
 }
 
 build_socks_link_for_ip() {
-    local ip="$1" host username_enc password_enc
+    local ip="$1" host username_enc password_enc port
 
     socks_share_link_available || return 0
     [[ -n "$ip" ]] || return 0
     host=$(format_url_host "$ip")
     username_enc=$(urlencode "$SOCKS_USERNAME")
     password_enc=$(urlencode "$SOCKS_PASSWORD")
-    append_socks_link "socks5://${username_enc}:${password_enc}@${host}:$(socks_share_port)"
+    # IPv4 NAT 公网映射端口不适用于本机原生 IPv6 入口。
+    if [[ "$ip" == *:* ]]; then
+        port="$SOCKS_PORT"
+    else
+        port=$(socks_share_port)
+    fi
+    append_socks_link "socks5://${username_enc}:${password_enc}@${host}:${port}"
 }
 
 build_direct_share_links_for_ip() {
@@ -3890,6 +3917,8 @@ build_share_links() {
     GENERATED_ARGO_LINKS=""
     GENERATED_HY2_LINKS=""
     GENERATED_SOCKS_LINKS=""
+    SOCKS_IPV6_ADDRESS=""
+    SOCKS_IPV6_LINK_WARNING=""
     GENERATED_SUBSCRIPTION_RAW=""
     HY2_SHARE_LINK_WARNING=""
     HY2_CERT_PIN_SHA256=""
@@ -3906,10 +3935,8 @@ build_share_links() {
     case "${IP_STACK_MODE:-}" in
         dual-stack)
             build_direct_share_links_for_selected_ipv4s
-            build_socks_link_for_ip "${PUBLIC_IPV6:-}"
             ;;
         ipv6-only)
-            build_socks_link_for_ip "${PUBLIC_IPV6:-${PUBLIC_IP:-}}"
             if argo_enabled; then
                 warn "检测到 IPv6-only VPS，IPv4 客户端请使用 Argo 节点；Reality 为独立直连入口。"
             else
@@ -3922,6 +3949,15 @@ build_share_links() {
             build_direct_share_links_for_selected_ipv4s
             ;;
     esac
+
+    if socks_share_link_available; then
+        SOCKS_IPV6_ADDRESS=$(get_inbound_ipv6 || true)
+        if [[ -n "$SOCKS_IPV6_ADDRESS" ]]; then
+            build_socks_link_for_ip "$SOCKS_IPV6_ADDRESS"
+        elif [[ -n "${PUBLIC_IPV6:-}" ]]; then
+            SOCKS_IPV6_LINK_WARNING="已检测到 IPv6 出口，但未确认本机可用的公网 IPv6；请由服务商分配可入站公网 IPv6，当前不生成 IPv6 入口链接。"
+        fi
+    fi
 
     if argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}"; then
         if resolve_argo_best_cf_domains; then
@@ -3987,11 +4023,11 @@ generate_and_show_links() {
         dual-stack)
             echo -e "  公网类型:      ${BOLD}IPv4 + IPv6${NC}"
             echo -e "  服务器 IPv4:   ${BOLD}$(public_ipv4_display)${NC}"
-            echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IPV6}${NC}"
+            echo -e "  IPv6 出口:     ${BOLD}${PUBLIC_IPV6}${NC}"
             ;;
         ipv6-only)
             echo -e "  公网类型:      ${BOLD}IPv6-only${NC}"
-            echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IP}${NC}"
+            echo -e "  IPv6 出口:     ${BOLD}${PUBLIC_IP}${NC}"
             ;;
         unknown)
             echo -e "  公网类型:      ${BOLD}未获取${NC}"
@@ -4078,6 +4114,11 @@ generate_and_show_links() {
         echo ""
     fi
 
+    if [[ -n "${SOCKS_IPV6_LINK_WARNING:-}" ]]; then
+        echo -e "${YELLOW}  ${SOCKS_IPV6_LINK_WARNING}${NC}"
+        echo ""
+    fi
+
     show_external_access_requirements
     write_subscription_assets
 
@@ -4158,7 +4199,7 @@ verify_protocol_loopback() (
             outbound="\"type\":\"hysteria2\",\"server\":\"127.0.0.1\",\"server_port\":${HY2_PORT},\"password\":$(json_string "$HY2_PASSWORD"),\"up_mbps\":100,\"down_mbps\":100,\"tls\":{\"enabled\":true,\"server_name\":$(json_string "$HY2_SNI"),\"insecure\":true}"
             ;;
         socks)
-            outbound="\"type\":\"socks\",\"server\":\"127.0.0.1\",\"server_port\":${SOCKS_PORT},\"version\":\"5\",\"username\":$(json_string "$SOCKS_USERNAME"),\"password\":$(json_string "$SOCKS_PASSWORD")"
+            outbound="\"type\":\"socks\",\"server\":$(json_string "$address"),\"server_port\":${SOCKS_PORT},\"version\":\"5\",\"username\":$(json_string "$SOCKS_USERNAME"),\"password\":$(json_string "$SOCKS_PASSWORD")"
             ;;
         argo)
             outbound="\"type\":\"vless\",\"server\":$(json_string "$address"),\"server_port\":443,\"uuid\":$(json_string "$UUID"),\"tls\":{\"enabled\":true,\"server_name\":$(json_string "$ARGO_DOMAIN"),\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"ws\",\"path\":$(json_string "$WS_PATH"),\"headers\":{\"Host\":$(json_string "$ARGO_DOMAIN")}}"
@@ -4233,6 +4274,23 @@ verify_enabled_protocols() {
         else
             warn "SOCKS5：本机认证或流量测试未通过"
             failed=true
+        fi
+        if service_is_active sing-box && verify_protocol_loopback socks ::1; then
+            success "SOCKS5 IPv6：本机 IPv6 监听、认证与流量通过，公网未验证"
+        else
+            warn "SOCKS5 IPv6：本机 IPv6 监听、认证或流量测试未通过"
+            failed=true
+        fi
+        address=$(get_inbound_ipv6 || true)
+        if [[ -n "$address" ]]; then
+            if service_is_active sing-box && verify_protocol_loopback socks "$address"; then
+                success "SOCKS5 IPv6 ${address}：本机公网地址认证与流量通过，外部入站未验证"
+            else
+                warn "SOCKS5 IPv6 ${address}：本机公网地址认证或流量测试未通过"
+                failed=true
+            fi
+        else
+            warn "SOCKS5 IPv6：未确认本机可用公网 IPv6，公网入口未启用；IPv6 出口正常不代表可以入站"
         fi
     else
         info "SOCKS5：未启用，跳过"

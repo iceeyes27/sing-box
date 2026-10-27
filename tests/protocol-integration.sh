@@ -72,3 +72,9 @@ for integration_protocol in reality hy2 socks; do
         exit 1
     fi
 done
+if verify_protocol_loopback socks ::1; then
+    printf 'PASS: socks IPv6 authenticated loopback traffic\n'
+else
+    printf 'FAIL: socks IPv6 authenticated loopback traffic\n' >&2
+    exit 1
+fi

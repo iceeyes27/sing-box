@@ -64,6 +64,27 @@ fetch_public_ipv6() {
     return 1
 }
 
+# 出口查询可能返回宿主机的 NAT66 地址；入站链接只能自动选择本机已分配的公网地址。
+get_inbound_ipv6() {
+    local address
+    command -v ip &>/dev/null || return 1
+    address=$(ip -6 -o addr show scope global 2>/dev/null | awk '
+        / (tentative|dadfailed|deprecated)( |$)/ { next }
+        {
+            split($4, parts, "/")
+            if (parts[1] !~ /^[23][[:xdigit:]]*:/) next
+            if ($0 !~ / temporary( |$)/ && stable == "") stable = parts[1]
+            if (temporary == "") temporary = parts[1]
+        }
+        END {
+            if (stable != "") print stable
+            else if (temporary != "") print temporary
+        }
+    ') || return 1
+    [[ -n "$address" ]] || return 1
+    printf '%s' "$address"
+}
+
 append_public_ipv4_candidate() {
     local ip="$1"
 

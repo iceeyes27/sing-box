@@ -48,7 +48,7 @@ sbm
 
 **面板概览：**
 ```text
-  sing-box 管理面板  v3.1.5
+  sing-box 管理面板  v3.1.6
   ────────────────────────────────────────
   sing-box: ● 运行中    argo-tunnel: ● 运行中
 
@@ -92,7 +92,7 @@ NAT VPS 会使用面板分配的公网 TCP/UDP 端口生成链接，同时保持
 - 放行对应 TCP 端口并重启 sing-box；
 - 输出可直接粘贴到代理池的 `socks5://用户名:密码@IP:端口` 链接。
 
-双栈 VPS 同时输出 IPv4 和 IPv6 SOCKS5 链接，IPv6 地址使用方括号：`socks5://用户名:密码@[IPv6]:端口`。
+双栈 VPS 仅在本机网卡已分配可用公网 IPv6 时输出 IPv6 SOCKS5 链接：`socks5://用户名:密码@[IPv6]:端口`。IPv6 使用本机 SOCKS5 监听端口，不套用 IPv4 NAT 映射端口。仅能通过 IPv6 上网的 NAT66 环境不会生成 IPv6 入口链接；需先由服务商分配可入站公网 IPv6。`sbm verify` 分别验证 IPv4、IPv6 本机认证与流量，公网入站仍需从外部客户端确认。
 
 SOCKS5 不会加入 VLESS/Hysteria2 订阅内容，只写入终端输出和 `/etc/sing-box/share-links.txt`。公网使用时应在 VPS 安全组中把 SOCKS5 端口限制为业务服务器的固定出口 IP。
 

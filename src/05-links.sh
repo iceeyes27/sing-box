@@ -345,14 +345,20 @@ socks_share_link_available() {
 }
 
 build_socks_link_for_ip() {
-    local ip="$1" host username_enc password_enc
+    local ip="$1" host username_enc password_enc port
 
     socks_share_link_available || return 0
     [[ -n "$ip" ]] || return 0
     host=$(format_url_host "$ip")
     username_enc=$(urlencode "$SOCKS_USERNAME")
     password_enc=$(urlencode "$SOCKS_PASSWORD")
-    append_socks_link "socks5://${username_enc}:${password_enc}@${host}:$(socks_share_port)"
+    # IPv4 NAT 公网映射端口不适用于本机原生 IPv6 入口。
+    if [[ "$ip" == *:* ]]; then
+        port="$SOCKS_PORT"
+    else
+        port=$(socks_share_port)
+    fi
+    append_socks_link "socks5://${username_enc}:${password_enc}@${host}:${port}"
 }
 
 build_direct_share_links_for_ip() {
@@ -542,6 +548,8 @@ build_share_links() {
     GENERATED_ARGO_LINKS=""
     GENERATED_HY2_LINKS=""
     GENERATED_SOCKS_LINKS=""
+    SOCKS_IPV6_ADDRESS=""
+    SOCKS_IPV6_LINK_WARNING=""
     GENERATED_SUBSCRIPTION_RAW=""
     HY2_SHARE_LINK_WARNING=""
     HY2_CERT_PIN_SHA256=""
@@ -558,10 +566,8 @@ build_share_links() {
     case "${IP_STACK_MODE:-}" in
         dual-stack)
             build_direct_share_links_for_selected_ipv4s
-            build_socks_link_for_ip "${PUBLIC_IPV6:-}"
             ;;
         ipv6-only)
-            build_socks_link_for_ip "${PUBLIC_IPV6:-${PUBLIC_IP:-}}"
             if argo_enabled; then
                 warn "检测到 IPv6-only VPS，IPv4 客户端请使用 Argo 节点；Reality 为独立直连入口。"
             else
@@ -574,6 +580,15 @@ build_share_links() {
             build_direct_share_links_for_selected_ipv4s
             ;;
     esac
+
+    if socks_share_link_available; then
+        SOCKS_IPV6_ADDRESS=$(get_inbound_ipv6 || true)
+        if [[ -n "$SOCKS_IPV6_ADDRESS" ]]; then
+            build_socks_link_for_ip "$SOCKS_IPV6_ADDRESS"
+        elif [[ -n "${PUBLIC_IPV6:-}" ]]; then
+            SOCKS_IPV6_LINK_WARNING="已检测到 IPv6 出口，但未确认本机可用的公网 IPv6；请由服务商分配可入站公网 IPv6，当前不生成 IPv6 入口链接。"
+        fi
+    fi
 
     if argo_enabled && is_valid_hostname "${ARGO_DOMAIN:-}"; then
         if resolve_argo_best_cf_domains; then
@@ -639,11 +654,11 @@ generate_and_show_links() {
         dual-stack)
             echo -e "  公网类型:      ${BOLD}IPv4 + IPv6${NC}"
             echo -e "  服务器 IPv4:   ${BOLD}$(public_ipv4_display)${NC}"
-            echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IPV6}${NC}"
+            echo -e "  IPv6 出口:     ${BOLD}${PUBLIC_IPV6}${NC}"
             ;;
         ipv6-only)
             echo -e "  公网类型:      ${BOLD}IPv6-only${NC}"
-            echo -e "  服务器 IPv6:   ${BOLD}${PUBLIC_IP}${NC}"
+            echo -e "  IPv6 出口:     ${BOLD}${PUBLIC_IP}${NC}"
             ;;
         unknown)
             echo -e "  公网类型:      ${BOLD}未获取${NC}"
@@ -727,6 +742,11 @@ generate_and_show_links() {
         echo ""
     elif is_socks_enabled; then
         echo -e "${YELLOW}  未获取可用于 SOCKS5 链接的公网 IP。${NC}"
+        echo ""
+    fi
+
+    if [[ -n "${SOCKS_IPV6_LINK_WARNING:-}" ]]; then
+        echo -e "${YELLOW}  ${SOCKS_IPV6_LINK_WARNING}${NC}"
         echo ""
     fi
 

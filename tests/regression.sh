@@ -570,6 +570,59 @@ test_ip_detection_failure_keeps_argo_link_generation() (
     assert_not_contains "$GENERATED_ARGO_LINKS" "ed%3D2048" "fixed Argo omits early data"
 )
 
+test_inbound_ipv6_requires_an_assigned_usable_address() (
+    local result
+    ip() { printf '%s\n' "$IPV6_INTERFACE_FIXTURE"; }
+    IPV6_INTERFACE_FIXTURE='2: eth0 inet6 fd42:1234::1/64 scope global dynamic'
+    if get_inbound_ipv6 >/dev/null; then fail "ULA accepted as a public IPv6 entry"; fi
+    IPV6_INTERFACE_FIXTURE=$'2: eth0 inet6 2001:db8::1/64 scope global tentative\n2: eth0 inet6 2001:db8::2/64 scope global dadfailed\n2: eth0 inet6 2001:db8::3/64 scope global deprecated'
+    if get_inbound_ipv6 >/dev/null; then fail "unusable IPv6 address accepted"; fi
+    IPV6_INTERFACE_FIXTURE=$'2: eth0 inet6 2001:db8::4/64 scope global temporary dynamic\n2: eth0 inet6 2001:db8::5/64 scope global dynamic'
+    result=$(get_inbound_ipv6)
+    assert_eq '2001:db8::5' "$result" "stable assigned IPv6 preferred over temporary address"
+    IPV6_INTERFACE_FIXTURE='2: eth0 inet6 2001:db8::4/64 scope global temporary dynamic'
+    assert_eq '2001:db8::4' "$(get_inbound_ipv6)" "usable temporary address remains available"
+    ip() { return 1; }
+    if get_inbound_ipv6 >/dev/null; then fail "failed interface lookup accepted"; fi
+    unset -f ip
+    if PATH=/nonexistent get_inbound_ipv6 >/dev/null; then fail "missing ip command accepted"; fi
+)
+
+test_socks_ipv6_links_use_native_addresses_and_ports() (
+    UUID=uuid; NODE_NAME=node; REALITY_PORT=443; REALITY_SNI=example.com
+    PUBLIC_KEY=public; SHORT_ID=abcd; WS_PATH=/abcd
+    ARGO_ENABLED=false; ARGO_TOKEN=""; ARGO_DOMAIN=""; HY2_ENABLED=false
+    SOCKS_ENABLED=true; SOCKS_PORT=10808; SOCKS_PUBLIC_PORT=31080
+    SOCKS_USERNAME=proxy; SOCKS_PASSWORD=secret; NAT_MODE=true
+    LINK_IPV4_SELECTION=all; PUBLIC_IPV4_OVERRIDE=""
+    refresh_public_ip_stack() {
+        IP_STACK_MODE=dual-stack
+        PUBLIC_IP=198.51.100.10; PUBLIC_IPV4=198.51.100.10
+        PUBLIC_IPV4_LIST=198.51.100.10; PUBLIC_IPV6=2001:db8::ee
+    }
+    ip() { printf '%s\n' "$IPV6_INTERFACE_FIXTURE"; }
+    IPV6_INTERFACE_FIXTURE='2: eth0 inet6 fd42:1234::1/64 scope global dynamic'
+    build_share_links >/dev/null
+    assert_eq 'socks5://proxy:secret@198.51.100.10:31080' "$GENERATED_SOCKS_LINKS" "NAT66 egress is not emitted as an entry"
+    assert_eq '' "$SOCKS_IPV6_ADDRESS" "NAT66 has no native IPv6 entry"
+    assert_contains "$SOCKS_IPV6_LINK_WARNING" 'IPv6' "missing IPv6 ingress is reported"
+
+    IPV6_INTERFACE_FIXTURE='2: eth0 inet6 2001:db8::10/64 scope global dynamic'
+    build_share_links >/dev/null
+    assert_contains "$GENERATED_SOCKS_LINKS" 'socks5://proxy:secret@198.51.100.10:31080' "IPv4 retains NAT mapping"
+    assert_contains "$GENERATED_SOCKS_LINKS" 'socks5://proxy:secret@[2001:db8::10]:10808' "native IPv6 uses its assigned address and local port"
+    assert_not_contains "$GENERATED_SOCKS_LINKS" '2001:db8::ee' "upstream egress address is not used"
+    assert_not_contains "$GENERATED_SOCKS_LINKS" '[2001:db8::10]:31080' "IPv4 NAT port is not applied to native IPv6"
+    assert_eq '' "$SOCKS_IPV6_LINK_WARNING" "native IPv6 clears stale warning"
+
+    SOCKS_ENABLED=false
+    ip() { fail "disabled SOCKS5 inspected IPv6 interfaces"; }
+    build_share_links >/dev/null
+    assert_eq '' "$GENERATED_SOCKS_LINKS" "disabled SOCKS5 emits no links"
+    assert_eq '' "$SOCKS_IPV6_ADDRESS" "disabled SOCKS5 clears IPv6 state"
+    assert_eq '' "$SOCKS_IPV6_LINK_WARNING" "disabled SOCKS5 clears IPv6 warning"
+)
+
 test_ipv6_only_links_include_socks5() (
     UUID="uuid-1"
     NODE_NAME="node"
@@ -604,6 +657,7 @@ test_ipv6_only_links_include_socks5() (
         ARGO_BEST_CF_DOMAIN_IPV6="saas.sin.fan"
     }
 
+    get_inbound_ipv6() { printf '%s' '2001:db8::1'; }
     build_share_links >/dev/null
     assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@cf.090227.xyz:443" "IPv6-only VPS emits IPv4-client Argo link"
     assert_contains "$GENERATED_ARGO_LINKS" "vless://uuid-1@saas.sin.fan:443" "IPv6-only VPS emits IPv6 Argo link"
@@ -2437,6 +2491,9 @@ test_protocol_verification_uses_real_client_configuration() (
     assert_contains "$(<"$test_dir/reality.json")" '"public_key":"public-key"' "Reality authentication input"
     assert_contains "$(<"$test_dir/hy2.json")" '"password":"hy2-password"' "Hysteria2 authentication input"
     assert_contains "$(<"$test_dir/socks.json")" '"username":"user"' "SOCKS5 authentication input"
+    protocol=socks
+    verify_protocol_loopback socks ::1 || fail "IPv6 SOCKS5 verification harness failed"
+    assert_contains "$(<"$test_dir/socks.json")" '"server":"::1"' "SOCKS5 verification uses requested IPv6 address"
     assert_contains "$(<"$test_dir/argo.json")" '"headers":{"Host":"argo.example.com"}' "Argo Host uses tunnel domain"
     assert_contains "$(<"$test_dir/argo.json")" '"fingerprint":"chrome"' "Argo TLS fingerprint matches share link"
 )
@@ -2453,6 +2510,7 @@ test_enabled_protocols_verify_only_active_features() (
     service_is_active() { :; }
     verify_protocol_loopback() { printf '%s\n' "$1" >> "$test_dir/calls"; }
     verify_subscription_payload() { fail "disabled subscription was tested"; }
+    get_inbound_ipv6() { return 1; }
     verify_enabled_protocols > /dev/null
     assert_eq reality "$(<"$test_dir/calls")" "disabled protocols skipped"
 
@@ -2462,9 +2520,14 @@ test_enabled_protocols_verify_only_active_features() (
     verify_subscription_payload() { :; }
     : > "$test_dir/calls"
     verify_enabled_protocols > /dev/null
-    assert_eq $'reality\nhy2\nsocks\nargo' "$(<"$test_dir/calls")" "all enabled protocols tested"
+    assert_eq $'reality\nhy2\nsocks\nsocks\nargo' "$(<"$test_dir/calls")" "all enabled protocols and IPv6 listener tested"
     verify_protocol_loopback() { [[ "$1" != socks ]]; }
     if verify_enabled_protocols > /dev/null; then fail "failed SOCKS5 authentication was reported healthy"; fi
+    verify_protocol_loopback() { [[ "${2:-}" != ::1 ]]; }
+    if verify_enabled_protocols > /dev/null; then fail "failed IPv6 listener was reported healthy"; fi
+    get_inbound_ipv6() { printf '%s' '2001:db8::10'; }
+    verify_protocol_loopback() { [[ "${2:-}" != 2001:db8::10 ]]; }
+    if verify_enabled_protocols > /dev/null; then fail "failed assigned IPv6 address was reported healthy"; fi
 )
 
 test_subscription_payload_requires_matching_data() (
@@ -2528,6 +2591,8 @@ test_legacy_quick_argo_migration
 test_external_access_detection_identifies_nat
 test_nat_links_use_public_mapped_ports
 test_urlencode_fallback_and_socks5_link_credentials
+test_inbound_ipv6_requires_an_assigned_usable_address
+test_socks_ipv6_links_use_native_addresses_and_ports
 test_ipv6_only_links_include_socks5
 test_multiple_ipv4_direct_links_follow_selection
 test_single_ipv4_falls_back_without_candidate_list

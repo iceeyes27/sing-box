@@ -22,7 +22,7 @@ verify_protocol_loopback() (
             outbound="\"type\":\"hysteria2\",\"server\":\"127.0.0.1\",\"server_port\":${HY2_PORT},\"password\":$(json_string "$HY2_PASSWORD"),\"up_mbps\":100,\"down_mbps\":100,\"tls\":{\"enabled\":true,\"server_name\":$(json_string "$HY2_SNI"),\"insecure\":true}"
             ;;
         socks)
-            outbound="\"type\":\"socks\",\"server\":\"127.0.0.1\",\"server_port\":${SOCKS_PORT},\"version\":\"5\",\"username\":$(json_string "$SOCKS_USERNAME"),\"password\":$(json_string "$SOCKS_PASSWORD")"
+            outbound="\"type\":\"socks\",\"server\":$(json_string "$address"),\"server_port\":${SOCKS_PORT},\"version\":\"5\",\"username\":$(json_string "$SOCKS_USERNAME"),\"password\":$(json_string "$SOCKS_PASSWORD")"
             ;;
         argo)
             outbound="\"type\":\"vless\",\"server\":$(json_string "$address"),\"server_port\":443,\"uuid\":$(json_string "$UUID"),\"tls\":{\"enabled\":true,\"server_name\":$(json_string "$ARGO_DOMAIN"),\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"ws\",\"path\":$(json_string "$WS_PATH"),\"headers\":{\"Host\":$(json_string "$ARGO_DOMAIN")}}"
@@ -97,6 +97,23 @@ verify_enabled_protocols() {
         else
             warn "SOCKS5：本机认证或流量测试未通过"
             failed=true
+        fi
+        if service_is_active sing-box && verify_protocol_loopback socks ::1; then
+            success "SOCKS5 IPv6：本机 IPv6 监听、认证与流量通过，公网未验证"
+        else
+            warn "SOCKS5 IPv6：本机 IPv6 监听、认证或流量测试未通过"
+            failed=true
+        fi
+        address=$(get_inbound_ipv6 || true)
+        if [[ -n "$address" ]]; then
+            if service_is_active sing-box && verify_protocol_loopback socks "$address"; then
+                success "SOCKS5 IPv6 ${address}：本机公网地址认证与流量通过，外部入站未验证"
+            else
+                warn "SOCKS5 IPv6 ${address}：本机公网地址认证或流量测试未通过"
+                failed=true
+            fi
+        else
+            warn "SOCKS5 IPv6：未确认本机可用公网 IPv6，公网入口未启用；IPv6 出口正常不代表可以入站"
         fi
     else
         info "SOCKS5：未启用，跳过"
