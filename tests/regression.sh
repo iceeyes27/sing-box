@@ -2214,7 +2214,7 @@ test_modify_outbound_ip_strategy() (
     trap 'rm -rf "$tmp"' EXIT
     UUID=uuid; SHORT_ID=short; PRIVATE_KEY=private; PUBLIC_KEY=public
     REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; REALITY_SNI=example.com; REALITY_BACKEND=singbox
-    WS_PORT=8080; WS_PATH=/short; NODE_NAME=test
+    WS_PORT=8080; WS_PATH=/short; NODE_NAME="test"
     HY2_PORT=8443; HY2_PASSWORD=hy2-pass; HY2_SNI=example.com; HY2_ENABLED=false
     SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; ARGO_DOMAIN=""; ARGO_TOKEN=""
     LINK_IPV4_SELECTION=all; PUBLIC_IPV4_OVERRIDE=""; NAT_MODE=false

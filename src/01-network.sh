@@ -217,7 +217,7 @@ is_valid_outbound_ip_strategy() {
 }
 
 outbound_ip_strategy_label() {
-    case "${1:-${OUTBOUND_IP_STRATEGY:-default}}" in
+    case "${OUTBOUND_IP_STRATEGY:-default}" in
         prefer_ipv4) echo "优先 IPv4" ;;
         prefer_ipv6) echo "优先 IPv6" ;;
         ipv4_only)   echo "仅 IPv4" ;;
