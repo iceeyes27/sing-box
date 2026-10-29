@@ -895,8 +895,17 @@ save_params() {
     chown root:root "$PARAMS_FILE" 2>/dev/null || true
 }
 
+singbox_binary_present() {
+    command -v sing-box >/dev/null 2>&1 || [[ -x "$SINGBOX_BIN_PATH" ]]
+}
+
 is_installed() {
-    [[ -f "$PARAMS_FILE" ]]
+    [[ -f "$PARAMS_FILE" ]] && singbox_binary_present
+}
+
+# 只剩参数文件、sing-box 已不存在（手动删除或旧版残留）。
+has_stale_config() {
+    [[ -f "$PARAMS_FILE" ]] && ! singbox_binary_present
 }
 
 load_params() {
@@ -5452,6 +5461,7 @@ show_connectivity_guide() {
     echo -e "  ${YELLOW}仅中国红色${NC}    端口疑似被封：在「协议设置 → Reality → 修改端口」更换端口后重新导入节点"
     echo ""
     echo -e "  ${DIM}Hysteria2 使用 UDP，不适用此 TCP 检测；Argo 经 Cloudflare 转发，无需检测端口。${NC}"
+    echo -e "  ${DIM}打开链接会把服务器 IP 和端口提交给 tcp.ping.pe 检测；脚本本身不访问该网站。${NC}"
 }
 
 do_connectivity_guide() {
@@ -5898,7 +5908,8 @@ do_uninstall() {
         apk) apk del sing-box 2>/dev/null || true ;;
     esac
 
-    rm -f /usr/local/bin/cloudflared
+    # 本脚本安装的 cloudflared 是普通文件；符号链接通常指向用户自装的 cloudflared，保留。
+    [[ -L /usr/local/bin/cloudflared ]] || rm -f /usr/local/bin/cloudflared
     remove_manager_link "$MANAGER_SYSTEM_COMMAND" "$MANAGER_COMMAND"
     remove_manager_link "$MANAGER_SYSTEM_ALIAS_COMMAND" "$MANAGER_COMMAND"
     remove_manager_link "$MANAGER_BIN_COMMAND" "$MANAGER_COMMAND"
@@ -5926,7 +5937,11 @@ show_banner() {
     echo -e "  ${CYAN}${BOLD}sing-box 管理面板${NC}  ${DIM}v${SCRIPT_VERSION}${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
 
-    if ! is_installed; then
+    if has_stale_config; then
+        echo -e "  ${YELLOW}检测到旧配置，但 sing-box 未安装${NC}"
+        echo ""
+        return
+    elif ! is_installed; then
         echo -e "  ${YELLOW}尚未安装节点${NC}"
         echo ""
         return
@@ -5951,6 +5966,9 @@ show_menu() {
         menu_action 3 "do_modify_config network" "网络设置" "NAT / 公网 IPv4 / 出站 IP 优先级"
         menu_action 4 service_menu "服务管理" "启停 / 日志 / 自检 / 连通性排查"
         menu_action 5 maintenance_menu "系统维护" "更新 / 配置同步 / 重装 / 卸载"
+    elif has_stale_config; then
+        menu_action 1 do_primary_install "安装节点" "将覆盖旧配置"
+        menu_action 2 do_upgrade_script "更新管理脚本"
     else
         menu_action 1 do_primary_install "安装节点" "Reality 主节点，可选 Argo / SOCKS5"
         menu_action 2 do_upgrade_script "更新管理脚本"
@@ -5967,7 +5985,6 @@ feature_state_label() {
 }
 
 render_protocol_menu() {
-    load_params >/dev/null 2>&1 || true
     menu_section "直连协议"
     menu_action 1 "do_modify_config reality" "Reality" "$(reality_share_port)/TCP · ${REALITY_SNI:-}"
     menu_action 2 "do_modify_config hy2" "Hysteria2" "$(feature_state_label is_hy2_enabled "$(hy2_share_port)/UDP")"
@@ -5978,7 +5995,9 @@ render_protocol_menu() {
     menu_action 5 "do_modify_config identity" "节点名称与 UUID" "${NODE_NAME:-}"
 }
 
+# 进入时读取一次参数；子页面修改后全局变量已同步，重绘无需再读。
 protocol_menu() {
+    load_params >/dev/null 2>&1 || true
     run_menu "协议设置" render_protocol_menu
 }
 

@@ -13,7 +13,11 @@ show_banner() {
     echo -e "  ${CYAN}${BOLD}sing-box 管理面板${NC}  ${DIM}v${SCRIPT_VERSION}${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
 
-    if ! is_installed; then
+    if has_stale_config; then
+        echo -e "  ${YELLOW}检测到旧配置，但 sing-box 未安装${NC}"
+        echo ""
+        return
+    elif ! is_installed; then
         echo -e "  ${YELLOW}尚未安装节点${NC}"
         echo ""
         return
@@ -38,6 +42,9 @@ show_menu() {
         menu_action 3 "do_modify_config network" "网络设置" "NAT / 公网 IPv4 / 出站 IP 优先级"
         menu_action 4 service_menu "服务管理" "启停 / 日志 / 自检 / 连通性排查"
         menu_action 5 maintenance_menu "系统维护" "更新 / 配置同步 / 重装 / 卸载"
+    elif has_stale_config; then
+        menu_action 1 do_primary_install "安装节点" "将覆盖旧配置"
+        menu_action 2 do_upgrade_script "更新管理脚本"
     else
         menu_action 1 do_primary_install "安装节点" "Reality 主节点，可选 Argo / SOCKS5"
         menu_action 2 do_upgrade_script "更新管理脚本"
@@ -54,7 +61,6 @@ feature_state_label() {
 }
 
 render_protocol_menu() {
-    load_params >/dev/null 2>&1 || true
     menu_section "直连协议"
     menu_action 1 "do_modify_config reality" "Reality" "$(reality_share_port)/TCP · ${REALITY_SNI:-}"
     menu_action 2 "do_modify_config hy2" "Hysteria2" "$(feature_state_label is_hy2_enabled "$(hy2_share_port)/UDP")"
@@ -65,7 +71,9 @@ render_protocol_menu() {
     menu_action 5 "do_modify_config identity" "节点名称与 UUID" "${NODE_NAME:-}"
 }
 
+# 进入时读取一次参数；子页面修改后全局变量已同步，重绘无需再读。
 protocol_menu() {
+    load_params >/dev/null 2>&1 || true
     run_menu "协议设置" render_protocol_menu
 }
 

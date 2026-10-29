@@ -64,6 +64,7 @@ show_connectivity_guide() {
     echo -e "  ${YELLOW}仅中国红色${NC}    端口疑似被封：在「协议设置 → Reality → 修改端口」更换端口后重新导入节点"
     echo ""
     echo -e "  ${DIM}Hysteria2 使用 UDP，不适用此 TCP 检测；Argo 经 Cloudflare 转发，无需检测端口。${NC}"
+    echo -e "  ${DIM}打开链接会把服务器 IP 和端口提交给 tcp.ping.pe 检测；脚本本身不访问该网站。${NC}"
 }
 
 do_connectivity_guide() {
@@ -510,7 +511,8 @@ do_uninstall() {
         apk) apk del sing-box 2>/dev/null || true ;;
     esac
 
-    rm -f /usr/local/bin/cloudflared
+    # 本脚本安装的 cloudflared 是普通文件；符号链接通常指向用户自装的 cloudflared，保留。
+    [[ -L /usr/local/bin/cloudflared ]] || rm -f /usr/local/bin/cloudflared
     remove_manager_link "$MANAGER_SYSTEM_COMMAND" "$MANAGER_COMMAND"
     remove_manager_link "$MANAGER_SYSTEM_ALIAS_COMMAND" "$MANAGER_COMMAND"
     remove_manager_link "$MANAGER_BIN_COMMAND" "$MANAGER_COMMAND"

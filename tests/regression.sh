@@ -2419,6 +2419,10 @@ test_menu_navigation_and_actions() (
     (main_menu <<< $'2\n1\n0\n' > "$tmp/main-fresh")
     assert_eq $'upgrade-script\ninstall' "$(<"$tmp/actions")" "uninstalled main menu dispatch"
     assert_not_contains "$(<"$tmp/main-fresh")" '协议设置' "uninstalled main menu hides settings"
+    has_stale_config() { :; }
+    (main_menu <<< $'0\n' > "$tmp/main-stale")
+    assert_contains "$(<"$tmp/main-stale")" '将覆盖旧配置' "stale config install warns about overwrite"
+    has_stale_config() { return 1; }
     is_installed() { :; }
     : > "$tmp/actions"
     protocol_menu <<< $'1\n2\n3\n4\n5\n0\n' > "$tmp/protocol"
@@ -2545,9 +2549,31 @@ test_connectivity_guide_lists_public_tcp_endpoints() (
     assert_contains "$output" 'https://tcp.ping.pe/198.51.100.1:20001' "Reality uses public mapped port"
     assert_contains "$output" 'https://tcp.ping.pe/198.51.100.1:20033' "SOCKS5 uses public mapped port"
     assert_contains "$output" '仅中国红色' "result interpretation shown"
+    assert_contains "$output" '提交给 tcp.ping.pe' "third-party probe disclosed"
     SOCKS_ENABLED=false
     output=$(show_connectivity_guide)
     assert_not_contains "$output" ':20033' "disabled SOCKS5 omitted"
+)
+
+test_install_state_requires_singbox_binary() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    printf '#!/bin/sh\n' > "$tmp/sing-box"
+    chmod +x "$tmp/sing-box"
+    PARAMS_FILE="$tmp/.params"
+    SINGBOX_BIN_PATH="$tmp/missing/sing-box"
+    local saved_path="$PATH"
+    PATH="$tmp/empty"
+    if is_installed || has_stale_config; then fail "no params reported as installed or stale"; fi
+    : > "$PARAMS_FILE"
+    has_stale_config || fail "params without sing-box not reported as stale"
+    if is_installed; then fail "params without sing-box reported as installed"; fi
+    SINGBOX_BIN_PATH="$tmp/sing-box"
+    is_installed || fail "params with sing-box not reported as installed"
+    if has_stale_config; then fail "complete install reported as stale"; fi
+    PATH="$saved_path"
+    assert_contains "$(declare -f do_uninstall)" '[[ -L /usr/local/bin/cloudflared ]]' "uninstall keeps symlinked cloudflared"
 )
 
 test_new_install_rejects_missing_xray_setup() (
@@ -2735,6 +2761,7 @@ test_modify_menu_categories
 test_submenus_return_without_action
 test_reinstall_requires_confirmation
 test_connectivity_guide_lists_public_tcp_endpoints
+test_install_state_requires_singbox_binary
 test_new_install_rejects_missing_xray_setup
 test_argo_gateway_precedes_tunnel_and_failure_is_truthful
 test_start_restart_wait_for_subscription

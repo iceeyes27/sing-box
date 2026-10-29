@@ -116,8 +116,17 @@ save_params() {
     chown root:root "$PARAMS_FILE" 2>/dev/null || true
 }
 
+singbox_binary_present() {
+    command -v sing-box >/dev/null 2>&1 || [[ -x "$SINGBOX_BIN_PATH" ]]
+}
+
 is_installed() {
-    [[ -f "$PARAMS_FILE" ]]
+    [[ -f "$PARAMS_FILE" ]] && singbox_binary_present
+}
+
+# 只剩参数文件、sing-box 已不存在（手动删除或旧版残留）。
+has_stale_config() {
+    [[ -f "$PARAMS_FILE" ]] && ! singbox_binary_present
 }
 
 load_params() {
