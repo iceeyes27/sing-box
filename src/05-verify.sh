@@ -59,7 +59,7 @@ verify_subscription_payload() (
 
 verify_enabled_protocols() {
     local failed=false address
-    menu_header "服务与诊断 / 协议自检"
+    menu_header "服务管理 / 协议自检"
     if ! command -v sing-box >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || \
         ! command -v curl >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
         warn "缺少 sing-box / python3 / curl / timeout，协议认证自检未执行"

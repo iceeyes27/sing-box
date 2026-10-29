@@ -1031,10 +1031,9 @@ PY
 test_only_primary_deployment_entrypoints_remain() {
     local output check_root_def detect_os_def install_manager_command_def
 
-    assert_contains "$(declare -f main_menu)" "node_menu" "main menu opens node category"
-    assert_contains "$(declare -f node_menu)" "do_primary_install" "node category installs primary node"
-    assert_not_contains "$(declare -f main_menu)" "do_install" "main menu omits deployment target selector"
-    assert_contains "$(declare -f show_menu)" "/ SOCKS5" "main menu exposes SOCKS5 configuration"
+    assert_contains "$(declare -f show_menu)" "do_primary_install" "main menu installs primary node"
+    assert_not_contains "$(declare -f show_menu)" "do_install" "main menu omits deployment target selector"
+    assert_contains "$(declare -f render_protocol_menu)" '"SOCKS5"' "protocol menu exposes SOCKS5 configuration"
     if declare -F do_relay_install >/dev/null || declare -F do_generate_relay_script >/dev/null; then
         fail "removed relay deployment functions are still available"
     fi
@@ -2202,7 +2201,7 @@ test_modify_socks_cancel_restores_params() (
     validate_port() { :; }
 
     # 启用 SOCKS5 时在 NAT 公网端口处中断：已输入的本机端口不得残留在内存参数中。
-    do_modify_config socks < <(printf '1\ny\n20030\n') >/dev/null || true
+    do_modify_config socks < <(printf '1\n20030\n') >/dev/null || true
     assert_eq 20023 "$SOCKS_PORT" "canceled SOCKS5 enable restores local port"
     assert_eq 20023 "$SOCKS_PUBLIC_PORT" "canceled SOCKS5 enable restores public port"
     assert_eq false "$SOCKS_ENABLED" "canceled SOCKS5 enable keeps SOCKS5 disabled"
@@ -2378,12 +2377,19 @@ test_install_selected_services_and_failure() (
 )
 
 test_menu_navigation_and_actions() (
-    local tmp category expected selected
+    local tmp
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
     clear() { :; }
     show_banner() { :; }
+    sleep() { :; }
+    get_public_ip() { :; }
+    load_params() { :; }
+    is_installed() { :; }
     prompt_read() { read -r "$1"; }
+    REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; NAT_MODE=false; REALITY_SNI=example.com
+    HY2_PORT=8443; HY2_ENABLED=false; SOCKS_PORT=20023; SOCKS_ENABLED=true
+    ARGO_ENABLED=false; NODE_NAME=test
     do_primary_install() { echo install >> "$tmp/actions"; }
     do_modify_config() { echo "config:$1" >> "$tmp/actions"; }
     do_show_links() { echo links >> "$tmp/actions"; }
@@ -2392,32 +2398,50 @@ test_menu_navigation_and_actions() (
     do_restart() { echo restart >> "$tmp/actions"; }
     do_status() { echo status >> "$tmp/actions"; }
     do_logs() { echo logs >> "$tmp/actions"; }
-    do_boot_manage() { echo boot >> "$tmp/actions"; }
     do_verify() { echo verify >> "$tmp/actions"; }
-    do_upgrade() { echo upgrade >> "$tmp/actions"; }
+    do_connectivity_guide() { echo connectivity >> "$tmp/actions"; }
+    do_boot_manage() { echo boot >> "$tmp/actions"; }
+    do_upgrade_script() { echo upgrade-script >> "$tmp/actions"; }
+    do_upgrade_singbox() { echo upgrade-singbox >> "$tmp/actions"; }
+    do_upgrade_cloudflared() { echo upgrade-cloudflared >> "$tmp/actions"; }
     do_apply_latest() { echo apply >> "$tmp/actions"; }
+    do_reinstall() { echo reinstall >> "$tmp/actions"; }
     do_uninstall() { echo uninstall >> "$tmp/actions"; }
     press_enter() { :; }
 
-    node_menu <<< $'1\n2\n3\n4\n5\n6\n0\n' > "$tmp/node"
-    assert_eq $'install\nconfig:reality\nconfig:hy2\nconfig:socks\nconfig:argo\nconfig:identity' "$(<"$tmp/actions")" "node menu dispatch"
-    assert_contains "$(<"$tmp/node")" '5) Argo 隧道' "Argo is listed with protocols"
+    (main_menu <<< $'1\n2\n0\n3\n4\n0\n5\n0\n0\n' > "$tmp/main")
+    assert_eq $'links\nconfig:network' "$(<"$tmp/actions")" "installed main menu dispatch"
+    assert_contains "$(<"$tmp/main")" '协议设置' "main menu lists protocol settings"
+    assert_contains "$(<"$tmp/main")" '运行控制' "main menu opens service submenu"
+    assert_contains "$(<"$tmp/main")" '重装与卸载' "main menu opens maintenance submenu"
     : > "$tmp/actions"
-    connection_menu <<< $'1\n2\n3\n0\n' > "$tmp/connection"
-    assert_eq $'config:argo\nlinks\nconfig:network' "$(<"$tmp/actions")" "connection menu dispatch"
+    is_installed() { return 1; }
+    (main_menu <<< $'2\n1\n0\n' > "$tmp/main-fresh")
+    assert_eq $'upgrade-script\ninstall' "$(<"$tmp/actions")" "uninstalled main menu dispatch"
+    assert_not_contains "$(<"$tmp/main-fresh")" '协议设置' "uninstalled main menu hides settings"
+    is_installed() { :; }
     : > "$tmp/actions"
-    service_menu <<< $'1\n2\n3\n4\n5\n6\n7\n0\n' > "$tmp/service"
-    assert_eq $'start\nstop\nrestart\nstatus\nlogs\nboot\nverify' "$(<"$tmp/actions")" "service menu dispatch"
+    protocol_menu <<< $'1\n2\n3\n4\n5\n0\n' > "$tmp/protocol"
+    assert_eq $'config:reality\nconfig:hy2\nconfig:socks\nconfig:argo\nconfig:identity' "$(<"$tmp/actions")" "protocol menu dispatch"
+    assert_contains "$(<"$tmp/protocol")" '20001/TCP · example.com' "protocol menu shows Reality endpoint"
+    assert_contains "$(<"$tmp/protocol")" '已启用 · 20023/TCP' "protocol menu shows SOCKS5 state"
+    assert_contains "$(<"$tmp/protocol")" '4) Argo 隧道' "Argo is listed once with protocols"
     : > "$tmp/actions"
-    maintenance_menu <<< $'1\n2\n3\n0\n' > "$tmp/maintenance"
-    assert_eq $'upgrade\napply\nuninstall' "$(<"$tmp/actions")" "maintenance menu dispatch"
-    assert_contains "$(<"$tmp/node")" '节点与协议' "node breadcrumb"
-    assert_contains "$(<"$tmp/connection")" '公网接入' "connection section"
-    assert_contains "$(<"$tmp/service")" '运行控制' "service section"
+    service_menu <<< $'1\n2\n3\n4\n5\n6\n7\n8\n0\n' > "$tmp/service"
+    assert_eq $'start\nstop\nrestart\nstatus\nlogs\nverify\nconnectivity\nboot' "$(<"$tmp/actions")" "service menu dispatch"
+    : > "$tmp/actions"
+    maintenance_menu <<< $'1\n2\n3\n4\n5\n6\n0\n' > "$tmp/maintenance"
+    assert_eq $'upgrade-script\nupgrade-singbox\nupgrade-cloudflared\napply\nreinstall\nuninstall' "$(<"$tmp/actions")" "maintenance menu dispatch"
+    assert_contains "$(<"$tmp/service")" '服务管理' "service breadcrumb"
     assert_contains "$(<"$tmp/maintenance")" '系统维护' "maintenance breadcrumb"
     : > "$tmp/actions"
-    node_menu </dev/null > /dev/null || true
-    [[ ! -s "$tmp/actions" ]] || fail "node menu EOF dispatched an action"
+    protocol_menu <<< $'9\nx\n0\n' > "$tmp/invalid"
+    [[ ! -s "$tmp/actions" ]] || fail "invalid choice dispatched an action"
+    assert_contains "$(<"$tmp/invalid")" '无效选项' "invalid choice reported"
+    protocol_menu <<< $'a[$(touch '"$tmp"'/pwned)]\n0\n' > /dev/null
+    [[ ! -e "$tmp/pwned" ]] || fail "menu choice was evaluated as code"
+    protocol_menu </dev/null > /dev/null || true
+    [[ ! -s "$tmp/actions" ]] || fail "protocol menu EOF dispatched an action"
 )
 
 test_modify_menu_categories() (
@@ -2425,19 +2449,16 @@ test_modify_menu_categories() (
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
     clear() { :; }
+    sleep() { :; }
     prompt_read() { read -r "$1"; }
     REALITY_PORT=20012; REALITY_PUBLIC_PORT=20001; NAT_MODE=true
     REALITY_SNI=example.com; HY2_PORT=8443; HY2_ENABLED=false
     SOCKS_PORT=20023; SOCKS_ENABLED=false; NODE_NAME="test"; UUID=12345678-abcd
     SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; PUBLIC_IPV4_OVERRIDE=198.51.100.1
     for category in reality hy2 socks identity argo network; do
-        case "$category" in
-            reality) expected=1 ;; hy2) expected=16 ;; socks) expected=17 ;;
-            identity) expected=5 ;; argo) expected=10 ;; network) expected=15 ;;
-        esac
         selected=""
         prompt_modify_action selected "$category" <<< $'99\n1\n' > "$tmp/$category"
-        assert_eq "$expected" "$selected" "$category first action"
+        [[ -n "$selected" ]] || fail "$category first action missing"
         assert_contains "$(<"$tmp/$category")" '无效选项' "$category invalid choice retry"
         selected=""
         prompt_modify_action selected "$category" <<< '0' > /dev/null
@@ -2447,26 +2468,44 @@ test_modify_menu_categories() (
         fi
     done
     assert_contains "$(<"$tmp/reality")" '公网 20001/TCP → 本机 20012/TCP' "NAT port pair in menu"
-    for item in \
-        reality:1:1 reality:2:2 reality:3:6 reality:4:9 reality:5:4 \
-        hy2:1:16 hy2:2:7 hy2:3:8 socks:1:17 \
-        identity:1:5 identity:2:3 \
-        argo:1:10 argo:2:11 argo:3:12 \
-        network:1:15 network:2:14 network:3:13 network:4:18; do
-        IFS=: read -r category input expected <<< "$item"
-        selected=""
-        prompt_modify_action selected "$category" <<< "$input" > /dev/null
-        assert_eq "$expected" "$selected" "$category option $input mapping"
-    done
-    local MENU_CONTEXT="节点与协议"
-    prompt_modify_action selected argo <<< '0' > "$tmp/argo-node"
-    assert_contains "$(<"$tmp/argo-node")" '节点与协议 / Argo' "Argo breadcrumb from node menu"
-    assert_contains "$(<"$tmp/argo-node")" 'Argo 通过 Cloudflare 隧道连接，其他协议保持直连。' "Argo dependency explained"
+    assert_contains "$(<"$tmp/argo")" 'Argo 通过 Cloudflare 隧道连接，其他协议保持直连。' "Argo dependency explained"
+    assert_contains "$(<"$tmp/argo")" '协议设置 / Argo 隧道' "Argo breadcrumb"
     assert_eq false "$ARGO_ENABLED" "viewing Argo settings does not enable the tunnel"
-    MENU_CONTEXT="连接与订阅"
-    prompt_modify_action selected argo <<< '0' > "$tmp/argo-connection"
-    assert_contains "$(<"$tmp/argo-connection")" '连接与订阅 / Argo' "Argo breadcrumb from connection menu"
     assert_not_contains "$(menu_header '菜单预览')" $'\033' "redirected menu has no ANSI escape"
+
+    check_mappings() {
+        for item in "$@"; do
+            IFS=: read -r category input expected <<< "$item"
+            selected=""
+            if [[ "$expected" == invalid ]]; then
+                prompt_modify_action selected "$category" <<< "$input"$'\n0' > /dev/null
+                assert_eq 0 "$selected" "$category option $input hidden in current state"
+                continue
+            fi
+            prompt_modify_action selected "$category" <<< "$input" > /dev/null
+            assert_eq "$expected" "$selected" "$category option $input mapping"
+            declare -F "$selected" >/dev/null || fail "$category option $input runs undefined $selected"
+        done
+    }
+    check_mappings \
+        reality:1:modify_reality_port reality:2:do_reoptimize_reality_sni reality:3:modify_reality_sni \
+        reality:4:modify_single_port_mode reality:5:modify_reality_keypair \
+        hy2:1:modify_hy2_enabled hy2:2:invalid \
+        socks:1:modify_socks_enable socks:2:invalid \
+        identity:1:modify_node_name identity:2:modify_uuid \
+        argo:1:modify_argo_quick argo:2:modify_argo_fixed argo:3:invalid \
+        network:1:modify_nat_mapping network:2:modify_public_ipv4_override \
+        network:3:modify_link_ipv4_selection network:4:modify_outbound_ip_strategy
+
+    HY2_ENABLED=true; SOCKS_ENABLED=true; SOCKS_USERNAME=user; ARGO_ENABLED=true; ARGO_TOKEN=""
+    check_mappings \
+        hy2:1:modify_hy2_port hy2:2:modify_hy2_password hy2:3:modify_hy2_enabled \
+        socks:1:modify_socks_port socks:2:modify_socks_username socks:3:modify_socks_password \
+        socks:4:modify_socks_disable \
+        argo:1:modify_argo_quick argo:3:modify_argo_disable \
+        argo:4:update_argo_subscription_links argo:5:modify_subscription_port
+    prompt_modify_action selected argo <<< '0' > "$tmp/argo-quick"
+    assert_contains "$(<"$tmp/argo-quick")" '重新申请临时域名' "quick tunnel offers a new domain"
 )
 
 test_submenus_return_without_action() (
@@ -2475,10 +2514,34 @@ test_submenus_return_without_action() (
     service_logs() { fail "return read a log"; }
     service_enable() { fail "return changed boot policy"; }
     service_disable() { fail "return changed boot policy"; }
-    install_or_upgrade_singbox_package() { fail "return started upgrade"; }
     do_logs <<< '0' > /dev/null
     do_boot_manage <<< '0' > /dev/null
-    do_upgrade <<< '0' > /dev/null
+)
+
+test_reinstall_requires_confirmation() (
+    local installed=false
+    prompt_read() { read -r "$1"; }
+    press_enter() { :; }
+    do_primary_install() { installed=true; }
+    do_reinstall <<< 'n' > /dev/null
+    assert_eq false "$installed" "reinstall canceled without confirmation"
+    do_reinstall <<< 'y' > /dev/null
+    assert_eq true "$installed" "reinstall runs after confirmation"
+)
+
+test_connectivity_guide_lists_public_tcp_endpoints() (
+    local output
+    load_params() { :; }
+    REALITY_PORT=20012; REALITY_PUBLIC_PORT=20001; NAT_MODE=true
+    SOCKS_PORT=20023; SOCKS_PUBLIC_PORT=20033; SOCKS_ENABLED=true
+    PUBLIC_IPV4_OVERRIDE=198.51.100.1
+    output=$(show_connectivity_guide)
+    assert_contains "$output" 'https://tcp.ping.pe/198.51.100.1:20001' "Reality uses public mapped port"
+    assert_contains "$output" 'https://tcp.ping.pe/198.51.100.1:20033' "SOCKS5 uses public mapped port"
+    assert_contains "$output" '仅中国红色' "result interpretation shown"
+    SOCKS_ENABLED=false
+    output=$(show_connectivity_guide)
+    assert_not_contains "$output" ':20033' "disabled SOCKS5 omitted"
 )
 
 test_new_install_rejects_missing_xray_setup() (
@@ -2664,6 +2727,8 @@ test_install_protocol_choices
 test_menu_navigation_and_actions
 test_modify_menu_categories
 test_submenus_return_without_action
+test_reinstall_requires_confirmation
+test_connectivity_guide_lists_public_tcp_endpoints
 test_new_install_rejects_missing_xray_setup
 test_argo_gateway_precedes_tunnel_and_failure_is_truthful
 test_start_restart_wait_for_subscription

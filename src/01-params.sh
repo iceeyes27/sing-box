@@ -116,6 +116,10 @@ save_params() {
     chown root:root "$PARAMS_FILE" 2>/dev/null || true
 }
 
+is_installed() {
+    [[ -f "$PARAMS_FILE" ]]
+}
+
 load_params() {
     if [[ -f "$PARAMS_FILE" ]]; then
         load_param_file

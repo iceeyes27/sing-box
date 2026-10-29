@@ -634,7 +634,7 @@ prompt_public_ipv4_override_optional() {
 prompt_public_ipv4_override() {
     local choice input
 
-    menu_header "连接与订阅 / 公网与 NAT / IPv4 覆盖"
+    menu_header "网络设置 / 直连公网 IPv4"
     menu_section "当前覆盖值: $(public_ipv4_override_label)"
     echo -e "  ${DIM}该值仅用于生成 Reality/Hysteria2 直连分享链接和订阅内容，不会修改服务端监听配置。${NC}"
     menu_item 1 "设置或修改覆盖 IPv4"
@@ -683,7 +683,7 @@ prompt_ipv4_link_selection_if_multiple() {
         return 1
     fi
 
-    menu_header "连接与订阅 / 公网与 NAT / IPv4 链接策略"
+    menu_header "多 IPv4 链接策略"
     menu_section "检测到多个 IPv4"
     echo -e "  检测到多个 IPv4: ${BOLD}$(public_ipv4_display)${NC}"
     index=1

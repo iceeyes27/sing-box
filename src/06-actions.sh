@@ -1,18 +1,55 @@
 # ─── 查看链接 ────────────────────────────────────────────────
-do_show_links() {
-    load_params || { warn "未找到配置，请先安装"; press_enter; return; }
-
+# 不暂停，供 sbm links 直接调用；未安装时返回 1。
+show_links() {
+    load_params || return 1
     ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"
     refresh_argo_domain_if_needed
-
     generate_and_show_links
     show_subscription_url
+}
+
+do_show_links() {
+    show_links || warn "未找到配置，请先安装"
+    press_enter
+}
+
+# ─── 公网连通性排查 ──────────────────────────────────────────
+# 本机自检无法确认服务商防火墙、NAT 映射或线路封锁，交给外部 TCP 探测判断。
+show_connectivity_guide() {
+    menu_header "服务管理 / 公网连通性排查"
+    load_params || { warn "未找到配置，请先安装"; return 1; }
+    [[ -n "${PUBLIC_IPV4:-}${PUBLIC_IPV4_OVERRIDE:-}" ]] || refresh_public_ip_stack >/dev/null 2>&1 || true
+
+    local ip found=false
+    menu_section "在浏览器中打开（外部 TCP 检测）"
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] || continue
+        found=true
+        echo -e "  Reality  ${BOLD}https://tcp.ping.pe/${ip}:$(reality_share_port)${NC}"
+        if is_socks_enabled; then
+            echo -e "  SOCKS5   ${BOLD}https://tcp.ping.pe/${ip}:$(socks_share_port)${NC}"
+        fi
+    done < <(selected_public_ipv4_list 2>/dev/null)
+    if [[ "$found" != "true" ]]; then
+        echo "  未检测到可直连的公网 IPv4；可在「网络设置 → 直连公网 IPv4」手动指定。"
+    fi
+
+    menu_section "结果判断"
+    echo -e "  ${GREEN}全部绿色${NC}      端口未被封锁；仍不可用时检查客户端参数，或在「协议设置 → Reality」重新优选伪装域名"
+    echo -e "  ${RED}全部红色${NC}      外部均无法连接：先执行「协议自检」，再检查安全组 / 防火墙 / NAT 面板映射"
+    echo -e "  ${YELLOW}仅中国红色${NC}    端口疑似被封：在「协议设置 → Reality → 修改端口」更换端口后重新导入节点"
+    echo ""
+    echo -e "  ${DIM}Hysteria2 使用 UDP，不适用此 TCP 检测；Argo 经 Cloudflare 转发，无需检测端口。${NC}"
+}
+
+do_connectivity_guide() {
+    show_connectivity_guide || true
     press_enter
 }
 
 # ─── 启动 / 停止 / 重启 ──────────────────────────────────────
 do_start() {
-    menu_header "服务与诊断 / 启动服务"
+    menu_header "服务管理 / 启动服务"
     info "启动服务..."
     local core_ready=true
     service_start sing-box && success "sing-box 已启动" || { core_ready=false; warn "sing-box 启动失败"; }
@@ -36,7 +73,7 @@ do_start() {
 }
 
 do_stop() {
-    menu_header "服务与诊断 / 停止服务"
+    menu_header "服务管理 / 停止服务"
     info "停止服务..."
     service_stop sing-box && success "sing-box 已停止" || warn "sing-box 停止失败"
     service_stop argo-tunnel && success "argo-tunnel 已停止" || warn "argo-tunnel 停止失败"
@@ -45,7 +82,7 @@ do_stop() {
 }
 
 do_restart() {
-    menu_header "服务与诊断 / 重启服务"
+    menu_header "服务管理 / 重启服务"
     info "重启服务..."
     local core_ready=true
     service_restart sing-box && success "sing-box 已重启" || { core_ready=false; warn "sing-box 重启失败"; }
@@ -138,7 +175,7 @@ write_xray_reality_sni() {
 
 # ─── 重新优选 Reality 伪装域名 ───────────────────────────────
 do_reoptimize_reality_sni() {
-    menu_header "节点与协议 / Reality / 优选伪装域名"
+    menu_header "协议设置 / Reality / 优选伪装域名"
     if ! load_params; then
         warn "未安装，无法重新优选 Reality 伪装域名"
         return 1
@@ -300,7 +337,7 @@ disable_cfopt_auto() {
 
 # ─── 查看状态 ────────────────────────────────────────────────
 do_status() {
-    menu_header "服务与诊断 / 运行状态"
+    menu_header "服务管理 / 运行状态"
     menu_section "sing-box"
     service_status sing-box || warn "sing-box 未安装"
     menu_section "argo-tunnel"
@@ -312,7 +349,7 @@ do_status() {
 
 # ─── 查看日志 ────────────────────────────────────────────────
 do_logs() {
-    menu_header "服务与诊断 / 日志"
+    menu_header "服务管理 / 日志"
     menu_section "选择服务"
     menu_item 1 "sing-box 日志"
     menu_item 2 "argo-tunnel 日志"
@@ -330,7 +367,7 @@ do_logs() {
 
 # ─── 开机自启设置 ──────────────────────────────────────────────
 do_boot_manage() {
-    menu_header "服务与诊断 / 开机自启"
+    menu_header "服务管理 / 开机自启"
     menu_section "服务设置"
     menu_item 1 "开启" "sing-box 及已配置附加服务"
     menu_item 2 "关闭" "全部服务"
@@ -354,71 +391,67 @@ do_boot_manage() {
     press_enter
 }
 
-# ─── 更新 sing-box ───────────────────────────────────────────
-do_upgrade() {
-    menu_header "系统维护 / 更新"
-    menu_section "组件"
-    menu_item 1 "更新 sing-box"
-    menu_item 2 "更新 cloudflared"
-    menu_section "管理脚本"
-    menu_item 3 "更新此管理脚本"
-    menu_back
-    prompt_read choice "  请选择: " || return
-    [[ "$choice" == 0 ]] && return
-    case "$choice" in
-        1)
-            info "更新 sing-box..."
-            install_or_upgrade_singbox_package true || error "sing-box 更新失败。请检查网络、磁盘空间或 GitHub 访问"
-            write_singbox_service
-            service_restart sing-box 2>/dev/null || true
-            success "sing-box 已更新并重启"
-            ;;
-        2)
-            info "更新 cloudflared..."
-            if ! load_params || ! argo_enabled; then
-                warn "当前未启用 Argo，无需更新 cloudflared"
-                press_enter
-                return
-            fi
-            install_cloudflared_binary || error "cloudflared 更新失败。请检查网络、磁盘空间或 GitHub 访问"
-            if ! service_restart argo-tunnel; then
-                warn "cloudflared 已更新，但 Argo 隧道重启失败"
-                press_enter
-                return
-            fi
-            if argo_quick_enabled; then
-                sleep 3
-                fetch_argo_domain || warn "Argo 已重启，但尚未取得新的临时域名"
-                save_params
-            fi
-            success "cloudflared 已更新并重启"
-            ;;
-        3)
-            info "更新管理脚本..."
-            if download_manager_command; then
-                # 从新下载的脚本中提取版本号
-                local new_ver
-                new_ver=$(grep -m1 '^SCRIPT_VERSION=' "$MANAGER_COMMAND" | cut -d'"' -f2 2>/dev/null || echo "未知")
-                success "脚本已更新: v${SCRIPT_VERSION} → v${new_ver}"
-                echo ""
-                info "当前配置和服务未受影响，不会重写配置或重启服务。"
-                info "如需让服务端配置使用当前稳定模板，升级后执行: sbm apply"
-                # 仅刷新链接显示 (不重写配置、不重启)
-                if load_params; then
-                    ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"
-                    refresh_argo_domain_if_needed
-                    generate_and_show_links
-                    show_subscription_url
-                fi
-                echo ""
-                prompt_read _ "按 Enter 重启面板并进入新版本..." || true
-                exec bash "$MANAGER_COMMAND"
-            else
-                warn "更新失败，请检查网络或手动更新"
-            fi
-            ;;
-    esac
+# ─── 更新组件 ────────────────────────────────────────────────
+do_upgrade_singbox() {
+    menu_header "系统维护 / 更新 sing-box"
+    install_or_upgrade_singbox_package true || error "sing-box 更新失败。请检查网络、磁盘空间或 GitHub 访问"
+    write_singbox_service
+    service_restart sing-box 2>/dev/null || true
+    success "sing-box 已更新并重启"
     press_enter
+}
+
+do_upgrade_cloudflared() {
+    menu_header "系统维护 / 更新 cloudflared"
+    if ! load_params || ! argo_enabled; then
+        warn "当前未启用 Argo，无需更新 cloudflared"
+        press_enter
+        return
+    fi
+    install_cloudflared_binary || error "cloudflared 更新失败。请检查网络、磁盘空间或 GitHub 访问"
+    if ! service_restart argo-tunnel; then
+        warn "cloudflared 已更新，但 Argo 隧道重启失败"
+        press_enter
+        return
+    fi
+    if argo_quick_enabled; then
+        sleep 3
+        fetch_argo_domain || warn "Argo 已重启，但尚未取得新的临时域名"
+        save_params
+    fi
+    success "cloudflared 已更新并重启"
+    press_enter
+}
+
+do_upgrade_script() {
+    menu_header "系统维护 / 更新管理脚本"
+    if ! download_manager_command; then
+        warn "更新失败，请检查网络或手动更新"
+        press_enter
+        return
+    fi
+    # 从新下载的脚本中提取版本号
+    local new_ver
+    new_ver=$(grep -m1 '^SCRIPT_VERSION=' "$MANAGER_COMMAND" | cut -d'"' -f2 2>/dev/null || echo "未知")
+    success "脚本已更新: v${SCRIPT_VERSION} → v${new_ver}"
+    echo ""
+    info "当前配置和服务未受影响，不会重写配置或重启服务。"
+    info "如需让服务端配置使用当前稳定模板，升级后执行: sbm apply"
+    # 仅刷新链接显示 (不重写配置、不重启)
+    show_links || true
+    echo ""
+    prompt_read _ "按 Enter 重启面板并进入新版本..." || true
+    exec bash "$MANAGER_COMMAND"
+}
+
+# ─── 重新安装 ────────────────────────────────────────────────
+do_reinstall() {
+    menu_header "系统维护 / 重新安装节点"
+    warn "将重新生成 UUID、Reality 密钥和端口，客户端需重新导入节点"
+    local confirm=""
+    prompt_read confirm "  确认重新安装？(y/N): " || true
+    [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消"; press_enter; return; }
+    do_primary_install
 }
 
 # ─── 卸载 ────────────────────────────────────────────────────

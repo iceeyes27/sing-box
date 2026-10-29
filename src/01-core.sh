@@ -159,6 +159,51 @@ menu_back() {
     echo ""
 }
 
+# 菜单 render 函数用 menu_action 同时显示选项并登记命令，编号与分发写在同一处，不会错位。
+# MENU_ACTIONS 由 run_menu / prompt_modify_action / main_menu 声明为 local。
+menu_action() {
+    menu_item "$1" "$3" "${4:-}"
+    MENU_ACTIONS[$1]="$2"
+}
+
+menu_invalid() {
+    warn "无效选项"
+    sleep 0.5
+}
+
+# 读取一次选择，把 menu_action 登记的命令写入 $1：输入 0 写入 0，无效选项写入空串，EOF 返回 1。
+menu_read_action() {
+    local result_var="$1" choice
+    prompt_read choice "  选择: " || return 1
+    printf -v "$result_var" '%s' ""
+    if [[ "$choice" == 0 ]]; then
+        printf -v "$result_var" '0'
+    elif [[ "$choice" =~ ^[1-9][0-9]?$ && -n "${MENU_ACTIONS[choice]:-}" ]]; then
+        printf -v "$result_var" '%s' "${MENU_ACTIONS[choice]}"
+    fi
+}
+
+# 循环显示子菜单并执行选中项；登记的命令格式为 "函数名 [参数]"。
+run_menu() {
+    local title="$1" render="$2" action
+    local MENU_CONTEXT="$title"
+    local -a MENU_ACTIONS=()
+    while true; do
+        MENU_ACTIONS=()
+        show_banner
+        menu_header "$title"
+        "$render"
+        menu_back
+        menu_read_action action || return 0
+        case "$action" in
+            0) return 0 ;;
+            "") menu_invalid ;;
+            # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
+            *) $action ;;
+        esac
+    done
+}
+
 press_enter() {
     echo ""
     prompt_read _ "按 Enter 返回${MENU_CONTEXT:-上级菜单}..." || true

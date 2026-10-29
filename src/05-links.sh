@@ -629,10 +629,15 @@ show_subscription_url() {
         return 0
     fi
 
-    menu_header "连接与订阅 / 订阅地址"
+    menu_header "节点链接 / 订阅地址"
     if public_subscription_url=$(subscription_https_url); then
         echo -e "${GREEN}${BOLD}HTTPS 订阅地址（公网可用性待验证）${NC}"
         echo -e "${YELLOW}${BOLD}${public_subscription_url}${NC}"
+        # 手机客户端可直接扫码导入；不为此额外安装依赖。
+        if command -v qrencode >/dev/null 2>&1; then
+            echo ""
+            qrencode -t ANSIUTF8 -m 1 "$public_subscription_url" 2>/dev/null || true
+        fi
     else
         echo -e "${DIM}Argo 域名尚未就绪，仅提供本机调试地址。${NC}"
     fi
@@ -647,7 +652,7 @@ show_subscription_url() {
 generate_and_show_links() {
     build_share_links
 
-    menu_header "连接与订阅 / 配置信息 & 分享链接"
+    menu_header "节点链接 / 配置信息 & 分享链接"
 
     menu_section "基本信息"
     case "${IP_STACK_MODE:-}" in
@@ -676,7 +681,7 @@ generate_and_show_links() {
         echo -e "  出站优先级:    ${BOLD}$(outbound_ip_strategy_label)${NC}"
     fi
     if [[ "${IP_STACK_MODE:-}" == "unknown" ]]; then
-        echo -e "  ${DIM}提示: 可在 [连接与订阅] -> [公网 IPv4 与 NAT] 设置正确公网 IP 后重新生成链接。${NC}"
+        echo -e "  ${DIM}提示: 可在 [网络设置] -> [直连公网 IPv4] 设置正确公网 IP 后重新生成链接。${NC}"
     fi
     echo -e "  UUID:          ${BOLD}${UUID}${NC}"
     if [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then

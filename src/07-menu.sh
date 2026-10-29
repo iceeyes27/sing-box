@@ -1,24 +1,30 @@
 # ─── Banner ──────────────────────────────────────────────────
+banner_service_status() {
+    if service_is_active "$1"; then
+        printf '%b' "${GREEN}● 运行中${NC}"
+    else
+        printf '%b' "${RED}○ 未运行${NC}"
+    fi
+}
+
 show_banner() {
     clear
     echo ""
     echo -e "  ${CYAN}${BOLD}sing-box 管理面板${NC}  ${DIM}v${SCRIPT_VERSION}${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
 
-    # 状态摘要
-    local sb_status ar_status
-    if service_is_active sing-box; then
-        sb_status="${GREEN}● 运行中${NC}"
-    else
-        sb_status="${RED}○ 未运行${NC}"
+    if ! is_installed; then
+        echo -e "  ${YELLOW}尚未安装节点${NC}"
+        echo ""
+        return
     fi
-    if service_is_active argo-tunnel; then
-        ar_status="${GREEN}● 运行中${NC}"
-    else
-        ar_status="${RED}○ 未运行${NC}"
+    # 未配置 Argo 时不显示 argo-tunnel，避免把“未启用”误读为故障。
+    local status_line
+    status_line="  sing-box: $(banner_service_status sing-box)"
+    if service_exists argo-tunnel 2>/dev/null; then
+        status_line+="    argo-tunnel: $(banner_service_status argo-tunnel)"
     fi
-
-    echo -e "  sing-box:  ${sb_status}    argo-tunnel: ${ar_status}"
+    echo -e "$status_line"
     [[ -n "${PUBLIC_IP:-}" ]] && echo -e "  服务器 IP: ${BOLD}${PUBLIC_IP}${NC}"
     echo ""
 }
@@ -26,133 +32,106 @@ show_banner() {
 # ─── 主菜单 ──────────────────────────────────────────────────
 show_menu() {
     menu_section "主菜单"
-    menu_item 1 "节点与协议" "安装 / Reality / Hysteria2 / SOCKS5 / Argo"
-    menu_item 2 "连接与订阅" "Argo / NAT / 链接"
-    menu_item 3 "服务与诊断" "运行 / 状态 / 日志"
-    menu_item 4 "系统维护" "更新 / 配置同步 / 卸载"
+    if is_installed; then
+        menu_action 1 do_show_links "查看节点链接" "分享链接 / 订阅地址"
+        menu_action 2 protocol_menu "协议设置" "Reality / Hysteria2 / SOCKS5 / Argo"
+        menu_action 3 "do_modify_config network" "网络设置" "NAT / 公网 IPv4 / 出站 IP 优先级"
+        menu_action 4 service_menu "服务管理" "启停 / 日志 / 自检 / 连通性排查"
+        menu_action 5 maintenance_menu "系统维护" "更新 / 配置同步 / 重装 / 卸载"
+    else
+        menu_action 1 do_primary_install "安装节点" "Reality 主节点，可选 Argo / SOCKS5"
+        menu_action 2 do_upgrade_script "更新管理脚本"
+    fi
     menu_back "退出"
 }
 
-node_menu() {
-    local choice
-    local MENU_CONTEXT="节点与协议"
-    while true; do
-        show_banner
-        menu_header "节点与协议"
-        menu_section "部署"
-        menu_item 1 "安装节点"
-        menu_section "协议配置"
-        menu_item 2 "Reality"
-        menu_item 3 "Hysteria2"
-        menu_item 4 "SOCKS5"
-        menu_item 5 "Argo 隧道" "可选"
-        menu_item 6 "节点身份"
-        menu_back
-        prompt_read choice "  选择 [0-6]: " || return
-        case "$choice" in
-            1) do_primary_install ;;
-            2) do_modify_config reality ;;
-            3) do_modify_config hy2 ;;
-            4) do_modify_config socks ;;
-            5) do_modify_config argo ;;
-            6) do_modify_config identity ;;
-            0) return ;;
-            *) warn "无效选项" ;;
-        esac
-    done
+feature_state_label() {
+    if "$1"; then
+        printf '已启用 · %s' "$2"
+    else
+        printf '未启用'
+    fi
 }
 
-connection_menu() {
-    local choice
-    local MENU_CONTEXT="连接与订阅"
-    while true; do
-        show_banner
-        menu_header "连接与订阅"
-        menu_section "隧道与订阅"
-        menu_item 1 "Argo 与订阅配置"
-        menu_item 2 "查看节点链接与订阅"
-        menu_section "公网接入"
-        menu_item 3 "公网 IPv4 与 NAT"
-        menu_back
-        prompt_read choice "  选择 [0-3]: " || return
-        case "$choice" in
-            1) do_modify_config argo ;;
-            2) do_show_links ;;
-            3) do_modify_config network ;;
-            0) return ;;
-            *) warn "无效选项" ;;
-        esac
-    done
+render_protocol_menu() {
+    load_params >/dev/null 2>&1 || true
+    menu_section "直连协议"
+    menu_action 1 "do_modify_config reality" "Reality" "$(reality_share_port)/TCP · ${REALITY_SNI:-}"
+    menu_action 2 "do_modify_config hy2" "Hysteria2" "$(feature_state_label is_hy2_enabled "$(hy2_share_port)/UDP")"
+    menu_action 3 "do_modify_config socks" "SOCKS5" "$(feature_state_label is_socks_enabled "$(socks_share_port)/TCP")"
+    menu_section "隧道"
+    menu_action 4 "do_modify_config argo" "Argo 隧道" "$(argo_mode_label)"
+    menu_section "通用"
+    menu_action 5 "do_modify_config identity" "节点名称与 UUID" "${NODE_NAME:-}"
+}
+
+protocol_menu() {
+    run_menu "协议设置" render_protocol_menu
+}
+
+render_service_menu() {
+    menu_section "运行控制"
+    menu_action 1 do_start "启动服务"
+    menu_action 2 do_stop "停止服务"
+    menu_action 3 do_restart "重启服务"
+    menu_section "诊断"
+    menu_action 4 do_status "查看状态"
+    menu_action 5 do_logs "查看日志"
+    menu_action 6 do_verify_menu "协议自检" "本机认证与流量测试"
+    menu_action 7 do_connectivity_guide "公网连通性排查" "外部检测端口是否被封"
+    menu_section "设置"
+    menu_action 8 do_boot_manage "开机自启"
 }
 
 service_menu() {
-    local choice
-    local MENU_CONTEXT="服务与诊断"
-    while true; do
-        show_banner
-        menu_header "服务与诊断"
-        menu_section "运行控制"
-        menu_item 1 "启动服务"
-        menu_item 2 "停止服务"
-        menu_item 3 "重启服务"
-        menu_section "检查"
-        menu_item 4 "查看状态"
-        menu_item 5 "查看日志"
-        menu_item 6 "开机自启"
-        menu_item 7 "协议自检" "认证与流量测试；公网仍需外部验证"
-        menu_back
-        prompt_read choice "  选择 [0-7]: " || return
-        case "$choice" in
-            1) do_start ;; 2) do_stop ;; 3) do_restart ;;
-            4) do_status ;; 5) do_logs ;; 6) do_boot_manage ;;
-            7) do_verify || warn "协议自检未通过"; press_enter ;;
-            0) return ;;
-            *) warn "无效选项" ;;
-        esac
-    done
+    run_menu "服务管理" render_service_menu
+}
+
+render_maintenance_menu() {
+    menu_section "更新"
+    menu_action 1 do_upgrade_script "更新管理脚本" "不改动配置和服务"
+    menu_action 2 do_upgrade_singbox "更新 sing-box"
+    menu_action 3 do_upgrade_cloudflared "更新 cloudflared" "仅 Argo 使用"
+    menu_action 4 do_apply_menu "按当前版本同步配置" "升级脚本后执行，等同 sbm apply"
+    menu_section "重装与卸载"
+    menu_action 5 do_reinstall "重新安装节点" "覆盖当前配置"
+    menu_action 6 do_uninstall "卸载" "需再次确认"
 }
 
 maintenance_menu() {
-    local choice
-    local MENU_CONTEXT="系统维护"
-    while true; do
-        show_banner
-        menu_header "系统维护"
-        menu_section "更新"
-        menu_item 1 "更新组件与管理脚本"
-        menu_item 2 "按当前版本同步配置"
-        menu_section "删除"
-        menu_item 3 "卸载" "需再次确认"
-        menu_back
-        prompt_read choice "  选择 [0-3]: " || return
-        case "$choice" in
-            1) do_upgrade ;;
-            2) do_apply_latest || warn "配置同步未完成"; press_enter ;;
-            3) do_uninstall ;;
-            0) return ;;
-            *) warn "无效选项" ;;
-        esac
-    done
+    run_menu "系统维护" render_maintenance_menu
+}
+
+do_verify_menu() {
+    do_verify || warn "协议自检未通过；可查看日志，或用「公网连通性排查」确认外部可达"
+    press_enter
+}
+
+do_apply_menu() {
+    do_apply_latest || warn "配置同步未完成"
+    press_enter
 }
 
 main_menu() {
     get_public_ip 2>/dev/null || true
+    local action
+    local MENU_CONTEXT="主菜单"
+    local -a MENU_ACTIONS=()
 
     while true; do
+        MENU_ACTIONS=()
         show_banner
         show_menu
-        if ! prompt_read choice "  选择 [0-4]: "; then
+        if ! menu_read_action action; then
             echo ""
             warn "未检测到交互式终端，请在服务器终端直接执行: sbm"
             exit 1
         fi
-        case "$choice" in
-            1)  node_menu ;;
-            2)  connection_menu ;;
-            3)  service_menu ;;
-            4)  maintenance_menu ;;
+        case "$action" in
             0)  echo -e "\n  ${CYAN}Bye!${NC}\n"; exit 0 ;;
-            *)  warn "无效选项" ; sleep 0.5 ;;
+            "") menu_invalid ;;
+            # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
+            *)  $action ;;
         esac
     done
 }
@@ -176,7 +155,7 @@ main() {
 
     case "${1:-}" in
         install)     do_primary_install ;;
-        links|sub)   if load_params; then ensure_subscription_service_if_enabled || warn "订阅服务未成功启动"; refresh_argo_domain_if_needed; generate_and_show_links; show_subscription_url; else warn "未安装"; fi ;;
+        links|sub)   show_links || warn "未安装" ;;
         start)       do_start ;;
         stop)        do_stop ;;
         restart)     do_restart ;;
@@ -185,6 +164,7 @@ main() {
         cfopt|refresh-cf|cfopt-auto) warn "CF 优选现已在 links/sub 命令中自动执行" ;;
         status)      do_status ;;
         verify)      do_verify ;;
+        check)       show_connectivity_guide ;;
         uninstall)   do_uninstall ;;
         --help|-h)
             echo "用法: bash $0 [命令]"
@@ -201,6 +181,7 @@ main() {
             echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
             echo "  status          查看状态"
             echo "  verify          对启用协议执行限时认证与流量测试"
+            echo "  check           输出公网端口外部检测地址与结果判断"
             echo "  uninstall       卸载"
             exit 0
             ;;
