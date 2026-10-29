@@ -2528,7 +2528,7 @@ prompt_port_value() {
 }
 
 show_port_confirmation() {
-    menu_header "安装节点 / 3. 端口确认"
+    menu_header "${PORT_CONFIRM_TITLE:-安装节点 / 3. 端口确认}"
     menu_section "本机监听"
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
     if ! is_hy2_enabled; then
@@ -5176,6 +5176,7 @@ modify_outbound_ip_strategy() {
 # 校验并应用 do_modify_config 中已修改的参数；失败时恢复 old_runtime_params 快照。
 # 始终返回 0，以保持调用处的 errexit 行为。
 apply_modified_config() {
+    local PORT_CONFIRM_TITLE="${MENU_CONTEXT} / 端口确认"
     if [[ "$ports_changed" == "true" || "$links_only_changed" != "true" ]] && ! validate_service_ports \
         "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false "$old_socks_active_port"; then
         restore_runtime_params "${old_runtime_params[@]}"
@@ -5401,11 +5402,35 @@ do_show_links() {
 }
 
 # ─── 公网连通性排查 ──────────────────────────────────────────
-# 本机自检无法确认服务商防火墙、NAT 映射或线路封锁，交给外部 TCP 探测判断。
+# 先排除本机原因（未监听 / 本机防火墙未放行），否则外部检测必然全红。
+report_local_tcp_port() {
+    local label="$1" port="$2" backend="$3"
+    if [[ -n "$(get_port_listeners "$port" tcp)" ]]; then
+        echo -e "  ${GREEN}✓${NC} ${label} 本机 ${port}/TCP 正在监听"
+    else
+        echo -e "  ${RED}✗${NC} ${label} 本机 ${port}/TCP 未监听：先在「服务管理」启动服务或查看日志"
+    fi
+    [[ "$backend" == "none" ]] && return 0
+    if firewall_port_open "$backend" "$port" tcp; then
+        echo -e "  ${GREEN}✓${NC} ${label} $(firewall_backend_label "$backend") 已放行 ${port}/TCP"
+    else
+        echo -e "  ${RED}✗${NC} ${label} $(firewall_backend_label "$backend") 未找到 ${port}/TCP 放行规则"
+    fi
+}
+
+# 本机检查无法确认服务商防火墙、NAT 映射或线路封锁，交给外部 TCP 探测判断。
 show_connectivity_guide() {
     menu_header "服务管理 / 公网连通性排查"
     load_params || { warn "未找到配置，请先安装"; return 1; }
     [[ -n "${PUBLIC_IPV4:-}${PUBLIC_IPV4_OVERRIDE:-}" ]] || refresh_public_ip_stack >/dev/null 2>&1 || true
+
+    local backend
+    backend=$(detect_firewall_backend)
+    menu_section "本机预检"
+    report_local_tcp_port Reality "$REALITY_PORT" "$backend"
+    if is_socks_enabled; then
+        report_local_tcp_port SOCKS5 "$SOCKS_PORT" "$backend"
+    fi
 
     local ip found=false
     menu_section "在浏览器中打开（外部 TCP 检测）"

@@ -523,6 +523,7 @@ modify_outbound_ip_strategy() {
 # 校验并应用 do_modify_config 中已修改的参数；失败时恢复 old_runtime_params 快照。
 # 始终返回 0，以保持调用处的 errexit 行为。
 apply_modified_config() {
+    local PORT_CONFIRM_TITLE="${MENU_CONTEXT} / 端口确认"
     if [[ "$ports_changed" == "true" || "$links_only_changed" != "true" ]] && ! validate_service_ports \
         "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false "$old_socks_active_port"; then
         restore_runtime_params "${old_runtime_params[@]}"

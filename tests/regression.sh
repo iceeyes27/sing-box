@@ -2535,7 +2535,13 @@ test_connectivity_guide_lists_public_tcp_endpoints() (
     REALITY_PORT=20012; REALITY_PUBLIC_PORT=20001; NAT_MODE=true
     SOCKS_PORT=20023; SOCKS_PUBLIC_PORT=20033; SOCKS_ENABLED=true
     PUBLIC_IPV4_OVERRIDE=198.51.100.1
+    get_port_listeners() { [[ "$1" == 20012 ]] && echo listening; }
+    detect_firewall_backend() { echo ufw; }
+    firewall_port_open() { [[ "$2" == 20023 ]]; }
     output=$(show_connectivity_guide)
+    assert_contains "$output" 'Reality 本机 20012/TCP 正在监听' "local Reality listener checked"
+    assert_contains "$output" 'Reality UFW 未找到 20012/TCP 放行规则' "missing firewall rule reported"
+    assert_contains "$output" 'SOCKS5 本机 20023/TCP 未监听' "missing SOCKS5 listener reported"
     assert_contains "$output" 'https://tcp.ping.pe/198.51.100.1:20001' "Reality uses public mapped port"
     assert_contains "$output" 'https://tcp.ping.pe/198.51.100.1:20033' "SOCKS5 uses public mapped port"
     assert_contains "$output" '仅中国红色' "result interpretation shown"

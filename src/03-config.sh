@@ -504,7 +504,7 @@ prompt_port_value() {
 }
 
 show_port_confirmation() {
-    menu_header "安装节点 / 3. 端口确认"
+    menu_header "${PORT_CONFIRM_TITLE:-安装节点 / 3. 端口确认}"
     menu_section "本机监听"
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
     if ! is_hy2_enabled; then
