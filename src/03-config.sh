@@ -34,7 +34,6 @@ generate_params() {
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
-    HY2_PUBLIC_PORT="${HY2_PORT}"
     HY2_PASSWORD=$(random_base64 16)
     HY2_SNI="${HY2_DEFAULT_SNI}"
     HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
@@ -164,7 +163,9 @@ validate_port() {
         warn "${label} 端口必须是数字: ${port}"
         return 1
     fi
-    if (( port < 1 || port > 65535 )); then
+    port="${port#"${port%%[!0]*}"}"
+    port="${port:-0}"
+    if (( ${#port} > 5 )) || (( 10#$port < 1 || 10#$port > 65535 )); then
         warn "${label} 端口超出范围 (1-65535): ${port}"
         return 1
     fi
@@ -413,9 +414,6 @@ validate_service_ports() {
     fi
     if nat_mode_enabled; then
         validate_port "${REALITY_PUBLIC_PORT:-}" "NAT Reality 公网映射" || return 1
-        if is_hy2_enabled; then
-            validate_port "${HY2_PUBLIC_PORT:-}" "NAT Hysteria2 公网映射" || return 1
-        fi
         if is_socks_enabled; then
             validate_port "${SOCKS_PUBLIC_PORT:-}" "NAT SOCKS5 公网映射" || return 1
         fi
@@ -490,12 +488,15 @@ prompt_port_value() {
     local label=$2
     local current=$3
     local prompt=$4
+    local allow_cancel=${5:-false}
     local input candidate
 
     while true; do
         prompt_read input "$prompt" || return 1
+        if [[ "$allow_cancel" == true && "$input" == 0 ]]; then return 1; fi
         candidate="${input:-$current}"
         if validate_port "$candidate" "$label"; then
+            candidate="${candidate#"${candidate%%[!0]*}"}"
             printf -v "$__var_name" '%s' "$candidate"
             return 0
         fi
@@ -522,9 +523,6 @@ show_port_confirmation() {
     if nat_mode_enabled; then
         menu_section "公网映射 · 需在服务商面板配置"
         echo -e "  NAT Reality:  ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC} ${DIM}(面板映射需确认)${NC}"
-        if is_hy2_enabled; then
-            echo -e "  NAT Hysteria2:${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
-        fi
         if is_socks_enabled; then
             echo -e "  NAT SOCKS5:   ${BOLD}${SOCKS_PUBLIC_PORT}/TCP -> ${SOCKS_PORT}/TCP${NC}"
         fi
@@ -536,7 +534,7 @@ show_port_confirmation() {
     menu_section "放行范围"
     if nat_mode_enabled; then
         echo -e "  本机防火墙:   ${BOLD}${REALITY_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
-        echo -e "  服务商面板:   ${BOLD}${REALITY_PUBLIC_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PUBLIC_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PUBLIC_PORT")"
+        echo -e "  服务商面板:   ${BOLD}${REALITY_PUBLIC_PORT}/TCP${NC}$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PUBLIC_PORT")"
     elif is_hy2_enabled; then
         echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}, ${BOLD}${HY2_PORT}/UDP${NC}$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
     elif is_socks_enabled; then
@@ -549,26 +547,23 @@ show_port_confirmation() {
 }
 
 prompt_nat_mapping_config() {
-    local detected_mode input candidate
+    local detected_mode
 
     detected_mode=$(detect_external_access_mode)
     if [[ "$detected_mode" != "nat" ]]; then
         NAT_MODE="false"
         REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        HY2_PUBLIC_PORT="${HY2_PORT}"
         SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
         return 0
     fi
 
     if ! nat_mode_enabled; then
         REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        HY2_PUBLIC_PORT="${HY2_PORT}"
         SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
     fi
     NAT_MODE="true"
     PUBLIC_IPV4_OVERRIDE="${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
     REALITY_PUBLIC_PORT="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-    HY2_PUBLIC_PORT="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
     SOCKS_PUBLIC_PORT="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
     menu_header "安装节点 / 3. NAT 公网映射"
     menu_section "公网 → 本机"
@@ -576,21 +571,6 @@ prompt_nat_mapping_config() {
     echo -e "  公网 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
     prompt_port_value REALITY_PUBLIC_PORT "NAT Reality 公网映射" "$REALITY_PUBLIC_PORT" \
         "  面板分配的 Reality 公网 TCP 端口 [${REALITY_PUBLIC_PORT}]: " || return 1
-    if is_hy2_enabled; then
-        while true; do
-            prompt_read input "  面板分配的 Hysteria2 公网 UDP 端口 [${HY2_PUBLIC_PORT}]，输入 0 禁用: " || return 1
-            candidate="${input:-$HY2_PUBLIC_PORT}"
-            if [[ "$candidate" == "0" ]]; then
-                HY2_ENABLED="false"
-                info "NAT 面板未提供 UDP 映射，已禁用 Hysteria2"
-                break
-            fi
-            if validate_port "$candidate" "NAT Hysteria2 公网映射"; then
-                HY2_PUBLIC_PORT="$candidate"
-                break
-            fi
-        done
-    fi
     if is_socks_enabled; then
         prompt_port_value SOCKS_PUBLIC_PORT "NAT SOCKS5 公网映射" "$SOCKS_PUBLIC_PORT" \
             "  面板分配的 SOCKS5 公网 TCP 端口 [${SOCKS_PUBLIC_PORT}]: " || return 1
@@ -777,9 +757,6 @@ show_external_access_requirements() {
     fi
     if nat_mode_enabled; then
         echo -e "  NAT Reality: ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC} ${DIM}(面板映射需确认)${NC}"
-        if is_hy2_enabled; then
-            echo -e "  NAT Hysteria2: ${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
-        fi
         if is_socks_enabled; then
             echo -e "  NAT SOCKS5: ${BOLD}${SOCKS_PUBLIC_PORT}/TCP -> ${SOCKS_PORT}/TCP${NC}"
         fi

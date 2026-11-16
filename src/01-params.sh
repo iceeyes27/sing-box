@@ -6,7 +6,7 @@ PARAM_KEYS=(
     LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
     SOCKS_PORT SOCKS_USERNAME SOCKS_PASSWORD SOCKS_ENABLED
-    NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT SOCKS_PUBLIC_PORT
+    NAT_MODE REALITY_PUBLIC_PORT SOCKS_PUBLIC_PORT
     OUTBOUND_IP_STRATEGY
 )
 
@@ -262,10 +262,6 @@ load_params() {
             REALITY_PUBLIC_PORT="${REALITY_PORT}"
             need_save=true
         fi
-        if ! validate_port "${HY2_PUBLIC_PORT:-}" "NAT Hysteria2 公网映射" >/dev/null 2>&1; then
-            HY2_PUBLIC_PORT="${HY2_PORT}"
-            need_save=true
-        fi
         if ! validate_port "${SOCKS_PUBLIC_PORT:-}" "NAT SOCKS5 公网映射" >/dev/null 2>&1; then
             SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
             need_save=true
@@ -312,14 +308,13 @@ restore_runtime_params() {
     PUBLIC_IPV4_OVERRIDE="${21:-}"
     NAT_MODE="${22:-false}"
     REALITY_PUBLIC_PORT="${23:-${REALITY_PORT}}"
-    HY2_PUBLIC_PORT="${24:-${HY2_PORT}}"
-    ARGO_ENABLED="${25:-false}"
-    HY2_ENABLED="${26:-false}"
-    SOCKS_PORT="${27:-}"
-    SOCKS_USERNAME="${28:-}"
-    SOCKS_PASSWORD="${29:-}"
-    SOCKS_ENABLED="${30:-false}"
-    SOCKS_PUBLIC_PORT="${31:-${SOCKS_PORT}}"
-    OUTBOUND_IP_STRATEGY="${32:-default}"
+    ARGO_ENABLED="${24:-false}"
+    HY2_ENABLED="${25:-false}"
+    SOCKS_PORT="${26:-}"
+    SOCKS_USERNAME="${27:-}"
+    SOCKS_PASSWORD="${28:-}"
+    SOCKS_ENABLED="${29:-false}"
+    SOCKS_PUBLIC_PORT="${30:-${SOCKS_PORT}}"
+    OUTBOUND_IP_STRATEGY="${31:-default}"
     reset_public_ip_cache
 }

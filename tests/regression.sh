@@ -222,7 +222,6 @@ EOF
     assert_eq "" "$PUBLIC_IPV4_OVERRIDE" "legacy public IPv4 override migration"
     assert_eq "false" "$NAT_MODE" "legacy NAT mode migration"
     assert_eq "443" "$REALITY_PUBLIC_PORT" "legacy Reality public port migration"
-    assert_eq "8443" "$HY2_PUBLIC_PORT" "legacy HY2 public port migration"
     assert_eq "true" "$HY2_ENABLED" "legacy HY2 remains enabled"
     assert_eq "false" "$SOCKS_ENABLED" "legacy SOCKS5 remains disabled"
     assert_eq "proxy-abcd1234" "$SOCKS_USERNAME" "legacy SOCKS5 username migration"
@@ -355,14 +354,13 @@ EOF
     PUBLIC_IPV4_OVERRIDE="198.51.100.99"
     NAT_MODE="true"
     REALITY_PUBLIC_PORT="30443"
-    HY2_PUBLIC_PORT="30444"
     save_params
 
     UUID=""; SHORT_ID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; REALITY_PORT=""; REALITY_SNI=""; REALITY_BACKEND=""
     WS_PORT=""; WS_PATH=""; NODE_NAME=""; SUB_TOKEN=""; SUBSCRIPTION_PORT=""
     ARGO_ENABLED=""; ARGO_DOMAIN=""; ARGO_TOKEN=""; ARGO_BEST_CF_DOMAIN=""; ARGO_BEST_CF_DOMAIN_IPV4=""
     ARGO_BEST_CF_DOMAIN_IPV6=""; LINK_IPV4_SELECTION=""; PUBLIC_IPV4_OVERRIDE=""
-    NAT_MODE=""; REALITY_PUBLIC_PORT=""; HY2_PUBLIC_PORT=""
+    NAT_MODE=""; REALITY_PUBLIC_PORT=""
     HY2_PORT=""; HY2_PASSWORD=""; HY2_SNI=""; HY2_MASQUERADE_URL=""; HY2_ENABLED=""
     SOCKS_PORT=""; SOCKS_USERNAME=""; SOCKS_PASSWORD=""; SOCKS_ENABLED=""; SOCKS_PUBLIC_PORT=""
 
@@ -378,7 +376,7 @@ EOF
     assert_eq '198.51.100.99' "$PUBLIC_IPV4_OVERRIDE" "params public IPv4 override round trip"
     assert_eq 'true' "$NAT_MODE" "params NAT mode round trip"
     assert_eq '30443' "$REALITY_PUBLIC_PORT" "params Reality public port round trip"
-    assert_eq '30444' "$HY2_PUBLIC_PORT" "params HY2 public port round trip"
+    assert_eq '8443' "$HY2_PORT" "params HY2 local port round trip"
     assert_eq 'hy2 pass "quoted"' "$HY2_PASSWORD" "params HY2 password round trip"
     assert_eq 'false' "$HY2_ENABLED" "params HY2 enabled state round trip"
     assert_eq '10808' "$SOCKS_PORT" "params SOCKS5 port round trip"
@@ -433,7 +431,6 @@ test_nat_links_use_public_mapped_ports() {
     PUBLIC_KEY="public"
     SHORT_ID="abcd1234"
     HY2_PORT="443"
-    HY2_PUBLIC_PORT="30444"
     HY2_ENABLED="false"
     SOCKS_PORT="10808"
     SOCKS_PUBLIC_PORT="31080"
@@ -453,7 +450,6 @@ test_nat_links_use_public_mapped_ports() {
 
     NAT_MODE="false"
     REALITY_PUBLIC_PORT="443"
-    HY2_PUBLIC_PORT="443"
     SOCKS_ENABLED="false"
 }
 
@@ -786,7 +782,7 @@ test_runtime_param_restore_is_complete() {
         "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
-        "198.51.100.20" "true" "30443" "30444" "true" "false" \
+        "198.51.100.20" "true" "30443" "true" "false" \
         "10808" "proxy-old" "socks-old" "true" "31080" "prefer_ipv6"
 
     UUID="uuid-new"
@@ -812,7 +808,6 @@ test_runtime_param_restore_is_complete() {
     PUBLIC_IPV4_OVERRIDE="203.0.113.30"
     NAT_MODE="false"
     REALITY_PUBLIC_PORT="444"
-    HY2_PUBLIC_PORT="8444"
     ARGO_ENABLED="false"
     HY2_ENABLED="true"
     SOCKS_PORT="10809"
@@ -828,7 +823,7 @@ test_runtime_param_restore_is_complete() {
         "node-old" "8443" "hy2-old" "bing.com" "https://www.bing.com" \
         "24630" "argo.old.example.com" "token-old" \
         "cf-old.example.com" "cf4-old.example.com" "cf6-old.example.com" "all" \
-        "198.51.100.20" "true" "30443" "30444" "true" "false" \
+        "198.51.100.20" "true" "30443" "true" "false" \
         "10808" "proxy-old" "socks-old" "true" "31080" "prefer_ipv6"
 
     assert_eq "uuid-old" "$UUID" "restore UUID"
@@ -854,7 +849,6 @@ test_runtime_param_restore_is_complete() {
     assert_eq "198.51.100.20" "$PUBLIC_IPV4_OVERRIDE" "restore public IPv4 override"
     assert_eq "true" "$NAT_MODE" "restore NAT mode"
     assert_eq "30443" "$REALITY_PUBLIC_PORT" "restore Reality public port"
-    assert_eq "30444" "$HY2_PUBLIC_PORT" "restore HY2 public port"
     assert_eq "true" "$ARGO_ENABLED" "restore Argo enabled state"
     assert_eq "false" "$HY2_ENABLED" "restore HY2 enabled state"
     assert_eq "10808" "$SOCKS_PORT" "restore SOCKS5 port"
@@ -2188,6 +2182,193 @@ test_modify_nat_reality_port_with_xray() (
     assert_eq 20012 "$REALITY_PORT" "canceled NAT local port restored"
 )
 
+test_port_input_validation_and_cancel() (
+    local value selected=unchanged
+    for value in 1 65535 00080 00000000000000053; do
+        validate_port "$value" test >/dev/null || fail "valid decimal port rejected: $value"
+    done
+    for value in 0 0000 65536 -1 1.5 abc 18446744073709551617; do
+        if validate_port "$value" test >/dev/null; then fail "invalid port accepted: $value"; fi
+    done
+    prompt_read() { read -r "$1"; }
+    prompt_port_value selected test 8443 prompt <<< $'invalid\n65536\n00080' >/dev/null
+    assert_eq 80 "$selected" "port input is normalized to decimal"
+    selected=unchanged
+    if prompt_port_value selected test 8443 prompt true <<< 0; then fail "port cancellation accepted"; fi
+    assert_eq unchanged "$selected" "port cancellation preserves caller value"
+    if prompt_port_value selected test 8443 prompt true < <(true); then fail "port EOF accepted"; fi
+    assert_eq unchanged "$selected" "port EOF preserves caller value"
+    prompt_port_value selected test 443 prompt <<< $'0\n00443' >/dev/null
+    assert_eq 443 "$selected" "other port prompts continue to reject zero"
+)
+
+test_hy2_local_port_lifecycle() (
+    local tmp before_config before_params blocked_udp_port="" fail_next_restart=false fail_tls_cert=false
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    CONFIG_DIR="$tmp"; CONFIG_FILE="$tmp/config.json"; PARAMS_FILE="$tmp/params"
+    XRAY_CONFIG_FILE="$tmp/missing-xray.json"
+    UUID=test-uuid; SHORT_ID=abcd1234; PRIVATE_KEY=private; PUBLIC_KEY=public
+    REALITY_PORT=20001; REALITY_PUBLIC_PORT=30443; REALITY_SNI=example.com; REALITY_BACKEND=singbox
+    WS_PORT=8080; WS_PATH=/abcd1234; NODE_NAME="test"; SUB_TOKEN=token
+    HY2_PORT=8443; HY2_PASSWORD=hy2-pass; HY2_SNI=example.com; HY2_ENABLED=false
+    HY2_CERT_PIN_SHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; ARGO_DOMAIN=""; ARGO_TOKEN=""
+    LINK_IPV4_SELECTION=all; PUBLIC_IPV4_OVERRIDE=198.51.100.1; NAT_MODE=true
+    SOCKS_PORT=20023; SOCKS_USERNAME=user; SOCKS_PASSWORD=pass; SOCKS_ENABLED=false
+    SOCKS_PUBLIC_PORT=31080; OUTBOUND_IP_STRATEGY=default
+    unset HY2_PUBLIC_PORT
+    : > "$tmp/server.crt"
+    : > "$tmp/firewall"; : > "$tmp/restarts"; : > "$tmp/port-checks"; : > "$tmp/prompts"
+
+    clear() { :; }; press_enter() { :; }; sleep() { :; }; chown() { :; }
+    prompt_read() { printf '%s\n' "${2:-}" >> "$tmp/prompts"; read -r "$1"; }
+    sing-box() { :; }
+    generate_tls_cert() { if [[ "$fail_tls_cert" == true ]]; then HY2_ENABLED=false; fi; }
+    write_singbox_service() { :; }
+    open_service_ports() { if is_hy2_enabled; then printf '%s\n' "$HY2_PORT" >> "$tmp/firewall"; fi; }
+    get_port_listeners() {
+        printf '%s/%s\n' "$1" "$2" >> "$tmp/port-checks"
+        if [[ "$2" == udp && "$1" == "$blocked_udp_port" ]]; then echo busy; fi
+    }
+    service_restart_bounded() {
+        printf '%s\n' "$1" >> "$tmp/restarts"
+        if [[ "$fail_next_restart" == true ]]; then fail_next_restart=false; return 1; fi
+    }
+    service_is_active() { :; }
+    show_subscription_url() { :; }; verify_enabled_protocols() { :; }
+    generate_and_show_links() {
+        GENERATED_REALITY_LINKS=""; GENERATED_HY2_LINKS=""
+        GENERATED_SOCKS_LINKS=""; GENERATED_SUBSCRIPTION_RAW=""
+        build_direct_share_links_for_ip 198.51.100.1 ""
+    }
+    save_params
+    printf 'HY2_PUBLIC_PORT="8443"\n' >> "$PARAMS_FILE"
+    write_singbox_config > /dev/null
+    before_config=$(<"$CONFIG_FILE")
+
+    do_modify_config hy2 <<< $'1\n50112\n0\n' > "$tmp/output"
+    assert_eq 50112 "$HY2_PORT" "disabled HY2 port can be configured"
+    assert_eq false "$HY2_ENABLED" "port edit does not enable HY2"
+    assert_eq unset "${HY2_PUBLIC_PORT-unset}" "legacy HY2 public port is ignored"
+    assert_contains "$(<"$PARAMS_FILE")" 'HY2_PORT="50112"' "local HY2 port saved"
+    assert_not_contains "$(<"$PARAMS_FILE")" HY2_PUBLIC_PORT "legacy HY2 public port is no longer persisted"
+    assert_eq "$before_config" "$(<"$CONFIG_FILE")" "disabled port edit preserves running configuration"
+    assert_eq '' "$(<"$tmp/restarts")" "disabled port edit does not restart services"
+    assert_eq '' "$(<"$tmp/firewall")" "disabled port edit does not open firewall"
+    assert_eq '' "$(<"$tmp/port-checks")" "disabled port edit defers availability check until enable"
+
+    before_params=$(<"$PARAMS_FILE")
+    do_modify_config hy2 <<< $'2\n0\n0\n' > "$tmp/output"
+    assert_eq false "$HY2_ENABLED" "canceling enable keeps HY2 disabled"
+    assert_eq 50112 "$HY2_PORT" "canceling enable preserves the saved port"
+    assert_eq "$before_params" "$(<"$PARAMS_FILE")" "canceling enable preserves saved params"
+    do_modify_config hy2 < <(printf '2\n') > "$tmp/output"
+    assert_eq false "$HY2_ENABLED" "enable EOF keeps HY2 disabled"
+    assert_eq "$before_params" "$(<"$PARAMS_FILE")" "enable EOF preserves saved params"
+    do_modify_config hy2 <<< $'2\n50111\nr\n0\n' > "$tmp/output"
+    assert_eq false "$HY2_ENABLED" "rejecting enable confirmation keeps HY2 disabled"
+    assert_eq 50112 "$HY2_PORT" "rejecting confirmation restores original port"
+    assert_eq "$before_config" "$(<"$CONFIG_FILE")" "canceled enable preserves config"
+    assert_eq '' "$(<"$tmp/restarts")" "canceled enable does not restart services"
+    assert_eq '' "$(<"$tmp/firewall")" "canceled enable does not open firewall"
+
+    blocked_udp_port=50112
+    do_modify_config hy2 <<< $'2\n\n0\n' > "$tmp/output"
+    assert_eq false "$HY2_ENABLED" "busy UDP port prevents enabling HY2"
+    assert_eq 50112 "$HY2_PORT" "failed enable preserves configured local port"
+    assert_eq "$before_config" "$(<"$CONFIG_FILE")" "failed enable preserves running configuration"
+    assert_eq '' "$(<"$tmp/restarts")" "failed enable does not restart services"
+    assert_eq '' "$(<"$tmp/firewall")" "failed enable does not open firewall"
+    assert_contains "$(<"$tmp/port-checks")" 50112/udp "enabling checks the configured UDP port"
+
+    blocked_udp_port=50116
+    do_modify_config hy2 <<< $'2\n50116\n0\n' > "$tmp/output"
+    assert_eq false "$HY2_ENABLED" "busy custom port prevents enabling HY2"
+    assert_eq 50112 "$HY2_PORT" "busy custom port preserves saved port"
+    assert_eq "$before_params" "$(<"$PARAMS_FILE")" "busy custom port preserves params"
+    assert_contains "$(<"$tmp/port-checks")" 50116/udp "custom enable checks selected UDP port"
+
+    fail_tls_cert=true
+    do_modify_config hy2 <<< $'2\n50118\n\n0\n' > "$tmp/output"
+    assert_eq false "$HY2_ENABLED" "missing certificate prevents enabling HY2"
+    assert_eq 50112 "$HY2_PORT" "certificate failure restores original port"
+    assert_eq "$before_config" "$(<"$CONFIG_FILE")" "certificate failure preserves config"
+    assert_eq "$before_params" "$(<"$PARAMS_FILE")" "certificate failure preserves params"
+    assert_eq '' "$(<"$tmp/firewall")" "certificate failure does not open firewall"
+    assert_eq '' "$(<"$tmp/restarts")" "certificate failure does not restart services"
+    assert_not_contains "$(<"$tmp/output")" '配置已更新并重启' "certificate failure does not report success"
+
+    fail_tls_cert=false
+    blocked_udp_port=50112
+    do_modify_config hy2 <<< $'2\ninvalid\n-1\n65536\n00050115\n\n0\n' > "$tmp/output"
+    assert_eq true "$HY2_ENABLED" "HY2 enables with a custom port"
+    assert_eq 50115 "$HY2_PORT" "enable uses normalized custom port"
+    assert_contains "$(<"$tmp/prompts")" '本机 UDP 端口 [50112]' "enable offers a local port prompt"
+    assert_contains "$(<"$CONFIG_FILE")" '"listen_port": 50115' "HY2 inbound uses selected local port"
+    assert_contains "$GENERATED_HY2_LINKS" '@198.51.100.1:50115?' "NAT HY2 link uses selected local port"
+    assert_eq 50115 "$(<"$tmp/firewall")" "HY2 opens selected local UDP port"
+    assert_eq sing-box "$(<"$tmp/restarts")" "enabling restarts sing-box"
+    assert_not_contains "$(<"$tmp/output")" 'NAT Hysteria2:' "port confirmation omits HY2 public mapping"
+
+    before_config=$(<"$CONFIG_FILE"); before_params=$(<"$PARAMS_FILE")
+    do_modify_config hy2 <<< $'1\n50113\nr\n0\n' > "$tmp/output"
+    assert_eq 50115 "$HY2_PORT" "cancel restores local HY2 port"
+    assert_eq "$before_params" "$(<"$PARAMS_FILE")" "cancel preserves saved params"
+    assert_eq "$before_config" "$(<"$CONFIG_FILE")" "cancel preserves running configuration"
+    assert_eq sing-box "$(<"$tmp/restarts")" "cancel does not restart services"
+
+    do_modify_config hy2 <<< $'1\n50113\n\n0\n' > "$tmp/output"
+    assert_eq 50113 "$HY2_PORT" "enabled HY2 port edit is applied"
+    assert_contains "$(<"$CONFIG_FILE")" '"listen_port": 50113' "changed port reaches running configuration"
+    assert_contains "$GENERATED_HY2_LINKS" '@198.51.100.1:50113?' "changed port reaches generated link"
+    assert_contains "$(<"$PARAMS_FILE")" 'HY2_PORT="50113"' "changed port is persisted"
+
+    before_config=$(<"$CONFIG_FILE"); before_params=$(<"$PARAMS_FILE")
+    fail_next_restart=true
+    do_modify_config hy2 <<< $'1\n50114\n\n0\n' > "$tmp/output"
+    assert_eq 50113 "$HY2_PORT" "restart failure restores local HY2 port"
+    assert_eq true "$HY2_ENABLED" "restart failure preserves enabled state"
+    assert_eq "$before_params" "$(<"$PARAMS_FILE")" "restart failure restores saved params"
+    assert_eq "$before_config" "$(<"$CONFIG_FILE")" "restart failure restores configuration"
+    assert_not_contains "$(<"$tmp/output")" '配置已更新并重启' "restart failure is not reported as success"
+
+    : > "$tmp/prompts"
+    do_modify_config hy2 <<< $'3\n\n0\n' > "$tmp/output"
+    assert_eq false "$HY2_ENABLED" "HY2 can be disabled"
+    assert_eq 50113 "$HY2_PORT" "disabling preserves the selected local port"
+    assert_not_contains "$(<"$tmp/prompts")" '本机 UDP 端口 [' "disabling does not request a new port"
+    assert_not_contains "$(<"$CONFIG_FILE")" '"type": "hysteria2"' "disabling removes the inbound"
+    do_modify_config hy2 <<< $'2\n50117\n\n0\n' > "$tmp/output"
+    assert_eq true "$HY2_ENABLED" "HY2 can be enabled again with a new port"
+    assert_eq 50117 "$HY2_PORT" "reenabling accepts a custom local port"
+    assert_contains "$GENERATED_HY2_LINKS" '@198.51.100.1:50117?' "reenabled link uses new local port"
+)
+
+test_nat_mapping_does_not_manage_hy2_port() (
+    local tmp changed=false links_only_changed=false
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    NAT_MODE=true; PUBLIC_IPV4_OVERRIDE=198.51.100.1; PUBLIC_IPV4=198.51.100.1
+    REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001
+    HY2_PORT=50112; HY2_ENABLED=true
+    SOCKS_PORT=20023; SOCKS_PUBLIC_PORT=20023; SOCKS_ENABLED=true
+    prompt_read() { printf '%s\n' "$2" >> "$tmp/prompts"; read -r "$1"; }
+    modify_nat_mapping <<< $'1\n\n30443\n31080\n' > /dev/null
+    assert_eq 50112 "$HY2_PORT" "NAT settings preserve local HY2 port"
+    assert_eq true "$HY2_ENABLED" "NAT settings preserve HY2 enabled state"
+    assert_eq 30443 "$REALITY_PUBLIC_PORT" "NAT settings retain Reality mapping"
+    assert_eq 31080 "$SOCKS_PUBLIC_PORT" "NAT settings retain SOCKS5 mapping"
+
+    detect_external_access_mode() { echo nat; }
+    prompt_nat_mapping_config <<< $'30444\n31081\n' > /dev/null
+    assert_eq 50112 "$HY2_PORT" "NAT install preserves local HY2 port"
+    assert_eq true "$HY2_ENABLED" "NAT install does not disable HY2"
+    assert_eq 30444 "$REALITY_PUBLIC_PORT" "NAT install retains Reality mapping"
+    assert_eq 31081 "$SOCKS_PUBLIC_PORT" "NAT install retains SOCKS5 mapping"
+    assert_not_contains "$(<"$tmp/prompts")" Hysteria2 "NAT install and settings do not prompt for HY2 public port"
+)
+
 test_modify_socks_cancel_restores_params() (
     UUID=old-uuid; SHORT_ID=old-short; PRIVATE_KEY=old-private; PUBLIC_KEY=old-public
     REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; REALITY_SNI=example.com; REALITY_BACKEND=singbox
@@ -2494,7 +2675,7 @@ test_modify_menu_categories() (
     check_mappings \
         reality:1:modify_reality_port reality:2:do_reoptimize_reality_sni reality:3:modify_reality_sni \
         reality:4:modify_single_port_mode reality:5:modify_reality_keypair \
-        hy2:1:modify_hy2_enabled hy2:2:invalid \
+        hy2:1:modify_hy2_port hy2:2:modify_hy2_enabled hy2:3:invalid \
         socks:1:modify_socks_enable socks:2:invalid \
         identity:1:modify_node_name identity:2:modify_uuid \
         argo:1:modify_argo_quick argo:2:modify_argo_fixed argo:3:invalid \
@@ -2773,6 +2954,9 @@ test_subscription_payload_requires_matching_data
 test_reality_listener_validation
 test_bounded_service_restart
 test_modify_nat_reality_port_with_xray
+test_port_input_validation_and_cancel
+test_hy2_local_port_lifecycle
+test_nat_mapping_does_not_manage_hy2_port
 test_modify_outbound_ip_strategy
 test_modify_socks_cancel_restores_params
 test_install_network_failure_selection

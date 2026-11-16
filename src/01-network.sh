@@ -242,14 +242,6 @@ socks_share_port() {
     fi
 }
 
-hy2_share_port() {
-    if nat_mode_enabled; then
-        printf '%s' "${HY2_PUBLIC_PORT:-${HY2_PORT}}"
-    else
-        printf '%s' "${HY2_PORT}"
-    fi
-}
-
 public_ipv4_candidate_count() {
     [[ -n "${PUBLIC_IPV4_LIST:-}" ]] || { echo 0; return 0; }
     printf '%s\n' "$PUBLIC_IPV4_LIST" | sed '/^$/d' | wc -l | tr -d '[:space:]'

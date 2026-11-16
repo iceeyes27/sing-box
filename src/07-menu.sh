@@ -63,7 +63,7 @@ feature_state_label() {
 render_protocol_menu() {
     menu_section "直连协议"
     menu_action 1 "do_modify_config reality" "Reality" "$(reality_share_port)/TCP · ${REALITY_SNI:-}"
-    menu_action 2 "do_modify_config hy2" "Hysteria2" "$(feature_state_label is_hy2_enabled "$(hy2_share_port)/UDP")"
+    menu_action 2 "do_modify_config hy2" "Hysteria2" "$(feature_state_label is_hy2_enabled "${HY2_PORT}/UDP")"
     menu_action 3 "do_modify_config socks" "SOCKS5" "$(feature_state_label is_socks_enabled "$(socks_share_port)/TCP")"
     menu_section "隧道"
     menu_action 4 "do_modify_config argo" "Argo 隧道" "$(argo_mode_label)"

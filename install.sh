@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.2.1"
+SCRIPT_VERSION="3.2.2"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -807,14 +807,6 @@ socks_share_port() {
     fi
 }
 
-hy2_share_port() {
-    if nat_mode_enabled; then
-        printf '%s' "${HY2_PUBLIC_PORT:-${HY2_PORT}}"
-    else
-        printf '%s' "${HY2_PORT}"
-    fi
-}
-
 public_ipv4_candidate_count() {
     [[ -n "${PUBLIC_IPV4_LIST:-}" ]] || { echo 0; return 0; }
     printf '%s\n' "$PUBLIC_IPV4_LIST" | sed '/^$/d' | wc -l | tr -d '[:space:]'
@@ -889,7 +881,7 @@ PARAM_KEYS=(
     LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
     HY2_PORT HY2_PASSWORD HY2_SNI HY2_MASQUERADE_URL HY2_ENABLED
     SOCKS_PORT SOCKS_USERNAME SOCKS_PASSWORD SOCKS_ENABLED
-    NAT_MODE REALITY_PUBLIC_PORT HY2_PUBLIC_PORT SOCKS_PUBLIC_PORT
+    NAT_MODE REALITY_PUBLIC_PORT SOCKS_PUBLIC_PORT
     OUTBOUND_IP_STRATEGY
 )
 
@@ -1145,10 +1137,6 @@ load_params() {
             REALITY_PUBLIC_PORT="${REALITY_PORT}"
             need_save=true
         fi
-        if ! validate_port "${HY2_PUBLIC_PORT:-}" "NAT Hysteria2 公网映射" >/dev/null 2>&1; then
-            HY2_PUBLIC_PORT="${HY2_PORT}"
-            need_save=true
-        fi
         if ! validate_port "${SOCKS_PUBLIC_PORT:-}" "NAT SOCKS5 公网映射" >/dev/null 2>&1; then
             SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
             need_save=true
@@ -1195,15 +1183,14 @@ restore_runtime_params() {
     PUBLIC_IPV4_OVERRIDE="${21:-}"
     NAT_MODE="${22:-false}"
     REALITY_PUBLIC_PORT="${23:-${REALITY_PORT}}"
-    HY2_PUBLIC_PORT="${24:-${HY2_PORT}}"
-    ARGO_ENABLED="${25:-false}"
-    HY2_ENABLED="${26:-false}"
-    SOCKS_PORT="${27:-}"
-    SOCKS_USERNAME="${28:-}"
-    SOCKS_PASSWORD="${29:-}"
-    SOCKS_ENABLED="${30:-false}"
-    SOCKS_PUBLIC_PORT="${31:-${SOCKS_PORT}}"
-    OUTBOUND_IP_STRATEGY="${32:-default}"
+    ARGO_ENABLED="${24:-false}"
+    HY2_ENABLED="${25:-false}"
+    SOCKS_PORT="${26:-}"
+    SOCKS_USERNAME="${27:-}"
+    SOCKS_PASSWORD="${28:-}"
+    SOCKS_ENABLED="${29:-false}"
+    SOCKS_PUBLIC_PORT="${30:-${SOCKS_PORT}}"
+    OUTBOUND_IP_STRATEGY="${31:-default}"
     reset_public_ip_cache
 }
 # ─── 管理命令 (sbm) ─────────────────────────────────────────
@@ -2172,7 +2159,6 @@ generate_params() {
 
     # Hysteria2 参数
     HY2_PORT=${HY2_PORT:-${HY2_DEFAULT_PORT}}
-    HY2_PUBLIC_PORT="${HY2_PORT}"
     HY2_PASSWORD=$(random_base64 16)
     HY2_SNI="${HY2_DEFAULT_SNI}"
     HY2_MASQUERADE_URL="${HY2_DEFAULT_MASQUERADE_URL}"
@@ -2302,7 +2288,9 @@ validate_port() {
         warn "${label} 端口必须是数字: ${port}"
         return 1
     fi
-    if (( port < 1 || port > 65535 )); then
+    port="${port#"${port%%[!0]*}"}"
+    port="${port:-0}"
+    if (( ${#port} > 5 )) || (( 10#$port < 1 || 10#$port > 65535 )); then
         warn "${label} 端口超出范围 (1-65535): ${port}"
         return 1
     fi
@@ -2551,9 +2539,6 @@ validate_service_ports() {
     fi
     if nat_mode_enabled; then
         validate_port "${REALITY_PUBLIC_PORT:-}" "NAT Reality 公网映射" || return 1
-        if is_hy2_enabled; then
-            validate_port "${HY2_PUBLIC_PORT:-}" "NAT Hysteria2 公网映射" || return 1
-        fi
         if is_socks_enabled; then
             validate_port "${SOCKS_PUBLIC_PORT:-}" "NAT SOCKS5 公网映射" || return 1
         fi
@@ -2628,12 +2613,15 @@ prompt_port_value() {
     local label=$2
     local current=$3
     local prompt=$4
+    local allow_cancel=${5:-false}
     local input candidate
 
     while true; do
         prompt_read input "$prompt" || return 1
+        if [[ "$allow_cancel" == true && "$input" == 0 ]]; then return 1; fi
         candidate="${input:-$current}"
         if validate_port "$candidate" "$label"; then
+            candidate="${candidate#"${candidate%%[!0]*}"}"
             printf -v "$__var_name" '%s' "$candidate"
             return 0
         fi
@@ -2660,9 +2648,6 @@ show_port_confirmation() {
     if nat_mode_enabled; then
         menu_section "公网映射 · 需在服务商面板配置"
         echo -e "  NAT Reality:  ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC} ${DIM}(面板映射需确认)${NC}"
-        if is_hy2_enabled; then
-            echo -e "  NAT Hysteria2:${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
-        fi
         if is_socks_enabled; then
             echo -e "  NAT SOCKS5:   ${BOLD}${SOCKS_PUBLIC_PORT}/TCP -> ${SOCKS_PORT}/TCP${NC}"
         fi
@@ -2674,7 +2659,7 @@ show_port_confirmation() {
     menu_section "放行范围"
     if nat_mode_enabled; then
         echo -e "  本机防火墙:   ${BOLD}${REALITY_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
-        echo -e "  服务商面板:   ${BOLD}${REALITY_PUBLIC_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PUBLIC_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PUBLIC_PORT")"
+        echo -e "  服务商面板:   ${BOLD}${REALITY_PUBLIC_PORT}/TCP${NC}$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PUBLIC_PORT")"
     elif is_hy2_enabled; then
         echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}, ${BOLD}${HY2_PORT}/UDP${NC}$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
     elif is_socks_enabled; then
@@ -2687,26 +2672,23 @@ show_port_confirmation() {
 }
 
 prompt_nat_mapping_config() {
-    local detected_mode input candidate
+    local detected_mode
 
     detected_mode=$(detect_external_access_mode)
     if [[ "$detected_mode" != "nat" ]]; then
         NAT_MODE="false"
         REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        HY2_PUBLIC_PORT="${HY2_PORT}"
         SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
         return 0
     fi
 
     if ! nat_mode_enabled; then
         REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        HY2_PUBLIC_PORT="${HY2_PORT}"
         SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
     fi
     NAT_MODE="true"
     PUBLIC_IPV4_OVERRIDE="${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
     REALITY_PUBLIC_PORT="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-    HY2_PUBLIC_PORT="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
     SOCKS_PUBLIC_PORT="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
     menu_header "安装节点 / 3. NAT 公网映射"
     menu_section "公网 → 本机"
@@ -2714,21 +2696,6 @@ prompt_nat_mapping_config() {
     echo -e "  公网 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
     prompt_port_value REALITY_PUBLIC_PORT "NAT Reality 公网映射" "$REALITY_PUBLIC_PORT" \
         "  面板分配的 Reality 公网 TCP 端口 [${REALITY_PUBLIC_PORT}]: " || return 1
-    if is_hy2_enabled; then
-        while true; do
-            prompt_read input "  面板分配的 Hysteria2 公网 UDP 端口 [${HY2_PUBLIC_PORT}]，输入 0 禁用: " || return 1
-            candidate="${input:-$HY2_PUBLIC_PORT}"
-            if [[ "$candidate" == "0" ]]; then
-                HY2_ENABLED="false"
-                info "NAT 面板未提供 UDP 映射，已禁用 Hysteria2"
-                break
-            fi
-            if validate_port "$candidate" "NAT Hysteria2 公网映射"; then
-                HY2_PUBLIC_PORT="$candidate"
-                break
-            fi
-        done
-    fi
     if is_socks_enabled; then
         prompt_port_value SOCKS_PUBLIC_PORT "NAT SOCKS5 公网映射" "$SOCKS_PUBLIC_PORT" \
             "  面板分配的 SOCKS5 公网 TCP 端口 [${SOCKS_PUBLIC_PORT}]: " || return 1
@@ -2915,9 +2882,6 @@ show_external_access_requirements() {
     fi
     if nat_mode_enabled; then
         echo -e "  NAT Reality: ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC} ${DIM}(面板映射需确认)${NC}"
-        if is_hy2_enabled; then
-            echo -e "  NAT Hysteria2: ${BOLD}${HY2_PUBLIC_PORT}/UDP -> ${HY2_PORT}/UDP${NC}"
-        fi
         if is_socks_enabled; then
             echo -e "  NAT SOCKS5: ${BOLD}${SOCKS_PUBLIC_PORT}/TCP -> ${SOCKS_PORT}/TCP${NC}"
         fi
@@ -3987,7 +3951,7 @@ build_direct_share_links_for_ip() {
         hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
         hy2_pin_sha=$(get_hy2_cert_pin_sha256) || return 0
         hy2_pin_enc=$(urlencode "${hy2_pin_sha}")
-        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:$(hy2_share_port)?sni=${HY2_SNI}&insecure=1&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
+        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?sni=${HY2_SNI}&insecure=1&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
     fi
 }
 
@@ -4303,7 +4267,7 @@ generate_and_show_links() {
         echo -e "  Argo 模式:     ${DIM}未启用${NC}"
     fi
     if is_hy2_enabled && [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
-        echo -e "  Hysteria2 端口: ${BOLD}$(hy2_share_port)${NC}$(nat_mode_enabled && printf ' (本机监听 %s)' "$HY2_PORT")"
+        echo -e "  Hysteria2 本机端口: ${BOLD}${HY2_PORT}/UDP${NC}"
         echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
     fi
     echo ""
@@ -4801,16 +4765,16 @@ render_modify_reality() {
 
 render_modify_hy2() {
     menu_section "当前状态"
+    local state="未启用"
+    is_hy2_enabled && state="已启用"
+    echo "  ${state} · 本机 ${HY2_PORT}/UDP"
+    menu_section "设置"
+    menu_action 1 modify_hy2_port "修改端口" "本机 UDP 监听端口"
     if is_hy2_enabled; then
-        echo "  已启用 · ${HY2_PORT}/UDP"
-        menu_section "设置"
-        menu_action 1 modify_hy2_port "修改端口"
         menu_action 2 modify_hy2_password "重新生成密码"
         menu_action 3 modify_hy2_enabled "关闭 Hysteria2"
     else
-        echo "  未启用 · 需要 UDP 可达；NAT VPS 需服务商提供 UDP 映射"
-        menu_section "设置"
-        menu_action 1 modify_hy2_enabled "启用 Hysteria2" "${HY2_PORT}/UDP"
+        menu_action 2 modify_hy2_enabled "启用 Hysteria2" "先设置本机 UDP 端口"
     fi
 }
 
@@ -4981,14 +4945,23 @@ modify_node_name() {
     fi
 }
 
+prompt_hy2_port() {
+    prompt_port_value "$1" "Hysteria2" "$HY2_PORT" \
+        "  本机 UDP 端口 [${HY2_PORT}]，输入 0 返回: " true
+}
+
 modify_hy2_port() {
     local new_hy2_port
-    prompt_port_value new_hy2_port "Hysteria2" "$HY2_PORT" "  新 Hysteria2 端口 [${HY2_PORT}]: " || return 1
+    prompt_hy2_port new_hy2_port || return 1
     if [[ "$new_hy2_port" != "$HY2_PORT" ]]; then
         HY2_PORT="$new_hy2_port"
         changed=true
-        ports_changed=true
-        restart_singbox=true
+        if is_hy2_enabled; then
+            ports_changed=true
+            restart_singbox=true
+        else
+            links_only_changed=true
+        fi
     fi
 }
 
@@ -5110,17 +5083,14 @@ modify_nat_mapping() {
     if [[ "$sub_choice" == "2" ]]; then
         NAT_MODE="false"
         REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        HY2_PUBLIC_PORT="${HY2_PORT}"
         SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
     else
-        local nat_public_ip nat_reality_port nat_hy2_port nat_socks_port
+        local nat_public_ip nat_reality_port nat_socks_port
         nat_public_ip="${PUBLIC_IPV4_OVERRIDE:-${PUBLIC_IPV4:-}}"
         nat_reality_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-        nat_hy2_port="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
         nat_socks_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
         if ! nat_mode_enabled; then
             nat_reality_port="${REALITY_PORT}"
-            nat_hy2_port="${HY2_PORT}"
             nat_socks_port="${SOCKS_PORT}"
         fi
         prompt_read input "  NAT 公网 IPv4 [${nat_public_ip}]: " || return 1
@@ -5133,11 +5103,6 @@ modify_nat_mapping() {
         prompt_port_value nat_reality_port "NAT Reality 公网映射" \
             "$nat_reality_port" \
             "  Reality 公网 TCP 端口 [${nat_reality_port}]: " || return 1
-        if is_hy2_enabled; then
-            prompt_port_value nat_hy2_port "NAT Hysteria2 公网映射" \
-                "$nat_hy2_port" \
-                "  Hysteria2 公网 UDP 端口 [${nat_hy2_port}]: " || return 1
-        fi
         if is_socks_enabled; then
             prompt_port_value nat_socks_port "NAT SOCKS5 公网映射" \
                 "$nat_socks_port" \
@@ -5151,7 +5116,6 @@ modify_nat_mapping() {
         NAT_MODE="true"
         PUBLIC_IPV4_OVERRIDE="$nat_public_ip"
         REALITY_PUBLIC_PORT="$nat_reality_port"
-        HY2_PUBLIC_PORT="$nat_hy2_port"
         SOCKS_PUBLIC_PORT="$nat_socks_port"
         LINK_IPV4_SELECTION="all"
         reset_public_ip_cache
@@ -5165,6 +5129,9 @@ modify_hy2_enabled() {
         HY2_ENABLED="false"
         info "Hysteria2 已关闭"
     else
+        local new_hy2_port
+        prompt_hy2_port new_hy2_port || return 1
+        HY2_PORT="$new_hy2_port"
         HY2_ENABLED="true"
         info "Hysteria2 将启用在 ${HY2_PORT}/UDP"
     fi
@@ -5294,7 +5261,7 @@ modify_outbound_ip_strategy() {
 apply_modified_config() {
     local PORT_CONFIRM_TITLE="${MENU_CONTEXT} / 端口确认"
     if [[ "$ports_changed" == "true" || "$links_only_changed" != "true" ]] && ! validate_service_ports \
-        "$old_reality_port" "$old_hy2_port" "$old_subscription_port" false "$old_socks_active_port"; then
+        "$old_reality_port" "$old_hy2_active_port" "$old_subscription_port" false "$old_socks_active_port"; then
         restore_runtime_params "${old_runtime_params[@]}"
         warn "端口检查未通过，已保留原配置"
         press_enter
@@ -5315,6 +5282,16 @@ apply_modified_config() {
     if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" || "$REALITY_PUBLIC_PORT" != "$old_reality_public_port" ]]; then
         warn "请确认服务商面板已将公网 ${REALITY_PUBLIC_PORT}/TCP 转发到本机 ${REALITY_PORT}/TCP；脚本无法修改面板映射"
     fi
+    if [[ "$restart_singbox" == "true" ]]; then
+        local hy2_requested="${HY2_ENABLED:-false}"
+        generate_tls_cert
+        if [[ "$hy2_requested" == "true" ]] && ! is_hy2_enabled; then
+            restore_runtime_params "${old_runtime_params[@]}"
+            warn "Hysteria2 证书不可用，已保留原配置"
+            press_enter
+            return 0
+        fi
+    fi
     if [[ "$links_only_changed" != "true" ]] && ! open_service_ports; then
         restore_runtime_params "${old_runtime_params[@]}"
         warn "端口放行失败，已保留原配置"
@@ -5323,8 +5300,6 @@ apply_modified_config() {
     fi
 
     if [[ "$restart_singbox" == "true" ]]; then
-        # 确保 TLS 证书存在 (Hysteria2 需要)
-        generate_tls_cert
         write_singbox_config
         local restart_failed=false
         write_singbox_service || restart_failed=true
@@ -5451,7 +5426,6 @@ do_modify_config() {
         local old_public_ipv4_override="${PUBLIC_IPV4_OVERRIDE:-}"
         local old_nat_mode="${NAT_MODE:-false}"
         local old_reality_public_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-        local old_hy2_public_port="${HY2_PUBLIC_PORT:-${HY2_PORT}}"
         local old_hy2_enabled="${HY2_ENABLED:-false}"
         local old_socks_port="${SOCKS_PORT}"
         local old_socks_username="${SOCKS_USERNAME}"
@@ -5459,7 +5433,8 @@ do_modify_config() {
         local old_socks_enabled="${SOCKS_ENABLED:-false}"
         local old_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
         local old_outbound_ip_strategy="${OUTBOUND_IP_STRATEGY:-default}"
-        local old_socks_active_port=""
+        local old_hy2_active_port="" old_socks_active_port=""
+        [[ "$old_hy2_enabled" == "true" ]] && old_hy2_active_port="$old_hy2_port"
         [[ "$old_socks_enabled" == "true" ]] && old_socks_active_port="$old_socks_port"
         local -a old_runtime_params=(
             "$old_uuid" "$old_short_id" "$old_private_key" "$old_public_key"
@@ -5468,11 +5443,11 @@ do_modify_config() {
             "$old_hy2_masquerade_url" "$old_subscription_port" "$old_argo_domain" "$old_argo_token"
             "$old_argo_best_cf_domain" "$old_argo_best_cf_domain_ipv4" "$old_argo_best_cf_domain_ipv6"
             "$old_link_ipv4_selection" "$old_public_ipv4_override" "$old_nat_mode"
-            "$old_reality_public_port" "$old_hy2_public_port" "$old_argo_enabled" "$old_hy2_enabled"
+            "$old_reality_public_port" "$old_argo_enabled" "$old_hy2_enabled"
             "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
             "$old_outbound_ip_strategy"
         )
-        prompt_modify_action selected_action "$category" || return
+        prompt_modify_action selected_action "$category" || return 0
 
         case "$selected_action" in
             0) return ;;
@@ -6124,7 +6099,7 @@ feature_state_label() {
 render_protocol_menu() {
     menu_section "直连协议"
     menu_action 1 "do_modify_config reality" "Reality" "$(reality_share_port)/TCP · ${REALITY_SNI:-}"
-    menu_action 2 "do_modify_config hy2" "Hysteria2" "$(feature_state_label is_hy2_enabled "$(hy2_share_port)/UDP")"
+    menu_action 2 "do_modify_config hy2" "Hysteria2" "$(feature_state_label is_hy2_enabled "${HY2_PORT}/UDP")"
     menu_action 3 "do_modify_config socks" "SOCKS5" "$(feature_state_label is_socks_enabled "$(socks_share_port)/TCP")"
     menu_section "隧道"
     menu_action 4 "do_modify_config argo" "Argo 隧道" "$(argo_mode_label)"

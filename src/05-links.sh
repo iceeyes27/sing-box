@@ -391,7 +391,7 @@ build_direct_share_links_for_ip() {
         hy2_pass_enc=$(urlencode "${HY2_PASSWORD}")
         hy2_pin_sha=$(get_hy2_cert_pin_sha256) || return 0
         hy2_pin_enc=$(urlencode "${hy2_pin_sha}")
-        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:$(hy2_share_port)?sni=${HY2_SNI}&insecure=1&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
+        append_hy2_link "hysteria2://${hy2_pass_enc}@${host}:${HY2_PORT}?sni=${HY2_SNI}&insecure=1&pinSHA256=${hy2_pin_enc}#${hy2_remark}"
     fi
 }
 
@@ -707,7 +707,7 @@ generate_and_show_links() {
         echo -e "  Argo 模式:     ${DIM}未启用${NC}"
     fi
     if is_hy2_enabled && [[ "${IP_STACK_MODE:-}" != "ipv6-only" && "${IP_STACK_MODE:-}" != "unknown" ]]; then
-        echo -e "  Hysteria2 端口: ${BOLD}$(hy2_share_port)${NC}$(nat_mode_enabled && printf ' (本机监听 %s)' "$HY2_PORT")"
+        echo -e "  Hysteria2 本机端口: ${BOLD}${HY2_PORT}/UDP${NC}"
         echo -e "  Hysteria2 密码: ${BOLD}${HY2_PASSWORD}${NC}"
     fi
     echo ""

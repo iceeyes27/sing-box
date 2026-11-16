@@ -6,6 +6,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SBM_TEST_MODE=1
 source "${ROOT_DIR}/install.sh"
 
+read -r -a integration_protocols <<< "${SBM_TEST_PROTOCOLS:-reality hy2 socks}"
+for integration_protocol in "${integration_protocols[@]}"; do
+    case "$integration_protocol" in
+        reality|hy2|socks) ;;
+        *) echo "Unsupported test protocol: $integration_protocol" >&2; exit 1 ;;
+    esac
+done
+
 integration_dir=$(mktemp -d /tmp/sbm-protocol-test.XXXXXX)
 integration_pid=""
 cleanup() {
@@ -40,9 +48,10 @@ CONFIG_FILE="${integration_dir}/config.json"
 REALITY_BACKEND=singbox
 REALITY_PORT=$(select_random_available_tcp_port)
 SOCKS_PORT=$(select_random_available_tcp_port "$REALITY_PORT")
-HY2_PORT=$(select_random_available_tcp_port "$REALITY_PORT" "$SOCKS_PORT")
-WS_PORT=$(select_random_available_tcp_port "$REALITY_PORT" "$SOCKS_PORT" "$HY2_PORT")
-SUBSCRIPTION_PORT=$(select_random_available_tcp_port "$REALITY_PORT" "$SOCKS_PORT" "$HY2_PORT" "$WS_PORT")
+HY2_PORT=8443
+integration_hy2_port=$(select_random_available_tcp_port "$REALITY_PORT" "$SOCKS_PORT" "$HY2_PORT")
+WS_PORT=$(select_random_available_tcp_port "$REALITY_PORT" "$SOCKS_PORT" "$HY2_PORT" "$integration_hy2_port")
+SUBSCRIPTION_PORT=$(select_random_available_tcp_port "$REALITY_PORT" "$SOCKS_PORT" "$HY2_PORT" "$integration_hy2_port" "$WS_PORT")
 UUID=$(sing-box generate uuid)
 integration_keys=$(sing-box generate reality-keypair)
 PRIVATE_KEY=$(printf '%s\n' "$integration_keys" | grep -i 'PrivateKey' | awk '{print $NF}')
@@ -50,21 +59,24 @@ PUBLIC_KEY=$(printf '%s\n' "$integration_keys" | grep -i 'PublicKey' | awk '{pri
 SHORT_ID=$(random_hex 4)
 REALITY_SNI=www.nazhumi.com
 ARGO_ENABLED=false
-HY2_ENABLED=true
+HY2_ENABLED=false
 SOCKS_ENABLED=true
 HY2_PASSWORD=$(random_base64 16)
 HY2_SNI=example.com
 SOCKS_USERNAME=integration-user
 SOCKS_PASSWORD=$(random_hex 16)
-openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
-    -subj /CN=example.com -keyout "${integration_dir}/server.key" \
-    -out "${integration_dir}/server.crt" >/dev/null 2>&1
+prompt_read() { read -r "$1"; }
+changed=false; ports_changed=false; restart_singbox=false
+modify_hy2_enabled <<< "$integration_hy2_port" >/dev/null
+[[ "$HY2_ENABLED" == true && "$HY2_PORT" == "$integration_hy2_port" ]] || { echo "HY2 custom-port enable failed" >&2; exit 1; }
+generate_tls_cert >/dev/null
+is_hy2_enabled || { echo "HY2 certificate generation failed" >&2; exit 1; }
 chown() { :; }
 write_singbox_config >/dev/null
 timeout 50 sing-box run -c "$CONFIG_FILE" >"${integration_dir}/core.log" 2>&1 &
 integration_pid=$!
 sleep 1
-for integration_protocol in reality hy2 socks; do
+for integration_protocol in "${integration_protocols[@]}"; do
     if verify_protocol_loopback "$integration_protocol"; then
         printf 'PASS: %s authenticated loopback traffic\n' "$integration_protocol"
     else
@@ -72,9 +84,29 @@ for integration_protocol in reality hy2 socks; do
         exit 1
     fi
 done
-if verify_protocol_loopback socks ::1; then
-    printf 'PASS: socks IPv6 authenticated loopback traffic\n'
+# Changing the local HY2 port must still allow authenticated UDP traffic.
+integration_old_hy2_port="$HY2_PORT"
+integration_hy2_port=$(select_random_available_tcp_port "$REALITY_PORT" "$SOCKS_PORT" "$HY2_PORT" "$WS_PORT" "$SUBSCRIPTION_PORT")
+modify_hy2_port <<< "$integration_hy2_port" >/dev/null
+[[ "$HY2_PORT" == "$integration_hy2_port" ]] || { echo "HY2 custom-port edit failed" >&2; exit 1; }
+kill "$integration_pid"
+wait "$integration_pid" 2>/dev/null || true
+integration_pid=""
+write_singbox_config >/dev/null
+timeout 50 sing-box run -c "$CONFIG_FILE" >"${integration_dir}/core.log" 2>&1 &
+integration_pid=$!
+sleep 1
+if verify_protocol_loopback hy2; then
+    printf 'PASS: hy2 local port change %s -> %s authenticated loopback traffic\n' "$integration_old_hy2_port" "$HY2_PORT"
 else
-    printf 'FAIL: socks IPv6 authenticated loopback traffic\n' >&2
+    printf 'FAIL: hy2 authenticated loopback traffic after local port change\n' >&2
     exit 1
+fi
+if [[ " ${integration_protocols[*]} " == *" socks "* ]]; then
+    if verify_protocol_loopback socks ::1; then
+        printf 'PASS: socks IPv6 authenticated loopback traffic\n'
+    else
+        printf 'FAIL: socks IPv6 authenticated loopback traffic\n' >&2
+        exit 1
+    fi
 fi
