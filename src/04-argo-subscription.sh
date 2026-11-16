@@ -47,19 +47,20 @@ write_argo_service() {
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
-        cat > "$ARGO_OPENRC_SERVICE" << EOF
+        prepare_openrc_supervision argo-tunnel "$ARGO_OPENRC_SERVICE" || return 1
+        cat > "$ARGO_OPENRC_SERVICE" << EOF || return 1
 #!/sbin/openrc-run
 name="argo-tunnel"
 description="Cloudflare Argo Tunnel"
 command="${cloudflared_bin}"
 command_args="${exec_cmd}"
-command_background=true
+$(openrc_supervision_block)
 pidfile="/run/argo-tunnel.pid"
 output_log="/var/log/argo-tunnel.log"
 error_log="/var/log/argo-tunnel.log"
 EOF
         if argo_fixed_enabled; then
-            cat >> "$ARGO_OPENRC_SERVICE" << EOF
+            cat >> "$ARGO_OPENRC_SERVICE" << EOF || return 1
 env_file="${ARGO_ENV_FILE}"
 start_pre() {
     if [ -r "\${env_file}" ]; then
@@ -70,7 +71,7 @@ start_pre() {
 }
 EOF
         fi
-        cat >> "$ARGO_OPENRC_SERVICE" << 'EOF'
+        cat >> "$ARGO_OPENRC_SERVICE" << 'EOF' || return 1
 
 depend() {
     need net
@@ -249,13 +250,14 @@ write_subscription_service() {
     write_env_file "$SUBSCRIPTION_ENV_FILE" SUB_TOKEN "${SUB_TOKEN:-}"
 
     if [[ "$(service_manager)" == "openrc" ]]; then
-        cat > "$SUBSCRIPTION_OPENRC_SERVICE" << EOF
+        prepare_openrc_supervision sbm-subscription "$SUBSCRIPTION_OPENRC_SERVICE" || return 1
+        cat > "$SUBSCRIPTION_OPENRC_SERVICE" << EOF || return 1
 #!/sbin/openrc-run
 name="sbm-subscription"
 description="SBM Subscription Server"
 command="/usr/bin/python3"
 command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}"
-command_background=true
+$(openrc_supervision_block)
 pidfile="/run/sbm-subscription.pid"
 output_log="/var/log/sbm-subscription.log"
 error_log="/var/log/sbm-subscription.log"
@@ -306,8 +308,8 @@ ensure_subscription_service() {
         return 1
     fi
 
-    write_subscription_server
-    write_subscription_service
+    write_subscription_server || return 1
+    write_subscription_service || return 1
 
     service_enable_now sbm-subscription
 }

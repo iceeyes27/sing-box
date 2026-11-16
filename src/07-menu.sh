@@ -79,9 +79,9 @@ protocol_menu() {
 
 render_service_menu() {
     menu_section "运行控制"
-    menu_action 1 do_start "启动服务"
+    menu_action 1 do_start_menu "启动服务"
     menu_action 2 do_stop "停止服务"
-    menu_action 3 do_restart "重启服务"
+    menu_action 3 do_restart_menu "重启服务"
     menu_section "诊断"
     menu_action 4 do_status "查看状态"
     menu_action 5 do_logs "查看日志"
@@ -90,6 +90,10 @@ render_service_menu() {
     menu_section "设置"
     menu_action 8 do_boot_manage "开机自启"
 }
+
+# 菜单内保留操作失败提示后继续交互；CLI 仍保留非零退出状态。
+do_start_menu() { do_start || true; }
+do_restart_menu() { do_restart || true; }
 
 service_menu() {
     run_menu "服务管理" render_service_menu
@@ -138,8 +142,10 @@ main_menu() {
         case "$action" in
             0)  echo -e "\n  ${CYAN}Bye!${NC}\n"; exit 0 ;;
             "") menu_invalid ;;
-            # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
-            *)  $action ;;
+            *)
+                # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
+                $action
+                ;;
         esac
     done
 }

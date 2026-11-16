@@ -8,7 +8,7 @@
 | CentOS / RHEL | `yum` / `dnf` | systemd | 逻辑覆盖 | 支持 |
 | Alpine latest | `apk` | OpenRC / 容器内可能为 none | 是 | 支持 |
 
-> CI 容器 smoke 重点验证脚本语法、包管理器识别、服务管理器识别、架构映射、资源档位和订阅监听默认值；真实服务启动仍建议在完整 VPS / VM 上验证。
+> CI 容器 smoke 验证脚本语法、系统识别、架构映射、资源档位和订阅监听默认值。专用 Alpine OpenRC 测试验证旧服务迁移、崩溃自动重启、残留状态恢复和启动后立即退出；真实代理流量仍需另外验证。
 
 ## 架构
 
@@ -67,7 +67,9 @@
 - 初始用 `sh` 执行时会自动安装 Bash 并重新执行脚本。
 - sing-box 优先尝试 `apk add sing-box`，失败后使用官方 `linux-*-musl.tar.gz`。
 - cloudflared 优先尝试 `apk add cloudflared`，失败后使用官方二进制。
-- 服务文件使用 OpenRC。
+- sing-box、Argo 和订阅网关使用 OpenRC `supervise-daemon` 监督进程；异常退出后间隔 5 秒重试，60 秒内最多重试 5 次。
+- 启动和重启会恢复已确认的 `crashed` / `unsupervised` 状态，并在启动后连续检查服务状态；恢复和检查共用 30 秒超时。
+- 升级脚本后执行 `sbm apply` 更新服务文件；旧后台进程会在切换监督器前停止，现有端口和凭证继续使用。
 
 ## 本地验证
 

@@ -2389,7 +2389,7 @@ test_menu_navigation_and_actions() (
     prompt_read() { read -r "$1"; }
     REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; NAT_MODE=false; REALITY_SNI=example.com
     HY2_PORT=8443; HY2_ENABLED=false; SOCKS_PORT=20023; SOCKS_ENABLED=true
-    ARGO_ENABLED=false; NODE_NAME=test
+    ARGO_ENABLED=false; NODE_NAME="test"
     do_primary_install() { echo install >> "$tmp/actions"; }
     do_modify_config() { echo "config:$1" >> "$tmp/actions"; }
     do_show_links() { echo links >> "$tmp/actions"; }
@@ -2564,6 +2564,7 @@ test_install_state_requires_singbox_binary() (
     PARAMS_FILE="$tmp/.params"
     SINGBOX_BIN_PATH="$tmp/missing/sing-box"
     local saved_path="$PATH"
+    # shellcheck disable=SC2123 # 测试缺少依赖时的错误处理，故意使用空 PATH。
     PATH="$tmp/empty"
     if is_installed || has_stale_config; then fail "no params reported as installed or stale"; fi
     : > "$PARAMS_FILE"
@@ -2638,7 +2639,7 @@ test_start_restart_wait_for_subscription() (
     assert_eq $'restart:sing-box\ngateway\nrestart:argo-tunnel' "$(<"$test_dir/order")" "restart order"
     : > "$test_dir/order"
     ensure_subscription_service_if_enabled() { return 1; }
-    do_start > /dev/null
+    if do_start > /dev/null; then fail "gateway startup failure returned success"; fi
     assert_eq 'start:sing-box' "$(<"$test_dir/order")" "gateway failure skips tunnel"
 )
 

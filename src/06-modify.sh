@@ -557,7 +557,8 @@ apply_modified_config() {
         # 确保 TLS 证书存在 (Hysteria2 需要)
         generate_tls_cert
         write_singbox_config
-        write_singbox_service
+        local restart_failed=false
+        write_singbox_service || restart_failed=true
         local xray_update_required=false
         if [[ "$restart_reality_backend" == "true" && "${REALITY_BACKEND:-singbox}" == "xray" ]]; then
             if ! write_xray_reality_config "$REALITY_SNI" "$REALITY_PORT" "$UUID" "$PRIVATE_KEY" "$SHORT_ID"; then
@@ -571,7 +572,6 @@ apply_modified_config() {
         fi
         save_params
         info "重启 sing-box..."
-        local restart_failed=false
         service_restart_bounded sing-box || restart_failed=true
         if [[ "$xray_update_required" == "true" ]]; then
             info "重启 Xray..."

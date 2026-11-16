@@ -76,25 +76,32 @@ do_connectivity_guide() {
 do_start() {
     menu_header "服务管理 / 启动服务"
     info "启动服务..."
-    local core_ready=true
-    service_start sing-box && success "sing-box 已启动" || { core_ready=false; warn "sing-box 启动失败"; }
+    local core_ready=true result=0
+    service_start sing-box && success "sing-box 已启动" || { core_ready=false; result=1; warn "sing-box 启动失败"; }
     if load_params; then
         # 临时隧道的域名检查会访问源站，订阅网关必须先就绪。
         local subscription_ready=true
-        ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅服务启动失败"; }
+        ensure_subscription_service_if_enabled || { subscription_ready=false; result=1; warn "订阅服务启动失败"; }
         if argo_enabled; then
             if [[ "$subscription_ready" == "true" && "$core_ready" == "true" ]]; then
-                service_start argo-tunnel && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
+                service_start argo-tunnel && success "argo-tunnel 已启动" || { result=1; warn "argo-tunnel 启动失败"; }
                 refresh_argo_domain_if_needed
             else
                 warn "sing-box 或订阅网关未就绪，未启动 Argo 隧道"
             fi
         fi
-        save_params
-        build_share_links
-        write_subscription_assets
+        if [[ "$result" == 0 ]]; then
+            if ! save_params || ! build_share_links || ! write_subscription_assets; then
+                warn "服务已启动，但链接信息更新失败"
+                result=1
+            fi
+        fi
+    else
+        warn "无法读取已保存参数，其他服务未操作"
+        result=1
     fi
     press_enter
+    return "$result"
 }
 
 do_stop() {
@@ -109,28 +116,42 @@ do_stop() {
 do_restart() {
     menu_header "服务管理 / 重启服务"
     info "重启服务..."
-    local core_ready=true
-    service_restart sing-box && success "sing-box 已重启" || { core_ready=false; warn "sing-box 重启失败"; }
+    local core_ready=true result=0
+    service_restart sing-box && success "sing-box 已重启" || { core_ready=false; result=1; warn "sing-box 重启失败"; }
     if load_params; then
         local subscription_ready=true
-        ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅服务重启失败"; }
+        ensure_subscription_service_if_enabled || { subscription_ready=false; result=1; warn "订阅服务重启失败"; }
         if argo_enabled; then
             if [[ "$subscription_ready" == "true" && "$core_ready" == "true" ]]; then
-                service_restart argo-tunnel && success "argo-tunnel 已重启" || warn "argo-tunnel 重启失败"
-                if argo_quick_enabled; then
+                if service_restart argo-tunnel; then
+                    success "argo-tunnel 已重启"
+                else
+                    result=1
+                    warn "argo-tunnel 重启失败"
+                fi
+                if [[ "$result" == 0 ]] && argo_quick_enabled; then
                     sleep 3
-                    fetch_argo_domain || warn "Argo 已重启，但尚未取得新的临时域名"
+                    fetch_argo_domain || { result=1; warn "Argo 已重启，但尚未取得新的临时域名"; }
                 fi
             else
                 warn "sing-box 或订阅网关未就绪，未重启 Argo 隧道"
             fi
         fi
-        save_params
-        build_share_links
-        write_subscription_assets
-        argo_enabled && [[ -n "${ARGO_DOMAIN:-}" ]] && info "Argo 域名: ${ARGO_DOMAIN}"
+        if [[ "$result" == 0 ]]; then
+            if ! save_params || ! build_share_links || ! write_subscription_assets; then
+                warn "服务已启动，但链接信息更新失败"
+                result=1
+            fi
+        fi
+        if [[ "$result" == 0 ]] && argo_enabled && [[ -n "${ARGO_DOMAIN:-}" ]]; then
+            info "Argo 域名: ${ARGO_DOMAIN}"
+        fi
+    else
+        warn "无法读取已保存参数，其他服务未操作"
+        result=1
     fi
     press_enter
+    return "$result"
 }
 
 # ─── Xray Reality 配置更新 ───────────────────────────────────
@@ -258,7 +279,13 @@ do_reoptimize_reality_sni() {
     else
         generate_tls_cert
         write_singbox_config
-        write_singbox_service
+        if ! write_singbox_service; then
+            REALITY_SNI="$old_sni"
+            REALITY_SNI_PREV="$prev_sni"
+            write_singbox_config
+            warn "sing-box 服务文件更新失败，已恢复原伪装域名"
+            return 1
+        fi
     fi
     save_params
 
@@ -322,7 +349,7 @@ do_apply_latest() {
     info "正在按 v${SCRIPT_VERSION} 模板重写配置 (UUID / 端口 / 域名 / 密钥保持不变)..."
     generate_tls_cert
     write_singbox_config
-    write_singbox_service
+    write_singbox_service || return 1
     save_params
 
     info "重启 sing-box 以使新配置生效..."
@@ -420,8 +447,11 @@ do_boot_manage() {
 do_upgrade_singbox() {
     menu_header "系统维护 / 更新 sing-box"
     install_or_upgrade_singbox_package true || error "sing-box 更新失败。请检查网络、磁盘空间或 GitHub 访问"
-    write_singbox_service
-    service_restart sing-box 2>/dev/null || true
+    if ! write_singbox_service || ! service_restart sing-box; then
+        warn "sing-box 已更新，但服务未成功重启"
+        press_enter
+        return
+    fi
     success "sing-box 已更新并重启"
     press_enter
 }

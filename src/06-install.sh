@@ -134,7 +134,7 @@ do_primary_install() {
     fi
 
     write_singbox_config
-    write_singbox_service
+    write_singbox_service || error "sing-box 服务文件更新失败，安装已停止"
     if argo_enabled; then
         write_argo_service || error "Argo 隧道配置失败，安装已停止"
     fi

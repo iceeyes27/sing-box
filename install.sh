@@ -44,7 +44,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="3.2.1"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -243,8 +243,10 @@ run_menu() {
         case "$action" in
             0) return 0 ;;
             "") menu_invalid ;;
-            # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
-            *) $action ;;
+            *)
+                # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
+                $action
+                ;;
         esac
     done
 }
@@ -354,11 +356,120 @@ service_daemon_reload() {
     [[ "$(service_manager)" == "systemd" ]] && systemctl daemon-reload 2>/dev/null || true
 }
 
+# 所有 OpenRC 操作共享同一个截止时间，恢复步骤也计入超时。
+service_command_before_deadline() {
+    local deadline=$1 remaining
+    shift
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || return 124
+    timeout -k 1 "$remaining" "$@"
+}
+
+openrc_service_pid_alive() {
+    local svc=$1 pid=""
+    [[ -r "/run/${svc}.pid" ]] || return 1
+    read -r pid < "/run/${svc}.pid" || true
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# supervise-daemon 存活时，OpenRC 可能仍报告 started；还需检查业务子进程。
+openrc_service_child_active() {
+    local svc=$1 pid="" stat="" child_file="/run/openrc/options/${1}/child_pid"
+    if [[ ! -r "$child_file" ]]; then
+        # 旧后台服务没有监督器元数据，继续使用 OpenRC 自身的进程检查。
+        if grep -qF 'supervisor="supervise-daemon"' "/etc/init.d/${svc}" 2>/dev/null; then
+            return 1
+        fi
+        return 0
+    fi
+    read -r pid < "$child_file" || true
+    [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/${pid}/stat" ]] || return 1
+    read -r stat < "/proc/${pid}/stat" || return 1
+    stat=${stat##*) }
+    [[ "${stat%% *}" != Z && "${stat%% *}" != X ]] && kill -0 "$pid" 2>/dev/null
+}
+
+openrc_stop_service() {
+    local svc=$1 deadline=$2 result=0 status=0
+    service_command_before_deadline "$deadline" rc-service "$svc" stop || result=$?
+    case "$result" in 124|137) return "$result" ;; esac
+    service_command_before_deadline "$deadline" rc-service "$svc" status >/dev/null 2>&1 || status=$?
+    case "$status" in
+        3) return 0 ;;
+        32|64)
+            # 只清理已确认崩溃的服务；仍有存活 PID 时不能移除管理状态。
+            if openrc_service_pid_alive "$svc"; then
+                warn "${svc} 仍有存活进程，未清除 OpenRC 状态"
+                return 1
+            fi
+            service_command_before_deadline "$deadline" rc-service "$svc" zap
+            ;;
+        0) return 1 ;;
+        *) return "$status" ;;
+    esac
+}
+
+openrc_service_action() (
+    local svc=$1 action=$2 seconds=${3:-30} status=0 attempt
+    [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || return 1
+    if ! command -v timeout >/dev/null 2>&1; then
+        warn "缺少 timeout 命令，无法限时操作 ${svc}"
+        return 1
+    fi
+    SECONDS=0
+    service_command_before_deadline "$seconds" rc-service "$svc" status >/dev/null 2>&1 || status=$?
+    case "$status" in
+        0)
+            if [[ "$action" == start ]]; then
+                if openrc_service_child_active "$svc"; then return 0; fi
+                action=restart
+            fi
+            ;;
+        3|16) action=start ;;
+        32|64)
+            openrc_stop_service "$svc" "$seconds" || return $?
+            action=start
+            ;;
+        *) return "$status" ;;
+    esac
+    service_command_before_deadline "$seconds" rc-service "$svc" "$action" || return $?
+    # 后台启动返回成功不代表进程存活；连续检查可识别启动后立即退出。
+    for ((attempt = 0; attempt < 2; attempt++)); do
+        service_command_before_deadline "$seconds" sleep 0.2 || return $?
+        service_command_before_deadline "$seconds" rc-service "$svc" status >/dev/null 2>&1 || return $?
+        openrc_service_child_active "$svc" || return 1
+    done
+)
+
+openrc_supervision_block() {
+    cat <<'EOF'
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=5
+respawn_period=60
+EOF
+}
+
+# 切换旧后台服务前先用旧脚本停止进程，避免新监督器无法接管旧进程。
+prepare_openrc_supervision() (
+    local svc=$1 service_file=$2 status=0
+    [[ -f "$service_file" ]] || return 0
+    grep -qF 'supervisor="supervise-daemon"' "$service_file" && return 0
+    command -v timeout >/dev/null 2>&1 || return 1
+    SECONDS=0
+    service_command_before_deadline 30 rc-service "$svc" status >/dev/null 2>&1 || status=$?
+    case "$status" in
+        0|32|64) openrc_stop_service "$svc" 30 ;;
+        3|16) return 0 ;;
+        *) return "$status" ;;
+    esac
+)
+
 service_start() {
     local svc=$1
     case "$(service_manager)" in
         systemd) systemctl start "$svc" 2>/dev/null ;;
-        openrc)  rc-service "$svc" start 2>/dev/null ;;
+        openrc)  openrc_service_action "$svc" start ;;
         *)       return 1 ;;
     esac
 }
@@ -376,28 +487,21 @@ service_restart() {
     local svc=$1
     case "$(service_manager)" in
         systemd) systemctl restart "$svc" 2>/dev/null ;;
-        openrc)  rc-service "$svc" restart 2>/dev/null || rc-service "$svc" start 2>/dev/null ;;
+        openrc)  openrc_service_action "$svc" restart ;;
         *)       return 1 ;;
     esac
 }
 
 # 用于交互式配置修改；缺少 timeout 时失败，而不是无限等待或误报成功。
 service_restart_bounded() {
-    local svc=$1 seconds=${2:-30} result
+    local svc=$1 seconds=${2:-30}
     if ! command -v timeout >/dev/null 2>&1; then
         warn "缺少 timeout 命令，无法安全重启 ${svc}"
         return 1
     fi
     case "$(service_manager)" in
         systemd) timeout "$seconds" systemctl restart "$svc" 2>/dev/null ;;
-        openrc)
-            timeout "$seconds" rc-service "$svc" restart 2>/dev/null && return 0
-            result=$?
-            if [[ "$result" == 124 || "$result" == 137 ]]; then
-                return "$result"
-            fi
-            timeout "$seconds" rc-service "$svc" start 2>/dev/null
-            ;;
+        openrc) openrc_service_action "$svc" restart "$seconds" ;;
         *) return 1 ;;
     esac
 }
@@ -430,7 +534,7 @@ service_is_active() {
     local svc=$1
     case "$(service_manager)" in
         systemd) systemctl is-active --quiet "$svc" 2>/dev/null ;;
-        openrc)  rc-service "$svc" status 2>/dev/null | grep -Eq 'started|running' ;;
+        openrc)  rc-service "$svc" status >/dev/null 2>&1 && openrc_service_child_active "$svc" ;;
         *)       return 1 ;;
     esac
 }
@@ -1988,13 +2092,14 @@ write_singbox_service() {
             local singbox_bin
             singbox_bin=$(command -v sing-box 2>/dev/null || echo "/usr/bin/sing-box")
 
-            cat > "$SINGBOX_OPENRC_SERVICE" << EOF
+            prepare_openrc_supervision sing-box "$SINGBOX_OPENRC_SERVICE" || return 1
+            cat > "$SINGBOX_OPENRC_SERVICE" << EOF || return 1
 #!/sbin/openrc-run
 name="sing-box"
 description="sing-box service"
 command="${singbox_bin}"
 command_args="run -c ${CONFIG_FILE}"
-command_background=true
+$(openrc_supervision_block)
 pidfile="/run/sing-box.pid"
 output_log="/var/log/sing-box.log"
 error_log="/var/log/sing-box.log"
@@ -3111,19 +3216,20 @@ write_argo_service() {
     fi
 
     if [[ "$(service_manager)" == "openrc" ]]; then
-        cat > "$ARGO_OPENRC_SERVICE" << EOF
+        prepare_openrc_supervision argo-tunnel "$ARGO_OPENRC_SERVICE" || return 1
+        cat > "$ARGO_OPENRC_SERVICE" << EOF || return 1
 #!/sbin/openrc-run
 name="argo-tunnel"
 description="Cloudflare Argo Tunnel"
 command="${cloudflared_bin}"
 command_args="${exec_cmd}"
-command_background=true
+$(openrc_supervision_block)
 pidfile="/run/argo-tunnel.pid"
 output_log="/var/log/argo-tunnel.log"
 error_log="/var/log/argo-tunnel.log"
 EOF
         if argo_fixed_enabled; then
-            cat >> "$ARGO_OPENRC_SERVICE" << EOF
+            cat >> "$ARGO_OPENRC_SERVICE" << EOF || return 1
 env_file="${ARGO_ENV_FILE}"
 start_pre() {
     if [ -r "\${env_file}" ]; then
@@ -3134,7 +3240,7 @@ start_pre() {
 }
 EOF
         fi
-        cat >> "$ARGO_OPENRC_SERVICE" << 'EOF'
+        cat >> "$ARGO_OPENRC_SERVICE" << 'EOF' || return 1
 
 depend() {
     need net
@@ -3313,13 +3419,14 @@ write_subscription_service() {
     write_env_file "$SUBSCRIPTION_ENV_FILE" SUB_TOKEN "${SUB_TOKEN:-}"
 
     if [[ "$(service_manager)" == "openrc" ]]; then
-        cat > "$SUBSCRIPTION_OPENRC_SERVICE" << EOF
+        prepare_openrc_supervision sbm-subscription "$SUBSCRIPTION_OPENRC_SERVICE" || return 1
+        cat > "$SUBSCRIPTION_OPENRC_SERVICE" << EOF || return 1
 #!/sbin/openrc-run
 name="sbm-subscription"
 description="SBM Subscription Server"
 command="/usr/bin/python3"
 command_args="${SUBSCRIPTION_SERVER} --listen ${listen_host} --port ${SUBSCRIPTION_PORT} --file ${SUBSCRIPTION_FILE} --upstream-host 127.0.0.1 --upstream-port ${WS_PORT}"
-command_background=true
+$(openrc_supervision_block)
 pidfile="/run/sbm-subscription.pid"
 output_log="/var/log/sbm-subscription.log"
 error_log="/var/log/sbm-subscription.log"
@@ -3370,8 +3477,8 @@ ensure_subscription_service() {
         return 1
     fi
 
-    write_subscription_server
-    write_subscription_service
+    write_subscription_server || return 1
+    write_subscription_service || return 1
 
     service_enable_now sbm-subscription
 }
@@ -4596,7 +4703,7 @@ do_primary_install() {
     fi
 
     write_singbox_config
-    write_singbox_service
+    write_singbox_service || error "sing-box 服务文件更新失败，安装已停止"
     if argo_enabled; then
         write_argo_service || error "Argo 隧道配置失败，安装已停止"
     fi
@@ -5219,7 +5326,8 @@ apply_modified_config() {
         # 确保 TLS 证书存在 (Hysteria2 需要)
         generate_tls_cert
         write_singbox_config
-        write_singbox_service
+        local restart_failed=false
+        write_singbox_service || restart_failed=true
         local xray_update_required=false
         if [[ "$restart_reality_backend" == "true" && "${REALITY_BACKEND:-singbox}" == "xray" ]]; then
             if ! write_xray_reality_config "$REALITY_SNI" "$REALITY_PORT" "$UUID" "$PRIVATE_KEY" "$SHORT_ID"; then
@@ -5233,7 +5341,6 @@ apply_modified_config() {
         fi
         save_params
         info "重启 sing-box..."
-        local restart_failed=false
         service_restart_bounded sing-box || restart_failed=true
         if [[ "$xray_update_required" == "true" ]]; then
             info "重启 Xray..."
@@ -5473,25 +5580,32 @@ do_connectivity_guide() {
 do_start() {
     menu_header "服务管理 / 启动服务"
     info "启动服务..."
-    local core_ready=true
-    service_start sing-box && success "sing-box 已启动" || { core_ready=false; warn "sing-box 启动失败"; }
+    local core_ready=true result=0
+    service_start sing-box && success "sing-box 已启动" || { core_ready=false; result=1; warn "sing-box 启动失败"; }
     if load_params; then
         # 临时隧道的域名检查会访问源站，订阅网关必须先就绪。
         local subscription_ready=true
-        ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅服务启动失败"; }
+        ensure_subscription_service_if_enabled || { subscription_ready=false; result=1; warn "订阅服务启动失败"; }
         if argo_enabled; then
             if [[ "$subscription_ready" == "true" && "$core_ready" == "true" ]]; then
-                service_start argo-tunnel && success "argo-tunnel 已启动" || warn "argo-tunnel 启动失败"
+                service_start argo-tunnel && success "argo-tunnel 已启动" || { result=1; warn "argo-tunnel 启动失败"; }
                 refresh_argo_domain_if_needed
             else
                 warn "sing-box 或订阅网关未就绪，未启动 Argo 隧道"
             fi
         fi
-        save_params
-        build_share_links
-        write_subscription_assets
+        if [[ "$result" == 0 ]]; then
+            if ! save_params || ! build_share_links || ! write_subscription_assets; then
+                warn "服务已启动，但链接信息更新失败"
+                result=1
+            fi
+        fi
+    else
+        warn "无法读取已保存参数，其他服务未操作"
+        result=1
     fi
     press_enter
+    return "$result"
 }
 
 do_stop() {
@@ -5506,28 +5620,42 @@ do_stop() {
 do_restart() {
     menu_header "服务管理 / 重启服务"
     info "重启服务..."
-    local core_ready=true
-    service_restart sing-box && success "sing-box 已重启" || { core_ready=false; warn "sing-box 重启失败"; }
+    local core_ready=true result=0
+    service_restart sing-box && success "sing-box 已重启" || { core_ready=false; result=1; warn "sing-box 重启失败"; }
     if load_params; then
         local subscription_ready=true
-        ensure_subscription_service_if_enabled || { subscription_ready=false; warn "订阅服务重启失败"; }
+        ensure_subscription_service_if_enabled || { subscription_ready=false; result=1; warn "订阅服务重启失败"; }
         if argo_enabled; then
             if [[ "$subscription_ready" == "true" && "$core_ready" == "true" ]]; then
-                service_restart argo-tunnel && success "argo-tunnel 已重启" || warn "argo-tunnel 重启失败"
-                if argo_quick_enabled; then
+                if service_restart argo-tunnel; then
+                    success "argo-tunnel 已重启"
+                else
+                    result=1
+                    warn "argo-tunnel 重启失败"
+                fi
+                if [[ "$result" == 0 ]] && argo_quick_enabled; then
                     sleep 3
-                    fetch_argo_domain || warn "Argo 已重启，但尚未取得新的临时域名"
+                    fetch_argo_domain || { result=1; warn "Argo 已重启，但尚未取得新的临时域名"; }
                 fi
             else
                 warn "sing-box 或订阅网关未就绪，未重启 Argo 隧道"
             fi
         fi
-        save_params
-        build_share_links
-        write_subscription_assets
-        argo_enabled && [[ -n "${ARGO_DOMAIN:-}" ]] && info "Argo 域名: ${ARGO_DOMAIN}"
+        if [[ "$result" == 0 ]]; then
+            if ! save_params || ! build_share_links || ! write_subscription_assets; then
+                warn "服务已启动，但链接信息更新失败"
+                result=1
+            fi
+        fi
+        if [[ "$result" == 0 ]] && argo_enabled && [[ -n "${ARGO_DOMAIN:-}" ]]; then
+            info "Argo 域名: ${ARGO_DOMAIN}"
+        fi
+    else
+        warn "无法读取已保存参数，其他服务未操作"
+        result=1
     fi
     press_enter
+    return "$result"
 }
 
 # ─── Xray Reality 配置更新 ───────────────────────────────────
@@ -5655,7 +5783,13 @@ do_reoptimize_reality_sni() {
     else
         generate_tls_cert
         write_singbox_config
-        write_singbox_service
+        if ! write_singbox_service; then
+            REALITY_SNI="$old_sni"
+            REALITY_SNI_PREV="$prev_sni"
+            write_singbox_config
+            warn "sing-box 服务文件更新失败，已恢复原伪装域名"
+            return 1
+        fi
     fi
     save_params
 
@@ -5719,7 +5853,7 @@ do_apply_latest() {
     info "正在按 v${SCRIPT_VERSION} 模板重写配置 (UUID / 端口 / 域名 / 密钥保持不变)..."
     generate_tls_cert
     write_singbox_config
-    write_singbox_service
+    write_singbox_service || return 1
     save_params
 
     info "重启 sing-box 以使新配置生效..."
@@ -5817,8 +5951,11 @@ do_boot_manage() {
 do_upgrade_singbox() {
     menu_header "系统维护 / 更新 sing-box"
     install_or_upgrade_singbox_package true || error "sing-box 更新失败。请检查网络、磁盘空间或 GitHub 访问"
-    write_singbox_service
-    service_restart sing-box 2>/dev/null || true
+    if ! write_singbox_service || ! service_restart sing-box; then
+        warn "sing-box 已更新，但服务未成功重启"
+        press_enter
+        return
+    fi
     success "sing-box 已更新并重启"
     press_enter
 }
@@ -6003,9 +6140,9 @@ protocol_menu() {
 
 render_service_menu() {
     menu_section "运行控制"
-    menu_action 1 do_start "启动服务"
+    menu_action 1 do_start_menu "启动服务"
     menu_action 2 do_stop "停止服务"
-    menu_action 3 do_restart "重启服务"
+    menu_action 3 do_restart_menu "重启服务"
     menu_section "诊断"
     menu_action 4 do_status "查看状态"
     menu_action 5 do_logs "查看日志"
@@ -6014,6 +6151,10 @@ render_service_menu() {
     menu_section "设置"
     menu_action 8 do_boot_manage "开机自启"
 }
+
+# 菜单内保留操作失败提示后继续交互；CLI 仍保留非零退出状态。
+do_start_menu() { do_start || true; }
+do_restart_menu() { do_restart || true; }
 
 service_menu() {
     run_menu "服务管理" render_service_menu
@@ -6062,8 +6203,10 @@ main_menu() {
         case "$action" in
             0)  echo -e "\n  ${CYAN}Bye!${NC}\n"; exit 0 ;;
             "") menu_invalid ;;
-            # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
-            *)  $action ;;
+            *)
+                # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
+                $action
+                ;;
         esac
     done
 }

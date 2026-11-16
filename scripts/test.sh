@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 scripts/build-install.sh
 bash -n install.sh
 bash -n tests/regression.sh
+bash -n tests/openrc.sh
+bash -n tests/openrc-integration.sh
 bash -n tests/protocol-integration.sh
 
 case "${SBM_SKIP_REGRESSION:-0}" in
@@ -15,5 +17,6 @@ case "${SBM_SKIP_REGRESSION:-0}" in
         ;;
     *)
         bash tests/regression.sh
+        bash tests/openrc.sh
         ;;
 esac

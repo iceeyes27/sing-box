@@ -32,6 +32,26 @@ jobs:
       - name: Check committed checksum
         run: git diff --exit-code -- dist/install.sh.sha256 || { echo "::error::dist/install.sh.sha256 is out of date; run 'make checksum' and commit it"; exit 1; }
 
+  openrc:
+    runs-on: ubuntu-latest
+    container: alpine:3.21
+    steps:
+      - name: Prepare OpenRC environment
+        run: apk add --no-cache bash openrc
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build installer
+        run: bash scripts/build-install.sh
+
+      - name: Verify real OpenRC process recovery
+        run: |
+          printf '\nrc_cgroup_mode="none"\n' >> /etc/rc.conf
+          mkdir -p /run
+          touch /run/sbm-openrc-test-environment
+          SBM_OPENRC_INTEGRATION=1 bash tests/openrc-integration.sh
+
   compatibility:
     runs-on: ubuntu-latest
     strategy:

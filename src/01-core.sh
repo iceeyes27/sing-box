@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="3.2.1"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -198,8 +198,10 @@ run_menu() {
         case "$action" in
             0) return 0 ;;
             "") menu_invalid ;;
-            # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
-            *) $action ;;
+            *)
+                # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
+                $action
+                ;;
         esac
     done
 }

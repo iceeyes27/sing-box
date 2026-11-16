@@ -751,13 +751,14 @@ write_singbox_service() {
             local singbox_bin
             singbox_bin=$(command -v sing-box 2>/dev/null || echo "/usr/bin/sing-box")
 
-            cat > "$SINGBOX_OPENRC_SERVICE" << EOF
+            prepare_openrc_supervision sing-box "$SINGBOX_OPENRC_SERVICE" || return 1
+            cat > "$SINGBOX_OPENRC_SERVICE" << EOF || return 1
 #!/sbin/openrc-run
 name="sing-box"
 description="sing-box service"
 command="${singbox_bin}"
 command_args="run -c ${CONFIG_FILE}"
-command_background=true
+$(openrc_supervision_block)
 pidfile="/run/sing-box.pid"
 output_log="/var/log/sing-box.log"
 error_log="/var/log/sing-box.log"
