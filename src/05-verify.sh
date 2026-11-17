@@ -2,7 +2,9 @@
 # 不把本机测试等同于服务商面板映射或外部客户端实测。
 verify_protocol_loopback() (
     local protocol="$1" address="${2:-127.0.0.1}" tmp http_port client_port nonce response
-    local client_pid="" origin_pid="" outbound="" tls_json
+    local client_pid="" origin_pid="" outbound="" tls_json binary deadline ready=false
+    binary=$(resolve_singbox_binary) || return 1
+    deadline=$((SECONDS + 20))
     tmp=$(mktemp -d) || return 1
     chmod 700 "$tmp"
     trap '[[ -z "$client_pid" ]] || { kill "$client_pid" 2>/dev/null || true; wait "$client_pid" 2>/dev/null || true; }; [[ -z "$origin_pid" ]] || { kill "$origin_pid" 2>/dev/null || true; wait "$origin_pid" 2>/dev/null || true; }; rm -rf "$tmp"' EXIT
@@ -31,15 +33,28 @@ verify_protocol_loopback() (
     esac
     printf '{"log":{"level":"error"},"inbounds":[{"type":"socks","tag":"test-in","listen":"127.0.0.1","listen_port":%s}],"outbounds":[{"tag":"test-out",%s}]}' "$client_port" "$outbound" > "$tmp/client.json"
     chmod 600 "$tmp/client.json"
-    timeout 5 sing-box check -c "$tmp/client.json" >/dev/null 2>&1 || return 1
-    timeout 12 sing-box run -c "$tmp/client.json" >/dev/null 2>&1 &
+    timeout 5 "$binary" check -c "$tmp/client.json" >/dev/null 2>&1 || return 1
+    timeout 20 "$binary" run -c "$tmp/client.json" >/dev/null 2>&1 &
     client_pid=$!
 
-    for _ in 1 2; do
+    # Both origin and proxy must accept connections before testing authentication.
+    while (( SECONDS < deadline )); do
+        kill -0 "$origin_pid" "$client_pid" 2>/dev/null || return 1
+        if python3 - "$http_port" "$client_port" <<'PY' >/dev/null 2>&1
+import socket, sys
+for port in sys.argv[1:]:
+    with socket.create_connection(("127.0.0.1", int(port)), timeout=0.2):
+        pass
+PY
+        then ready=true; break; fi
+        sleep 0.1
+    done
+    [[ "$ready" == true ]] || return 1
+    while (( SECONDS < deadline )); do
         response=$(curl --noproxy '' --proxy "socks5h://127.0.0.1:${client_port}" \
             -fsS --connect-timeout 2 --max-time 4 "http://127.0.0.1:${http_port}/challenge" 2>/dev/null || true)
         [[ "$response" == "$nonce" ]] && return 0
-        sleep 1
+        sleep 0.2
     done
     return 1
 )
@@ -60,12 +75,12 @@ verify_subscription_payload() (
 verify_enabled_protocols() {
     local failed=false address
     menu_header "服务管理 / 协议自检"
-    if ! command -v sing-box >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || \
+    if ! resolve_singbox_binary >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || \
         ! command -v curl >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
         warn "缺少 sing-box / python3 / curl / timeout，协议认证自检未执行"
         return 1
     fi
-    if ! timeout 8 sing-box check -c "$CONFIG_FILE" >/dev/null 2>&1; then
+    if ! run_singbox_bounded 8 check -c "$CONFIG_FILE" >/dev/null 2>&1; then
         warn "服务配置校验失败，协议自检未执行"
         return 1
     fi

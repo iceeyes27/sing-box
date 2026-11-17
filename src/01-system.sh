@@ -233,6 +233,53 @@ service_is_active() {
     esac
 }
 
+# Report an unknown state separately from a confirmed stopped/disabled state.
+service_runtime_state() {
+    local svc=$1 state status=0
+    case "$(service_manager)" in
+        systemd)
+            state=$(systemctl is-active "$svc" 2>/dev/null) || true
+            case "$state" in
+                active|activating|deactivating|reloading) echo running ;;
+                inactive|failed) echo stopped ;;
+                *) return 1 ;;
+            esac
+            ;;
+        openrc)
+            rc-service "$svc" status >/dev/null 2>&1 || status=$?
+            case "$status" in
+                0) openrc_service_child_active "$svc" || return 1; echo running ;;
+                3) echo stopped ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+service_boot_state() {
+    local svc=$1 state
+    case "$(service_manager)" in
+        systemd)
+            state=$(systemctl is-enabled "$svc" 2>/dev/null) || true
+            case "$state" in
+                enabled|enabled-runtime|linked|linked-runtime) echo enabled ;;
+                disabled|masked|masked-runtime|static|indirect) echo disabled ;;
+                *) return 1 ;;
+            esac
+            ;;
+        openrc)
+            state=$(rc-update show default 2>/dev/null) || return 1
+            if printf '%s\n' "$state" | grep -Eq "^[[:space:]]*${svc}[[:space:]]*\\|"; then
+                echo enabled
+            else
+                echo disabled
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 service_status() {
     local svc=$1
     case "$(service_manager)" in

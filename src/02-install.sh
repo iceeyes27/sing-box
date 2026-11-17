@@ -152,7 +152,7 @@ package_manager() {
 }
 
 singbox_binary_available() {
-    command -v sing-box &>/dev/null
+    resolve_singbox_binary >/dev/null 2>&1
 }
 
 is_apt_package_installed() {
@@ -355,7 +355,7 @@ install_singbox_from_official_tarball() {
 
 installed_singbox_version() {
     singbox_binary_available || return 1
-    sing-box version 2>/dev/null | awk 'NR == 1 { print $3; exit }'
+    run_singbox version 2>/dev/null | awk 'NR == 1 { print $3; exit }'
 }
 
 # $1 >= $2 时返回 0；只比较 主.次.修订，忽略预发布后缀。
@@ -653,9 +653,13 @@ ensure_time_sync() {
 }
 
 install_singbox() {
-    if command -v sing-box &>/dev/null; then
+    if [[ -e "$SBM_STATE_DIR/engine.json" || -e "$SBM_STATE_DIR/pending.json" || -L "$SBM_ENGINE_ROOT/current" ]]; then
+        resolve_singbox_binary >/dev/null || { warn "受管内核状态异常，未执行安装"; return 1; }
+        engine_config_guard || return 1
+    fi
+    if singbox_binary_available; then
         local ver
-        ver=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
+        ver=$(run_singbox version 2>/dev/null | head -1 || echo "unknown")
         info "sing-box 已安装: $ver"
     else
         info "安装 sing-box..."
@@ -720,7 +724,7 @@ write_singbox_systemd_unit_if_needed() {
         done
     fi
 
-    singbox_bin=$(command -v sing-box 2>/dev/null || echo "$SINGBOX_BIN_PATH")
+    singbox_bin=$(resolve_singbox_binary) || return 1
     if ! cat > "$SINGBOX_SYSTEMD_SERVICE" << EOF
 ${SINGBOX_SYSTEMD_MANAGED_MARKER}
 [Unit]
@@ -746,10 +750,15 @@ EOF
 }
 
 write_singbox_service() {
+    if [[ -e "$SBM_STATE_DIR/engine.json" ]]; then
+        engine_python compatible || return 1
+        # The managed service contract is owned by the version transaction.
+        return 0
+    fi
     case "$(service_manager)" in
         openrc)
             local singbox_bin
-            singbox_bin=$(command -v sing-box 2>/dev/null || echo "/usr/bin/sing-box")
+            singbox_bin=$(resolve_singbox_binary) || return 1
 
             prepare_openrc_supervision sing-box "$SINGBOX_OPENRC_SERVICE" || return 1
             cat > "$SINGBOX_OPENRC_SERVICE" << EOF || return 1

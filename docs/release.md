@@ -27,6 +27,8 @@ make check
 - ShellCheck warning 级别（本机未安装时会跳过）
 - 生成 `dist/install.sh.sha256`
 
+版本管理变更还需要运行 `python3 -B -m unittest discover -s tests -p test_engine.py`，并对真实 systemd/OpenRC 环境执行接管、更新和回退的隔离验证。单元测试使用临时目录与模拟 Host；其通过不代表真实软件包或服务已验证。ShellCheck 必须实际运行，发布验收不得把 skipped 记作通过。
+
 ## 3. 创建版本标签
 
 ```bash

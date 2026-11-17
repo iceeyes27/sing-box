@@ -11,12 +11,15 @@ modules=(
     01-system.sh
     01-network.sh
     01-params.sh
+    01-engine.sh
     01-manager.sh
     02-install.sh
+    02-upgrade.sh
     03-config.sh
     04-argo-subscription.sh
     05-links.sh
     05-verify.sh
+    05-doctor.sh
     06-install.sh
     06-modify.sh
     06-actions.sh
@@ -36,7 +39,17 @@ for module in "${modules[@]}"; do
         echo "missing source module: ${path}" >&2
         exit 1
     }
-    cat "$path" >> "$tmp_file"
+    if [[ "$module" == 01-engine.sh ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == '# @SBM_ENGINE_PYTHON@' ]]; then
+                cat "${SRC_DIR}/engine.py" >> "$tmp_file"
+            else
+                printf '%s\n' "$line" >> "$tmp_file"
+            fi
+        done < "$path"
+    else
+        cat "$path" >> "$tmp_file"
+    fi
 done
 
 chmod +x "$tmp_file"

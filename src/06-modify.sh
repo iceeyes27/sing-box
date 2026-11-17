@@ -36,12 +36,14 @@ render_modify_hy2() {
     is_hy2_enabled && state="已启用"
     echo "  ${state} · 本机 ${HY2_PORT}/UDP"
     menu_section "设置"
-    menu_action 1 modify_hy2_port "修改端口" "本机 UDP 监听端口"
     if is_hy2_enabled; then
-        menu_action 2 modify_hy2_password "重新生成密码"
-        menu_action 3 modify_hy2_enabled "关闭 Hysteria2"
+        menu_action 1 modify_hy2_enabled "关闭 Hysteria2"
     else
-        menu_action 2 modify_hy2_enabled "启用 Hysteria2" "先设置本机 UDP 端口"
+        menu_action 1 modify_hy2_enabled "启用 Hysteria2" "先设置本机 UDP 端口"
+    fi
+    menu_action 2 modify_hy2_port "修改端口" "本机 UDP 监听端口"
+    if is_hy2_enabled; then
+        menu_action 3 modify_hy2_password "重新生成密码"
     fi
 }
 
@@ -51,10 +53,10 @@ render_modify_socks() {
         echo "  已启用 · ${SOCKS_USERNAME}@${SOCKS_PORT}/TCP"
         echo "  建议在安全组中仅允许业务服务器的固定 IP 访问该端口。"
         menu_section "设置"
-        menu_action 1 modify_socks_port "修改端口"
-        menu_action 2 modify_socks_username "修改用户名"
-        menu_action 3 modify_socks_password "重新生成密码"
-        menu_action 4 modify_socks_disable "关闭 SOCKS5"
+        menu_action 1 modify_socks_disable "关闭 SOCKS5"
+        menu_action 2 modify_socks_port "修改端口"
+        menu_action 3 modify_socks_username "修改用户名"
+        menu_action 4 modify_socks_password "重新生成密码"
     else
         echo "  未启用"
         menu_section "设置"
@@ -179,7 +181,7 @@ modify_reality_sni() {
 }
 
 modify_uuid() {
-    UUID=$(sing-box generate uuid) && [[ -n "$UUID" ]] || { warn "UUID 生成失败"; return 1; }
+    UUID=$(run_singbox generate uuid) && [[ -n "$UUID" ]] || { warn "UUID 生成失败"; return 1; }
     info "新 UUID: $UUID"
     changed=true
     restart_singbox=true
@@ -188,7 +190,7 @@ modify_uuid() {
 
 modify_reality_keypair() {
     local keypair
-    keypair=$(sing-box generate reality-keypair) || { warn "Reality 密钥对生成失败"; return 1; }
+    keypair=$(run_singbox generate reality-keypair) || { warn "Reality 密钥对生成失败"; return 1; }
     PRIVATE_KEY=$(echo "$keypair" | grep -i "PrivateKey" | awk '{print $NF}' || true)
     PUBLIC_KEY=$(echo "$keypair" | grep -i "PublicKey"  | awk '{print $NF}' || true)
     SHORT_ID=$(random_hex 4) || SHORT_ID=""
@@ -210,11 +212,6 @@ modify_node_name() {
         NODE_NAME="$input"
         changed=true
     fi
-}
-
-prompt_hy2_port() {
-    prompt_port_value "$1" "Hysteria2" "$HY2_PORT" \
-        "  本机 UDP 端口 [${HY2_PORT}]，输入 0 返回: " true
 }
 
 modify_hy2_port() {
@@ -310,9 +307,13 @@ modify_subscription_port() {
 }
 
 modify_link_ipv4_selection() {
-    if ! prompt_ipv4_link_selection_if_multiple; then
-        warn "当前未检测到多个 IPv4"
-        press_enter
+    local selection_result=0
+    prompt_ipv4_link_selection_if_multiple || selection_result=$?
+    if (( selection_result != 0 )); then
+        if (( selection_result == 2 )); then
+            warn "多 IPv4 链接策略当前不可用，请检查公网 IP 检测结果或 IPv4 覆盖设置"
+            press_enter
+        fi
         return 1
     fi
     if [[ "${LINK_IPV4_SELECTION:-all}" != "$old_link_ipv4_selection" ]]; then
@@ -340,10 +341,8 @@ modify_nat_mapping() {
         menu_item 1 "修改 NAT 公网映射"
         menu_item 2 "关闭 NAT 公网映射"
         menu_back "取消"
-        prompt_read sub_choice "  请选择 [1]: " || return 1
-        sub_choice=${sub_choice:-1}
+        prompt_menu_choice sub_choice "  请选择 [1]: " "0 1 2" 1 || return 1
         [[ "$sub_choice" == "0" ]] && return 1
-        [[ "$sub_choice" =~ ^[12]$ ]] || { warn "无效选项"; return 1; }
     else
         echo "  公网 IPv4 不在本机网卡上时（NAT VPS），填写服务商面板分配的公网 IP 与映射端口。"
     fi
@@ -480,7 +479,7 @@ modify_outbound_ip_strategy() {
     menu_item 4 "仅 IPv4"
     menu_item 5 "仅 IPv6" "仅有 IPv4 的网站将无法访问"
     menu_back "取消"
-    prompt_read sub_choice "  请选择 [0]: " || return 1
+    prompt_menu_choice sub_choice "  请选择 [0]: " "0 1 2 3 4 5" 0 || return 1
     case "${sub_choice:-0}" in
         1) new_strategy="default" ;;
         2) new_strategy="prefer_ipv4" ;;
@@ -669,6 +668,12 @@ do_modify_config() {
     load_params || { warn "未找到配置，请先安装"; press_enter; return; }
 
     while true; do
+        prompt_modify_action selected_action "$category" || return 0
+        [[ "$selected_action" == 0 ]] && return 0
+        if [[ "${SBM_TEST_MODE:-}" != 1 ]]; then
+            sbm_lock_acquire || continue
+            if ! sbm_mutation_guard || ! engine_config_guard || ! load_params; then sbm_lock_release; continue; fi
+        fi
         local old_uuid="${UUID}"
         local old_short_id="${SHORT_ID}"
         local old_private_key="${PRIVATE_KEY}"
@@ -714,18 +719,19 @@ do_modify_config() {
             "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
             "$old_outbound_ip_strategy"
         )
-        prompt_modify_action selected_action "$category" || return 0
-
         case "$selected_action" in
             0) return ;;
             # 以下两项自行写配置、重启并展示链接，不经过快照恢复与 apply_modified_config。
             do_reoptimize_reality_sni)
                 do_reoptimize_reality_sni || true
+                engine_refresh_after_change || warn "受管版本验证未完成"
+                sbm_lock_release
                 press_enter
                 continue
                 ;;
             update_argo_subscription_links)
                 update_argo_subscription_links || warn "Argo 订阅链接更新失败"
+                sbm_lock_release
                 press_enter
                 continue
                 ;;
@@ -739,8 +745,11 @@ do_modify_config() {
         local links_only_changed=false
         if ! "$selected_action"; then
             restore_runtime_params "${old_runtime_params[@]}"
+            sbm_lock_release
             continue
         fi
         [[ "$changed" == "true" ]] && apply_modified_config
+        if [[ "$changed" == true ]]; then engine_refresh_after_change || warn "受管版本验证未完成"; fi
+        sbm_lock_release
     done
 }

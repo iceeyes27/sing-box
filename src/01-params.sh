@@ -54,8 +54,8 @@ random_hex() {
         openssl rand -hex "$bytes"
         return $?
     fi
-    if command -v sing-box &>/dev/null; then
-        sing-box generate rand "$bytes" --hex 2>/dev/null && return 0
+    if resolve_singbox_binary >/dev/null 2>&1; then
+        run_singbox generate rand "$bytes" --hex 2>/dev/null && return 0
     fi
     if [[ -r /dev/urandom ]] && command -v od &>/dev/null; then
         value=$(od -An -N "$bytes" -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')
@@ -106,6 +106,10 @@ load_param_file() {
 }
 
 save_params() {
+    if [[ "${SBM_LOCK_HELD:-}" != "$BASHPID" && "${SBM_TEST_MODE:-}" != 1 ]]; then
+        sbm_with_lock save_params
+        return $?
+    fi
     mkdir -p "$CONFIG_DIR"
     : > "$PARAMS_FILE"
     chmod 600 "$PARAMS_FILE"
@@ -117,7 +121,18 @@ save_params() {
 }
 
 singbox_binary_present() {
-    command -v sing-box >/dev/null 2>&1 || [[ -x "$SINGBOX_BIN_PATH" ]]
+    resolve_singbox_binary >/dev/null 2>&1
+}
+
+load_params_readonly() {
+    [[ -r "$PARAMS_FILE" ]] || return 1
+    load_param_file
+    HY2_PORT="${HY2_PORT:-$HY2_DEFAULT_PORT}"
+    HY2_ENABLED="${HY2_ENABLED:-false}"
+    SOCKS_PORT="${SOCKS_PORT:-0}"
+    SOCKS_ENABLED="${SOCKS_ENABLED:-false}"
+    ARGO_ENABLED="${ARGO_ENABLED:-false}"
+    NODE_NAME="${NODE_NAME:-未设置}"
 }
 
 is_installed() {
@@ -129,7 +144,10 @@ has_stale_config() {
     [[ -f "$PARAMS_FILE" ]] && ! singbox_binary_present
 }
 
+# Explicit persistence is used by migration callers; normal reads remain in memory.
+# shellcheck disable=SC2120
 load_params() {
+    local persist="${1:-false}"
     if [[ -f "$PARAMS_FILE" ]]; then
         load_param_file
         # 兼容旧版本:逐字段补齐 Hysteria2 / Argo / SOCKS5 参数，绝不覆盖已有值。
@@ -270,7 +288,7 @@ load_params() {
             OUTBOUND_IP_STRATEGY="default"
             need_save=true
         fi
-        [[ "$need_save" == "true" ]] && save_params
+        [[ "$need_save" == "true" && "$persist" == true ]] && save_params
         return 0
     fi
     return 1

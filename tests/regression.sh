@@ -43,6 +43,14 @@ export SBM_TEST_MODE=1
 # shellcheck source=../install.sh
 source "$SCRIPT"
 
+# All new managed state must stay inside this test process's temporary workspace.
+regression_engine_root=$(mktemp -d)
+trap 'rm -rf "$regression_engine_root"' EXIT
+SBM_STATE_DIR="$regression_engine_root/state"
+SBM_ENGINE_ROOT="$regression_engine_root/engines"
+SBM_LOCK_FILE="$regression_engine_root/maintenance.lock"
+SBM_ENGINE_DROPIN="$regression_engine_root/50-sbm-engine.conf"
+
 test_service_manager_systemd() {
     local tmp result
     tmp=$(mktemp -d)
@@ -68,12 +76,14 @@ exit 0'
 
 test_singbox_systemd_override_enables_restart() {
     local tmp body
-    local service_manager_def service_daemon_reload_def
+    local service_manager_def service_daemon_reload_def resolver_def
     local old_dropin_dir old_override_file old_service old_unit_dirs
 
     tmp=$(mktemp -d)
     service_manager_def=$(declare -f service_manager)
     service_daemon_reload_def=$(declare -f service_daemon_reload)
+    resolver_def=$(declare -f resolve_singbox_binary)
+    resolve_singbox_binary() { printf '%s\n' '/usr/local/bin/sing-box'; }
     old_dropin_dir="$SINGBOX_SYSTEMD_DROPIN_DIR"
     old_override_file="$SINGBOX_SYSTEMD_OVERRIDE_FILE"
     old_service="$SINGBOX_SYSTEMD_SERVICE"
@@ -116,6 +126,7 @@ test_singbox_systemd_override_enables_restart() {
     unset -f service_manager service_daemon_reload
     eval "$service_manager_def"
     eval "$service_daemon_reload_def"
+    eval "$resolver_def"
     rm -rf "$tmp"
 }
 
@@ -212,7 +223,7 @@ ARGO_DOMAIN="argo.example.com"
 ARGO_TOKEN=""
 ARGO_BEST_CF_DOMAIN="cf.example.com"
 EOF
-    load_params
+    load_params true
     assert_eq "8443" "$HY2_PORT" "legacy HY2_PORT migration"
     assert_eq "legacy-hy2-password" "$HY2_PASSWORD" "legacy HY2 password migration"
     assert_eq "" "$HY2_MASQUERADE_URL" "legacy HY2 static masquerade migration"
@@ -260,7 +271,7 @@ HY2_ENABLED="false"
 EOF
     service_exists() { [[ "$1" == "xray" ]]; }
 
-    load_params
+    load_params true
     assert_eq "xray" "$REALITY_BACKEND" "legacy Xray backend migration"
     xray_managed_reality || fail "migrated Xray Reality ownership was not detected"
 
@@ -290,7 +301,7 @@ ARGO_DOMAIN="legacy.trycloudflare.com"
 ARGO_TOKEN=""
 EOF
 
-    load_params
+    load_params true
     assert_eq "true" "$ARGO_ENABLED" "legacy quick Argo remains enabled"
     argo_quick_enabled || fail "legacy quick Argo mode was not restored"
     rm -rf "$tmp"
@@ -317,7 +328,7 @@ UNEXPECTED=value
 ARGO_TOKEN=token\;touch "$marker"
 EOF
 
-    load_params
+    load_params true
     [[ ! -e "$marker" ]] || fail "params parser executed file content"
     assert_eq '$(touch "'${marker}'")' "$NODE_NAME" "params command substitution is literal"
     assert_eq 'token\;touch "'${marker}'"' "$ARGO_TOKEN" "params semicolon is literal"
@@ -364,7 +375,7 @@ EOF
     HY2_PORT=""; HY2_PASSWORD=""; HY2_SNI=""; HY2_MASQUERADE_URL=""; HY2_ENABLED=""
     SOCKS_PORT=""; SOCKS_USERNAME=""; SOCKS_PASSWORD=""; SOCKS_ENABLED=""; SOCKS_PUBLIC_PORT=""
 
-    load_params
+    load_params true
     assert_eq 'uuid "quoted"' "$UUID" "params UUID round trip"
     assert_eq 'xray' "$REALITY_BACKEND" "params Reality backend round trip"
     assert_eq 'sid\backslash' "$SHORT_ID" "params short id round trip"
@@ -1119,6 +1130,9 @@ printf "%s\n" "exit 0"'
 }
 
 test_non_alpine_package_verifies_binary() {
+    local remove_release_definition
+    remove_release_definition=$(declare -f remove_singbox_release_install)
+    remove_singbox_release_install() { :; }
     local tmp
     tmp=$(mktemp -d)
     package_manager() {
@@ -1138,6 +1152,7 @@ EOF
     SINGBOX_BIN_PATH="${tmp}/release/sing-box"
     PATH="${tmp}:$PATH" install_or_upgrade_singbox_package false
     SINGBOX_BIN_PATH="$old_bin_path"
+    eval "$remove_release_definition"
     rm -rf "$tmp"
 }
 
@@ -2059,6 +2074,29 @@ EOF
     rm -rf "$tmp"
 }
 
+test_install_argo_choice_navigation() (
+    prompt_read() { read -r "$1"; }
+    ARGO_ENABLED=true; ARGO_TOKEN=old-token; ARGO_DOMAIN=old.example.com; SUBSCRIPTION_PORT=24630
+    if prompt_install_argo_config <<< $'invalid\n0' >/dev/null; then fail "Argo cancellation accepted"; fi
+    assert_eq old-token "$ARGO_TOKEN" "Argo cancellation preserves token"
+    if prompt_install_argo_config <<< $'2\n24631\nnew-token\ninvalid_domain\n0' >/dev/null; then
+        fail "invalid fixed Argo silently selected a temporary tunnel"
+    fi
+    assert_eq old-token "$ARGO_TOKEN" "invalid fixed Argo preserves token"
+    assert_eq old.example.com "$ARGO_DOMAIN" "invalid fixed Argo preserves domain"
+    assert_eq 24630 "$SUBSCRIPTION_PORT" "invalid fixed Argo preserves subscription port"
+    if prompt_install_argo_config <<< $'2\n24631\nnew-token' >/dev/null; then fail "fixed Argo EOF accepted"; fi
+    assert_eq old-token "$ARGO_TOKEN" "fixed Argo EOF preserves token"
+    if prompt_install_argo_config <<< $'2\n0\n0' >/dev/null; then fail "fixed Argo port cancellation accepted"; fi
+    prompt_install_argo_config <<< $'2\n24631\nnew-token\nhttps://argo.example.com/' >/dev/null
+    assert_eq new-token "$ARGO_TOKEN" "valid fixed Argo token is accepted"
+    assert_eq argo.example.com "$ARGO_DOMAIN" "fixed Argo domain is normalized"
+    assert_eq 24631 "$SUBSCRIPTION_PORT" "valid fixed Argo port is accepted"
+    prompt_install_argo_config <<< '' >/dev/null
+    assert_eq '' "$ARGO_TOKEN" "explicit temporary tunnel clears fixed token"
+    assert_eq '' "$ARGO_DOMAIN" "explicit temporary tunnel clears fixed domain"
+)
+
 test_install_protocol_choices() (
     prompt_read() { read -r "$1"; }
     ARGO_TOKEN=""; ARGO_DOMAIN=""
@@ -2067,10 +2105,12 @@ test_install_protocol_choices() (
         prompt_install_protocols "$mode" <<< '' >/dev/null
         assert_eq false "$ARGO_ENABLED" "$mode Argo default"
         assert_eq false "$SOCKS_ENABLED" "$mode SOCKS default"
+        assert_eq false "$HY2_ENABLED" "$mode HY2 default"
     done
     prompt_install_protocols ipv6-only <<< '' >/dev/null
     assert_eq true "$ARGO_ENABLED" "IPv6 Argo default"
     assert_eq false "$SOCKS_ENABLED" "IPv6 SOCKS default"
+    assert_eq false "$HY2_ENABLED" "IPv6 HY2 default"
     prompt_install_protocols ipv4-only <<< $'invalid\n1,2\n' >/dev/null
     assert_eq true "$ARGO_ENABLED" "selected Argo"
     assert_eq true "$SOCKS_ENABLED" "selected SOCKS"
@@ -2080,7 +2120,32 @@ test_install_protocol_choices() (
     prompt_install_protocols ipv4-only <<< '2，1' >/dev/null
     assert_eq true "$ARGO_ENABLED" "Chinese comma Argo selection"
     assert_eq true "$SOCKS_ENABLED" "Chinese comma SOCKS selection"
-    prompt_install_protocols ipv4-only <<< '1,1' >/dev/null && fail "duplicate protocol choice accepted"
+    local selection expected_argo expected_socks expected_hy2
+    for selection in \
+        1:true:false:false 2:false:true:false 3:false:false:true \
+        1,2:true:true:false 2,1:true:true:false \
+        1,3:true:false:true 3,1:true:false:true \
+        2,3:false:true:true 3,2:false:true:true \
+        1,2,3:true:true:true 1,3,2:true:true:true 2,1,3:true:true:true \
+        2,3,1:true:true:true 3,1,2:true:true:true 3,2,1:true:true:true \
+        4:false:false:false; do
+        IFS=: read -r selection expected_argo expected_socks expected_hy2 <<< "$selection"
+        prompt_install_protocols ipv6-only <<< "$selection" >/dev/null
+        assert_eq "$expected_argo" "$ARGO_ENABLED" "$selection Argo selection"
+        assert_eq "$expected_socks" "$SOCKS_ENABLED" "$selection SOCKS selection"
+        assert_eq "$expected_hy2" "$HY2_ENABLED" "$selection HY2 selection"
+    done
+    prompt_install_protocols ipv4-only <<< ' 3， 1 ' >/dev/null
+    assert_eq true "$HY2_ENABLED" "Chinese comma HY2 selection"
+    for selection in 0 1,1 3,3 1,2,1 4,3 0,1 '1,' 12; do
+        ARGO_ENABLED=true; SOCKS_ENABLED=true; HY2_ENABLED=true
+        if prompt_install_protocols ipv4-only <<< "$selection" >/dev/null; then
+            fail "invalid or canceled protocol choice accepted: $selection"
+        fi
+        assert_eq true "$ARGO_ENABLED" "invalid choice preserves Argo"
+        assert_eq true "$SOCKS_ENABLED" "invalid choice preserves SOCKS"
+        assert_eq true "$HY2_ENABLED" "invalid choice preserves HY2"
+    done
     if prompt_install_protocols unknown <<< '' >/dev/null; then fail "unknown network accepted"; fi
     if prompt_install_protocols ipv4-only </dev/null >/dev/null; then fail "protocol EOF accepted"; fi
 )
@@ -2182,6 +2247,64 @@ test_modify_nat_reality_port_with_xray() (
     assert_eq 20012 "$REALITY_PORT" "canceled NAT local port restored"
 )
 
+test_menu_choice_validation_and_cancel() (
+    local selected=unchanged
+    prompt_read() { read -r "$1"; }
+    prompt_menu_choice selected prompt '0 1 2' 2 <<< $'9\n01\n1 2\n18446744073709551617\n1' >/dev/null
+    assert_eq 1 "$selected" "menu retries invalid input before accepting a valid choice"
+    prompt_menu_choice selected prompt '0 1 2' 2 <<< '' >/dev/null
+    assert_eq 2 "$selected" "menu uses its explicit default"
+    prompt_menu_choice selected prompt '0 1 2' 2 <<< 0 >/dev/null
+    assert_eq 0 "$selected" "menu preserves the explicit return choice"
+    selected=unchanged
+    if prompt_menu_choice selected prompt '0 1 2' </dev/null; then fail "menu EOF accepted"; fi
+    assert_eq unchanged "$selected" "menu EOF preserves caller value"
+    if prompt_menu_choice selected prompt '0 1 2' <<< invalid >/dev/null; then fail "invalid menu input accepted"; fi
+    assert_eq unchanged "$selected" "invalid menu input followed by EOF preserves caller value"
+)
+
+test_ipv4_selection_navigation() (
+    local output old_link_ipv4_selection changed=false links_only_changed=false
+    PUBLIC_IPV4_OVERRIDE=""
+    PUBLIC_IPV4_LIST=$'198.51.100.1\n198.51.100.2'
+    refresh_public_ip_stack() { :; }
+    public_ipv4_candidate_count() { echo 2; }
+    prompt_read() { read -r "$1"; }
+    press_enter() { fail "canceling IPv4 selection requested another input"; }
+
+    LINK_IPV4_SELECTION=198.51.100.2
+    prompt_ipv4_link_selection_if_multiple <<< '' >/dev/null
+    assert_eq 198.51.100.2 "$LINK_IPV4_SELECTION" "Enter preserves the selected IPv4"
+    LINK_IPV4_SELECTION=all
+    prompt_ipv4_link_selection_if_multiple <<< '' >/dev/null
+    assert_eq all "$LINK_IPV4_SELECTION" "Enter preserves all IPv4 addresses"
+    LINK_IPV4_SELECTION=198.51.100.2
+    if prompt_ipv4_link_selection_if_multiple <<< 0 >/dev/null; then fail "IPv4 return accepted as a change"; fi
+    assert_eq 198.51.100.2 "$LINK_IPV4_SELECTION" "IPv4 return preserves selection"
+    if prompt_ipv4_link_selection_if_multiple </dev/null >/dev/null; then fail "IPv4 EOF accepted"; fi
+    assert_eq 198.51.100.2 "$LINK_IPV4_SELECTION" "IPv4 EOF preserves selection"
+    if output=$(prompt_ipv4_link_selection_if_multiple <<< $'9\n08\n1+1\n0'); then fail "invalid IPv4 selection accepted"; fi
+    assert_contains "$output" '无效选项' "IPv4 invalid input is explained"
+    prompt_ipv4_link_selection_if_multiple <<< $'9\n1' >/dev/null
+    assert_eq 198.51.100.1 "$LINK_IPV4_SELECTION" "IPv4 invalid input retries instead of silently selecting"
+    prompt_ipv4_link_selection_if_multiple <<< 3 >/dev/null
+    assert_eq all "$LINK_IPV4_SELECTION" "all IPv4 addresses can be selected explicitly"
+    old_link_ipv4_selection="$LINK_IPV4_SELECTION"
+    if modify_link_ipv4_selection <<< 0 >/dev/null; then fail "IPv4 wrapper accepted cancellation"; fi
+    assert_eq all "$LINK_IPV4_SELECTION" "IPv4 wrapper cancellation preserves selection"
+    assert_eq false "$changed" "IPv4 wrapper cancellation does not mark config changed"
+    assert_eq false "$links_only_changed" "IPv4 wrapper cancellation does not refresh links"
+)
+
+test_port_confirmation_requires_explicit_choice() (
+    show_port_confirmation() { :; }
+    prompt_read() { read -r "$1"; }
+    if confirm_port_selection <<< invalid >/dev/null; then fail "invalid port confirmation accepted"; fi
+    if confirm_port_selection <<< 0 >/dev/null; then fail "port confirmation return accepted"; fi
+    if confirm_port_selection <<< r >/dev/null; then fail "legacy port confirmation return accepted"; fi
+    confirm_port_selection <<< $'invalid\n' >/dev/null || fail "valid port confirmation after retry rejected"
+)
+
 test_port_input_validation_and_cancel() (
     local value selected=unchanged
     for value in 1 65535 00080 00000000000000053; do
@@ -2247,7 +2370,7 @@ test_hy2_local_port_lifecycle() (
     write_singbox_config > /dev/null
     before_config=$(<"$CONFIG_FILE")
 
-    do_modify_config hy2 <<< $'1\n50112\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'2\n50112\n0\n' > "$tmp/output"
     assert_eq 50112 "$HY2_PORT" "disabled HY2 port can be configured"
     assert_eq false "$HY2_ENABLED" "port edit does not enable HY2"
     assert_eq unset "${HY2_PUBLIC_PORT-unset}" "legacy HY2 public port is ignored"
@@ -2259,14 +2382,14 @@ test_hy2_local_port_lifecycle() (
     assert_eq '' "$(<"$tmp/port-checks")" "disabled port edit defers availability check until enable"
 
     before_params=$(<"$PARAMS_FILE")
-    do_modify_config hy2 <<< $'2\n0\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'1\n0\n0\n' > "$tmp/output"
     assert_eq false "$HY2_ENABLED" "canceling enable keeps HY2 disabled"
     assert_eq 50112 "$HY2_PORT" "canceling enable preserves the saved port"
     assert_eq "$before_params" "$(<"$PARAMS_FILE")" "canceling enable preserves saved params"
-    do_modify_config hy2 < <(printf '2\n') > "$tmp/output"
+    do_modify_config hy2 < <(printf '1\n') > "$tmp/output"
     assert_eq false "$HY2_ENABLED" "enable EOF keeps HY2 disabled"
     assert_eq "$before_params" "$(<"$PARAMS_FILE")" "enable EOF preserves saved params"
-    do_modify_config hy2 <<< $'2\n50111\nr\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'1\n50111\nr\n0\n' > "$tmp/output"
     assert_eq false "$HY2_ENABLED" "rejecting enable confirmation keeps HY2 disabled"
     assert_eq 50112 "$HY2_PORT" "rejecting confirmation restores original port"
     assert_eq "$before_config" "$(<"$CONFIG_FILE")" "canceled enable preserves config"
@@ -2274,7 +2397,7 @@ test_hy2_local_port_lifecycle() (
     assert_eq '' "$(<"$tmp/firewall")" "canceled enable does not open firewall"
 
     blocked_udp_port=50112
-    do_modify_config hy2 <<< $'2\n\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'1\n\n0\n' > "$tmp/output"
     assert_eq false "$HY2_ENABLED" "busy UDP port prevents enabling HY2"
     assert_eq 50112 "$HY2_PORT" "failed enable preserves configured local port"
     assert_eq "$before_config" "$(<"$CONFIG_FILE")" "failed enable preserves running configuration"
@@ -2283,14 +2406,14 @@ test_hy2_local_port_lifecycle() (
     assert_contains "$(<"$tmp/port-checks")" 50112/udp "enabling checks the configured UDP port"
 
     blocked_udp_port=50116
-    do_modify_config hy2 <<< $'2\n50116\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'1\n50116\n0\n' > "$tmp/output"
     assert_eq false "$HY2_ENABLED" "busy custom port prevents enabling HY2"
     assert_eq 50112 "$HY2_PORT" "busy custom port preserves saved port"
     assert_eq "$before_params" "$(<"$PARAMS_FILE")" "busy custom port preserves params"
     assert_contains "$(<"$tmp/port-checks")" 50116/udp "custom enable checks selected UDP port"
 
     fail_tls_cert=true
-    do_modify_config hy2 <<< $'2\n50118\n\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'1\n50118\n\n0\n' > "$tmp/output"
     assert_eq false "$HY2_ENABLED" "missing certificate prevents enabling HY2"
     assert_eq 50112 "$HY2_PORT" "certificate failure restores original port"
     assert_eq "$before_config" "$(<"$CONFIG_FILE")" "certificate failure preserves config"
@@ -2301,7 +2424,7 @@ test_hy2_local_port_lifecycle() (
 
     fail_tls_cert=false
     blocked_udp_port=50112
-    do_modify_config hy2 <<< $'2\ninvalid\n-1\n65536\n00050115\n\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'1\ninvalid\n-1\n65536\n00050115\n\n0\n' > "$tmp/output"
     assert_eq true "$HY2_ENABLED" "HY2 enables with a custom port"
     assert_eq 50115 "$HY2_PORT" "enable uses normalized custom port"
     assert_contains "$(<"$tmp/prompts")" '本机 UDP 端口 [50112]' "enable offers a local port prompt"
@@ -2312,13 +2435,13 @@ test_hy2_local_port_lifecycle() (
     assert_not_contains "$(<"$tmp/output")" 'NAT Hysteria2:' "port confirmation omits HY2 public mapping"
 
     before_config=$(<"$CONFIG_FILE"); before_params=$(<"$PARAMS_FILE")
-    do_modify_config hy2 <<< $'1\n50113\nr\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'2\n50113\nr\n0\n' > "$tmp/output"
     assert_eq 50115 "$HY2_PORT" "cancel restores local HY2 port"
     assert_eq "$before_params" "$(<"$PARAMS_FILE")" "cancel preserves saved params"
     assert_eq "$before_config" "$(<"$CONFIG_FILE")" "cancel preserves running configuration"
     assert_eq sing-box "$(<"$tmp/restarts")" "cancel does not restart services"
 
-    do_modify_config hy2 <<< $'1\n50113\n\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'2\n50113\n\n0\n' > "$tmp/output"
     assert_eq 50113 "$HY2_PORT" "enabled HY2 port edit is applied"
     assert_contains "$(<"$CONFIG_FILE")" '"listen_port": 50113' "changed port reaches running configuration"
     assert_contains "$GENERATED_HY2_LINKS" '@198.51.100.1:50113?' "changed port reaches generated link"
@@ -2326,7 +2449,7 @@ test_hy2_local_port_lifecycle() (
 
     before_config=$(<"$CONFIG_FILE"); before_params=$(<"$PARAMS_FILE")
     fail_next_restart=true
-    do_modify_config hy2 <<< $'1\n50114\n\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'2\n50114\n\n0\n' > "$tmp/output"
     assert_eq 50113 "$HY2_PORT" "restart failure restores local HY2 port"
     assert_eq true "$HY2_ENABLED" "restart failure preserves enabled state"
     assert_eq "$before_params" "$(<"$PARAMS_FILE")" "restart failure restores saved params"
@@ -2334,12 +2457,12 @@ test_hy2_local_port_lifecycle() (
     assert_not_contains "$(<"$tmp/output")" '配置已更新并重启' "restart failure is not reported as success"
 
     : > "$tmp/prompts"
-    do_modify_config hy2 <<< $'3\n\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'1\n\n0\n' > "$tmp/output"
     assert_eq false "$HY2_ENABLED" "HY2 can be disabled"
     assert_eq 50113 "$HY2_PORT" "disabling preserves the selected local port"
     assert_not_contains "$(<"$tmp/prompts")" '本机 UDP 端口 [' "disabling does not request a new port"
     assert_not_contains "$(<"$CONFIG_FILE")" '"type": "hysteria2"' "disabling removes the inbound"
-    do_modify_config hy2 <<< $'2\n50117\n\n0\n' > "$tmp/output"
+    do_modify_config hy2 <<< $'1\n50117\n\n0\n' > "$tmp/output"
     assert_eq true "$HY2_ENABLED" "HY2 can be enabled again with a new port"
     assert_eq 50117 "$HY2_PORT" "reenabling accepts a custom local port"
     assert_contains "$GENERATED_HY2_LINKS" '@198.51.100.1:50117?' "reenabled link uses new local port"
@@ -2494,6 +2617,7 @@ test_install_selected_services_and_failure() (
     generate_params() {
         REALITY_PORT=28000; SOCKS_PORT=28001; REALITY_SNI=example.com
         NODE_NAME="test"; ARGO_TOKEN=""; ARGO_DOMAIN=""; ARGO_ENABLED=false
+        HY2_PORT=8443; HY2_ENABLED=false
     }
     detect_install_network() { INSTALL_NETWORK_MODE=ipv4-only; }
     ensure_reality_probe_dependencies() { :; }
@@ -2501,10 +2625,10 @@ test_install_selected_services_and_failure() (
     prompt_read() {
         case "$2" in
             *请选择协议*) read -r "$1" ;;
+            *本机\ UDP\ 端口*) printf -v "$1" '%s' '00050112' ;;
             *) printf -v "$1" '%s' '' ;;
         esac
     }
-    prompt_port_value() { :; }
     refresh_public_ip_stack() { IP_STACK_MODE=ipv4-only; PUBLIC_IP=198.51.100.1; }
     prompt_nat_mapping_config() {
         [[ "$ARGO_ENABLED" == true && "$SOCKS_ENABLED" == true ]] || fail "selection reached NAT too late"
@@ -2515,9 +2639,11 @@ test_install_selected_services_and_failure() (
         [[ "$SOCKS_ENABLED" == true ]] || fail "SOCKS missing at firewall"
         echo firewall >> "$tmp/events"
     }
-    prompt_ipv4_link_selection_if_multiple() { :; }; generate_tls_cert() { :; }
+    prompt_ipv4_link_selection_if_multiple() { :; }
+    generate_tls_cert() { [[ "$failed_service" == hy2-cert ]] && HY2_ENABLED=false; return 0; }
     ensure_argo_dependencies() { return 0; }
-    write_singbox_config() { :; }; write_singbox_service() { :; }; write_argo_service() { :; }
+    write_singbox_config() { printf '%s:%s:%s:%s\n' "$ARGO_ENABLED" "$SOCKS_ENABLED" "$HY2_ENABLED" "$HY2_PORT" > "$tmp/config-state"; }
+    write_singbox_service() { :; }; write_argo_service() { :; }
     service_enable_now() { [[ "$failed_service" != argo-tunnel || "$1" != argo-tunnel ]]; }
     service_is_active() { [[ "$failed_service" != sbm-subscription || "$1" != sbm-subscription ]]; }
     fetch_argo_domain() { ARGO_DOMAIN=quick.trycloudflare.com; }
@@ -2545,12 +2671,41 @@ test_install_selected_services_and_failure() (
     do_primary_install <<< '1,2' >"$tmp/output" || fail "healthy selected services rejected"
     assert_contains "$(<"$tmp/output")" '所选服务已启动' "healthy install"
 
+    do_primary_install <<< '1,2,3' >"$tmp/output" || fail "healthy HY2 install rejected"
+    assert_eq true "$HY2_ENABLED" "selected HY2 remains enabled during install"
+    assert_eq 50112 "$HY2_PORT" "install accepts and normalizes the HY2 local port"
+    assert_eq true:true:true:50112 "$(<"$tmp/config-state")" "all selected protocols reach generated configuration"
+    failed_service=hy2-cert
+    : > "$tmp/config-state"
+    : > "$tmp/events"
+    if do_primary_install <<< '1,2,3' >"$tmp/output"; then fail "failed HY2 certificate reported successful install"; fi
+    assert_contains "$(<"$tmp/output")" 'Hysteria2 证书不可用' "HY2 install failure is explained"
+    assert_eq '' "$(<"$tmp/config-state")" "failed HY2 certificate prevents partial config installation"
+    assert_eq '' "$(<"$tmp/events")" "failed HY2 certificate does not open firewall ports"
+    failed_service=none
+
+    prompt_read() { read -r "$1"; }
+    : > "$tmp/events"
+    do_primary_install <<< 0 >"$tmp/output"
+    assert_contains "$(<"$tmp/output")" '已取消安装' "protocol cancellation is explained"
+    assert_eq '' "$(<"$tmp/events")" "protocol cancellation does not write config or open ports"
+    do_primary_install <<< $'1,2\ninvalid\n0' >"$tmp/output"
+    assert_contains "$(<"$tmp/output")" '无效选项' "invalid install port mode retries"
+    assert_eq '' "$(<"$tmp/events")" "port choice cancellation does not write config or open ports"
+    local confirmation_attempts=0
+    confirm_port_selection() {
+        confirmation_attempts=$((confirmation_attempts + 1))
+        (( confirmation_attempts > 1 ))
+    }
+    do_primary_install <<< $'1,2\n2\n\n1\n\n\n\n\n' >"$tmp/output" || fail "retrying install port choice failed"
+    assert_eq 28000 "$REALITY_PORT" "returning to automatic ports restores the generated high port"
+
     HOME="$tmp"
     mkdir -p "$tmp/.cloudflared"
     printf 'tunnel: existing\n' > "$tmp/.cloudflared/config.yaml"
     ensure_argo_dependencies() { fail "conflicting quick tunnel installed dependencies"; }
     write_singbox_config() { fail "conflicting quick tunnel wrote service config"; }
-    if (do_primary_install <<< '1,2') >"$tmp/output" 2>&1; then
+    if (do_primary_install <<< $'1,2\n1\n\n\n\n\n') >"$tmp/output" 2>&1; then
         fail "new install accepted conflicting quick tunnel config"
     fi
     assert_contains "$(<"$tmp/output")" '临时 Argo 隧道配置冲突' "install conflict reported"
@@ -2615,6 +2770,7 @@ test_menu_navigation_and_actions() (
     service_menu <<< $'1\n2\n3\n4\n5\n6\n7\n8\n0\n' > "$tmp/service"
     assert_eq $'start\nstop\nrestart\nstatus\nlogs\nverify\nconnectivity\nboot' "$(<"$tmp/actions")" "service menu dispatch"
     : > "$tmp/actions"
+    singbox_version_menu() { echo upgrade-singbox >> "$tmp/actions"; }
     maintenance_menu <<< $'1\n2\n3\n4\n5\n6\n0\n' > "$tmp/maintenance"
     assert_eq $'upgrade-script\nupgrade-singbox\nupgrade-cloudflared\napply\nreinstall\nuninstall' "$(<"$tmp/actions")" "maintenance menu dispatch"
     assert_contains "$(<"$tmp/service")" '服务管理' "service breadcrumb"
@@ -2675,7 +2831,7 @@ test_modify_menu_categories() (
     check_mappings \
         reality:1:modify_reality_port reality:2:do_reoptimize_reality_sni reality:3:modify_reality_sni \
         reality:4:modify_single_port_mode reality:5:modify_reality_keypair \
-        hy2:1:modify_hy2_port hy2:2:modify_hy2_enabled hy2:3:invalid \
+        hy2:1:modify_hy2_enabled hy2:2:modify_hy2_port hy2:3:invalid \
         socks:1:modify_socks_enable socks:2:invalid \
         identity:1:modify_node_name identity:2:modify_uuid \
         argo:1:modify_argo_quick argo:2:modify_argo_fixed argo:3:invalid \
@@ -2684,9 +2840,9 @@ test_modify_menu_categories() (
 
     HY2_ENABLED=true; SOCKS_ENABLED=true; SOCKS_USERNAME=user; ARGO_ENABLED=true; ARGO_TOKEN=""
     check_mappings \
-        hy2:1:modify_hy2_port hy2:2:modify_hy2_password hy2:3:modify_hy2_enabled \
-        socks:1:modify_socks_port socks:2:modify_socks_username socks:3:modify_socks_password \
-        socks:4:modify_socks_disable \
+        hy2:1:modify_hy2_enabled hy2:2:modify_hy2_port hy2:3:modify_hy2_password \
+        socks:1:modify_socks_disable socks:2:modify_socks_port socks:3:modify_socks_username \
+        socks:4:modify_socks_password \
         argo:1:modify_argo_quick argo:3:modify_argo_disable \
         argo:4:update_argo_subscription_links argo:5:modify_subscription_port
     prompt_modify_action selected argo <<< '0' > "$tmp/argo-quick"
@@ -2701,6 +2857,34 @@ test_submenus_return_without_action() (
     service_disable() { fail "return changed boot policy"; }
     do_logs <<< '0' > /dev/null
     do_boot_manage <<< '0' > /dev/null
+    do_logs <<< $'invalid\n9\n0' > /dev/null
+    do_boot_manage <<< $'invalid\n9\n0' > /dev/null
+)
+
+test_stop_and_boot_report_actual_failures() (
+    local tmp output
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    press_enter() { :; }
+    prompt_read() { read -r "$1"; }
+    service_exists() { [[ "$1" == argo-tunnel ]]; }
+    service_stop() { printf '%s\n' "$1" >> "$tmp/stopped"; }
+    service_runtime_state() { [[ "$1" == sing-box ]] && echo running || echo stopped; }
+    if output=$(do_stop); then fail "running core reported successfully stopped"; fi
+    assert_contains "$output" 'sing-box 未确认停止' "stop reports running core"
+    assert_not_contains "$output" 'sing-box 已停止' "stop has no false success"
+    assert_eq $'sing-box\nargo-tunnel' "$(<"$tmp/stopped")" "stop skips missing optional service"
+
+    load_params() { :; }; argo_enabled() { :; }
+    service_enable() { [[ "$1" != argo-tunnel ]]; }
+    service_boot_state() { echo enabled; }
+    if output=$(do_boot_manage <<< 1); then fail "failed autostart reported success"; fi
+    assert_contains "$output" 'argo-tunnel 开机自启设置失败' "autostart failure reported"
+    assert_not_contains "$output" '已开启开机自启' "autostart has no false success"
+    service_enable() { :; }
+    service_boot_state() { [[ "$1" == sbm-subscription ]] && echo disabled || echo enabled; }
+    if output=$(do_boot_manage <<< 1); then fail "unconfirmed autostart reported success"; fi
+    assert_contains "$output" 'sbm-subscription 开机自启状态未确认' "autostart state checked"
 )
 
 test_reinstall_requires_confirmation() (
@@ -2852,6 +3036,11 @@ test_protocol_verification_uses_real_client_configuration() (
     ARGO_DOMAIN=argo.example.com; WS_PATH=/abcd
     select_random_available_tcp_port() { [[ " $* " == *' 39000 '* ]] && echo 39001 || echo 39000; }
     random_hex() { echo verification-token; }
+    kill() { :; }
+    python3() {
+        if [[ "${1:-}" == - ]]; then cat >/dev/null; return 0; fi
+        command python3 "$@"
+    }
     timeout() {
         shift
         if [[ "$1" == sing-box && "$2" == check ]]; then "$@"; fi
@@ -2937,10 +3126,49 @@ test_subscription_payload_requires_matching_data() (
     if verify_subscription_payload; then fail "unsafe subscription token accepted in curl config"; fi
 )
 
+test_menu_choice_validation_and_cancel
+test_ipv4_selection_navigation
+test_port_confirmation_requires_explicit_choice
+test_install_argo_choice_navigation
+test_fresh_install_bootstraps_flock() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    SBM_LOCK_FILE="$tmp/locks/maintenance.lock"
+    sbm_flock_available() { [[ -f "$tmp/flock-ready" ]]; }
+    package_manager() { echo apk; }
+    install_packages_low_resource() { printf '%s\n' "$1" > "$tmp/package"; : > "$tmp/flock-ready"; }
+    sbm_prepare_install_lock >/dev/null || fail "fresh install did not prepare flock"
+    assert_eq flock "$(<"$tmp/package")" "Alpine fresh install requests only flock"
+    [[ ! -e "$tmp/locks/install-bootstrap.lock" ]] || fail "bootstrap lock was not released"
+    rm -f "$tmp/flock-ready" "$tmp/package"
+    mkdir "$tmp/locks/install-bootstrap.lock"
+    if sbm_prepare_install_lock >/dev/null; then fail "concurrent bootstrap accepted"; fi
+    [[ ! -e "$tmp/package" ]] || fail "concurrent bootstrap started package install"
+)
+
+test_pending_rollback_bypasses_normal_resolution() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    SBM_STATE_DIR="$tmp/state"; mkdir "$SBM_STATE_DIR"
+    SBM_LOCK_FILE="$tmp/maintenance.lock"
+    printf '{}' > "$SBM_STATE_DIR/engine.json"
+    printf '{}' > "$SBM_STATE_DIR/pending.json"
+    engine_python() { fail "pending recovery called normal resolution"; }
+    engine_rollback() { printf restored > "$tmp/result"; }
+    sbm_with_lock engine_rollback
+    assert_eq restored "$(<"$tmp/result")" "pending rollback reaches dedicated restore"
+    if sbm_with_lock true > /dev/null; then fail "pending accepted a normal write action"; fi
+)
+
+test_fresh_install_bootstraps_flock
+test_pending_rollback_bypasses_normal_resolution
 test_install_protocol_choices
 test_menu_navigation_and_actions
 test_modify_menu_categories
 test_submenus_return_without_action
+test_stop_and_boot_report_actual_failures
 test_reinstall_requires_confirmation
 test_connectivity_guide_lists_public_tcp_endpoints
 test_install_state_requires_singbox_binary

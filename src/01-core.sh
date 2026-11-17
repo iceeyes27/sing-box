@@ -1,5 +1,5 @@
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.2.2"
+SCRIPT_VERSION="3.4.0"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -12,7 +12,6 @@ SUBSCRIPTION_SERVER="/usr/local/bin/sbm-subscription-server.py"
 SUBSCRIPTION_SERVICE="/etc/systemd/system/sbm-subscription.service"
 SUBSCRIPTION_OPENRC_SERVICE="/etc/init.d/sbm-subscription"
 SUBSCRIPTION_PORT=24630
-SCRIPT_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
 MANAGER_COMMAND="/usr/local/bin/sbm"
 MANAGER_ALIAS_COMMAND="/usr/local/bin/sing-box-manager"
 MANAGER_SYSTEM_COMMAND="/usr/bin/sbm"
@@ -171,6 +170,21 @@ menu_invalid() {
     sleep 0.5
 }
 
+# 简单选择页使用显式白名单；输错时重试，EOF 不改变调用方的值。
+prompt_menu_choice() {
+    local __menu_result="$1" __menu_prompt="$2" __menu_choices=" $3 "
+    local __menu_default="${4:-}" __menu_choice
+    while true; do
+        prompt_read __menu_choice "$__menu_prompt" || return 1
+        __menu_choice="${__menu_choice:-$__menu_default}"
+        if [[ "$__menu_choice" =~ ^(0|[1-9][0-9]*)$ && "$__menu_choices" == *" $__menu_choice "* ]]; then
+            printf -v "$__menu_result" '%s' "$__menu_choice"
+            return 0
+        fi
+        warn "无效选项，请重新选择"
+    done
+}
+
 # 读取一次选择，把 menu_action 登记的命令写入 $1：输入 0 写入 0，无效选项写入空串，EOF 返回 1。
 menu_read_action() {
     local result_var="$1" choice
@@ -200,13 +214,14 @@ run_menu() {
             "") menu_invalid ;;
             *)
                 # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
-                $action
+                sbm_menu_action "$action" || true
                 ;;
         esac
     done
 }
 
 press_enter() {
+    [[ "${SBM_NONINTERACTIVE:-false}" == true ]] && return 0
     echo ""
     prompt_read _ "按 Enter 返回${MENU_CONTEXT:-上级菜单}..." || true
 }

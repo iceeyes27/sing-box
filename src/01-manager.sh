@@ -69,21 +69,34 @@ manager_script_valid() {
     [[ -f "$script_path" && -s "$script_path" ]] || return 1
     grep -q '^SCRIPT_VERSION=' "$script_path" 2>/dev/null || return 1
     grep -q 'main "$@"' "$script_path" 2>/dev/null || return 1
+    bash -n "$script_path" || return 1
+    if [[ -e "$SBM_STATE_DIR/engine.json" || -e "$SBM_STATE_DIR/pending.json" ]]; then
+        grep -qx 'SBM_STATE_SCHEMA_MIN=1' "$script_path" || return 1
+        grep -qx 'SBM_STATE_SCHEMA_MAX=1' "$script_path" || return 1
+        grep -qx 'SBM_PENDING_RECOVERY=1' "$script_path" || return 1
+    fi
     return 0
 }
 
 install_manager_from_file() {
     local source_path="$1"
+    if [[ "${SBM_LOCK_HELD:-}" != "$BASHPID" && "${SBM_TEST_MODE:-}" != 1 ]]; then
+        sbm_with_lock install_manager_from_file "$source_path"
+        return $?
+    fi
 
     manager_script_valid "$source_path" || return 1
     mkdir -p "$(dirname "$MANAGER_COMMAND")" 2>/dev/null || return 1
 
-    if command -v install >/dev/null 2>&1; then
-        install -m 0755 "$source_path" "$MANAGER_COMMAND" 2>/dev/null || return 1
-    else
-        cp "$source_path" "$MANAGER_COMMAND" 2>/dev/null || return 1
-        chmod +x "$MANAGER_COMMAND" 2>/dev/null || return 1
+    local staged
+    staged=$(mktemp "${MANAGER_COMMAND}.new.XXXXXX") || return 1
+    if ! cp "$source_path" "$staged" || ! chmod 755 "$staged" || ! manager_script_valid "$staged"; then
+        rm -f "$staged"; return 1
     fi
+    if [[ -f "$MANAGER_COMMAND" ]] && manager_script_valid "$MANAGER_COMMAND"; then
+        cp -p "$MANAGER_COMMAND" "${MANAGER_COMMAND}.previous" || { rm -f "$staged"; return 1; }
+    fi
+    mv -f "$staged" "$MANAGER_COMMAND" || { rm -f "$staged"; return 1; }
 
     manager_script_valid "$MANAGER_COMMAND" || return 1
     chmod +x "$MANAGER_COMMAND" 2>/dev/null || true
@@ -93,31 +106,20 @@ install_manager_from_file() {
 }
 
 download_manager_command() {
-    local tmp_file
+    local tmp_file result=0
     tmp_file=$(mktemp) || return 1
-
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$SCRIPT_URL" -o "$tmp_file" 2>/dev/null || {
-            rm -f "$tmp_file"
-            return 1
-        }
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$tmp_file" "$SCRIPT_URL" 2>/dev/null || {
-            rm -f "$tmp_file"
-            return 1
-        }
-    else
-        rm -f "$tmp_file"
-        return 1
-    fi
-
-    install_manager_from_file "$tmp_file"
-    local result=$?
+    if engine_python manager-download "$tmp_file" && manager_script_valid "$tmp_file"; then
+        install_manager_from_file "$tmp_file" || result=$?
+    else result=1; fi
     rm -f "$tmp_file"
     return "$result"
 }
 
 install_manager_command() {
+    if [[ "${SBM_LOCK_HELD:-}" != "$BASHPID" && "${SBM_TEST_MODE:-}" != 1 ]]; then
+        sbm_with_lock install_manager_command
+        return $?
+    fi
     is_manager_source "${BASH_SOURCE[0]:-}" && {
         ensure_command_aliases
         return 0

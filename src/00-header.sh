@@ -11,6 +11,13 @@
 #
 
 if [ -z "${BASH_VERSION:-}" ]; then
+    case "${1:-}" in
+        doctor|versions|--help|-h)
+            if command -v bash >/dev/null 2>&1; then exec bash "$0" "$@"; fi
+            echo "检查未完成：缺少 Bash；未安装任何依赖。" >&2
+            exit 2
+            ;;
+    esac
     set -e
     INSTALL_URL="https://raw.githubusercontent.com/iceeyes27/sing-box/main/install.sh"
     tmp_file="${TMPDIR:-/tmp}/sbm-install.$$"

@@ -11,6 +11,11 @@ assert_eq() { [[ "$1" == "$2" ]] || fail "$3: expected '$1', got '$2'"; }
 
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
+SBM_STATE_DIR="$test_root/sbm-state"
+SBM_ENGINE_ROOT="$test_root/sbm-engines"
+SBM_LOCK_FILE="$test_root/sbm-lock"
+SBM_ENGINE_DROPIN="$test_root/50-sbm-engine.conf"
+resolve_singbox_binary() { printf '%s\n' '/usr/bin/sing-box'; }
 mkdir "$test_root/bin"
 cat > "$test_root/bin/rc-service" <<'MOCK'
 #!/usr/bin/env bash

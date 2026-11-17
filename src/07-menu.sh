@@ -36,7 +36,10 @@ show_banner() {
 # ─── 主菜单 ──────────────────────────────────────────────────
 show_menu() {
     menu_section "主菜单"
-    if is_installed; then
+    if [[ -e "$SBM_STATE_DIR/engine.json" ]] && ! resolve_singbox_binary >/dev/null 2>&1; then
+        menu_action 1 do_doctor_menu "统一诊断" "受管内核状态异常"
+        menu_action 2 singbox_version_menu "sing-box 版本管理" "检查或恢复"
+    elif is_installed; then
         menu_action 1 do_show_links "查看节点链接" "分享链接 / 订阅地址"
         menu_action 2 protocol_menu "协议设置" "Reality / Hysteria2 / SOCKS5 / Argo"
         menu_action 3 "do_modify_config network" "网络设置" "NAT / 公网 IPv4 / 出站 IP 优先级"
@@ -46,7 +49,7 @@ show_menu() {
         menu_action 1 do_primary_install "安装节点" "将覆盖旧配置"
         menu_action 2 do_upgrade_script "更新管理脚本"
     else
-        menu_action 1 do_primary_install "安装节点" "Reality 主节点，可选 Argo / SOCKS5"
+        menu_action 1 do_primary_install "安装节点" "Reality 主节点，可选 Argo / SOCKS5 / Hysteria2"
         menu_action 2 do_upgrade_script "更新管理脚本"
     fi
     menu_back "退出"
@@ -73,7 +76,7 @@ render_protocol_menu() {
 
 # 进入时读取一次参数；子页面修改后全局变量已同步，重绘无需再读。
 protocol_menu() {
-    load_params >/dev/null 2>&1 || true
+    load_params_readonly >/dev/null 2>&1 || true
     run_menu "协议设置" render_protocol_menu
 }
 
@@ -89,6 +92,7 @@ render_service_menu() {
     menu_action 7 do_connectivity_guide "公网连通性排查" "外部检测端口是否被封"
     menu_section "设置"
     menu_action 8 do_boot_manage "开机自启"
+    menu_action 9 do_doctor_menu "统一诊断" "本机只读检查"
 }
 
 # 菜单内保留操作失败提示后继续交互；CLI 仍保留非零退出状态。
@@ -102,7 +106,7 @@ service_menu() {
 render_maintenance_menu() {
     menu_section "更新"
     menu_action 1 do_upgrade_script "更新管理脚本" "不改动配置和服务"
-    menu_action 2 do_upgrade_singbox "更新 sing-box"
+    menu_action 2 singbox_version_menu "sing-box 版本管理" "稳定版 / 指定版本 / 回退"
     menu_action 3 do_upgrade_cloudflared "更新 cloudflared" "仅 Argo 使用"
     menu_action 4 do_apply_menu "按当前版本同步配置" "升级脚本后执行，等同 sbm apply"
     menu_section "重装与卸载"
@@ -144,7 +148,7 @@ main_menu() {
             "") menu_invalid ;;
             *)
                 # shellcheck disable=SC2086 # 按空格拆分为函数名和参数
-                $action
+                sbm_menu_action "$action" || true
                 ;;
         esac
     done
@@ -155,10 +159,16 @@ main_menu() {
 # ════════════════════════════════════════════════════════════
 
 main() {
+    local SBM_NONINTERACTIVE=false
+    [[ -n "${1:-}" ]] && SBM_NONINTERACTIVE=true
+    case "${1:-}" in
+        doctor) [[ $# == 1 ]] || return 2; do_doctor; return $? ;;
+        versions) engine_cli "$@"; return $? ;;
+        --help|-h) show_usage; return 0 ;;
+        upgrade|rollback) engine_cli "$@"; return $? ;;
+    esac
     check_root
     detect_os
-
-    install_manager_command
 
     # 命令行快捷参数
     # 若用户使用了旧命令名通过兼容链接启动，提示其换用新命令
@@ -168,19 +178,32 @@ main() {
     fi
 
     case "${1:-}" in
-        install)     do_primary_install ;;
-        links|sub)   show_links || warn "未安装" ;;
-        start)       do_start ;;
-        stop)        do_stop ;;
-        restart)     do_restart ;;
-        resni|reality-sni) do_reoptimize_reality_sni || warn "Reality 伪装域名优选未完成" ;;
-        apply|sync)  do_apply_latest || warn "配置同步未完成" ;;
+        install)     sbm_with_lock do_primary_install ;;
+        links|sub)   sbm_with_lock show_links ;;
+        start)       sbm_with_lock do_start ;;
+        stop)        sbm_with_lock do_stop ;;
+        restart)     sbm_with_lock do_restart ;;
+        resni|reality-sni) sbm_with_lock do_reoptimize_reality_sni ;;
+        apply|sync)  sbm_with_lock do_apply_latest ;;
         cfopt|refresh-cf|cfopt-auto) warn "CF 优选现已在 links/sub 命令中自动执行" ;;
         status)      do_status ;;
-        verify)      do_verify ;;
+        verify)      sbm_with_lock do_verify ;;
         check)       show_connectivity_guide ;;
-        uninstall)   do_uninstall ;;
+        uninstall)   sbm_with_lock do_uninstall ;;
         --help|-h)
+            show_usage
+            return 0
+            ;;
+        "") main_menu ;;
+        *)
+            echo -e "${RED}[ERROR]${NC} 未知命令: ${1}" >&2
+            echo "执行 'sbm --help' 查看可用命令" >&2
+            return 1
+            ;;
+    esac
+}
+
+show_usage() {
             echo "用法: bash $0 [命令]"
             echo ""
             echo "命令:"
@@ -196,14 +219,23 @@ main() {
             echo "  status          查看状态"
             echo "  verify          对启用协议执行限时认证与流量测试"
             echo "  check           输出公网端口外部检测地址与结果判断"
+            echo "  doctor          本机只读诊断（不联网、不修改配置）"
+            echo "  versions sing-box                查看当前与上一版本"
+            echo "  upgrade sing-box [--version X.Y.Z] --yes  更新稳定版"
+            echo "  rollback sing-box --yes           回退上一版本或恢复中断操作"
             echo "  uninstall       卸载"
-            exit 0
+}
+
+sbm_menu_action() {
+    local action="$1"
+    case "$action" in
+        protocol_menu|service_menu|maintenance_menu|singbox_version_menu|do_doctor_menu|do_status|do_logs|do_boot_manage|do_modify_config\ *)
+            # shellcheck disable=SC2086 # Only menu_action's registered function/arguments.
+            $action
             ;;
-        "") main_menu ;;
         *)
-            echo -e "${RED}[ERROR]${NC} 未知命令: ${1}" >&2
-            echo "执行 'sbm --help' 查看可用命令" >&2
-            return 1
+            # shellcheck disable=SC2086
+            sbm_with_lock $action
             ;;
     esac
 }

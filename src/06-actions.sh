@@ -78,6 +78,9 @@ do_start() {
     info "启动服务..."
     local core_ready=true result=0
     service_start sing-box && success "sing-box 已启动" || { core_ready=false; result=1; warn "sing-box 启动失败"; }
+    if [[ "$core_ready" == true ]] && ! engine_finish_start; then
+        core_ready=false; result=1; warn "sing-box 启动验证未通过"
+    fi
     if load_params; then
         # 临时隧道的域名检查会访问源站，订阅网关必须先就绪。
         local subscription_ready=true
@@ -107,10 +110,20 @@ do_start() {
 do_stop() {
     menu_header "服务管理 / 停止服务"
     info "停止服务..."
-    service_stop sing-box && success "sing-box 已停止" || warn "sing-box 停止失败"
-    service_stop argo-tunnel && success "argo-tunnel 已停止" || warn "argo-tunnel 停止失败"
-    service_stop sbm-subscription && success "订阅服务已停止" || warn "订阅服务停止失败"
+    local svc state result=0
+    for svc in sing-box argo-tunnel sbm-subscription; do
+        if [[ "$svc" != sing-box ]] && ! service_exists "$svc"; then continue; fi
+        service_stop "$svc" 2>/dev/null || true
+        state=$(service_runtime_state "$svc") || state=unknown
+        if [[ "$state" == stopped ]]; then
+            success "${svc} 已停止"
+        else
+            warn "${svc} 未确认停止"
+            result=1
+        fi
+    done
     press_enter
+    return "$result"
 }
 
 do_restart() {
@@ -118,6 +131,9 @@ do_restart() {
     info "重启服务..."
     local core_ready=true result=0
     service_restart sing-box && success "sing-box 已重启" || { core_ready=false; result=1; warn "sing-box 重启失败"; }
+    if [[ "$core_ready" == true ]] && ! engine_finish_start; then
+        core_ready=false; result=1; warn "sing-box 重启验证未通过"
+    fi
     if load_params; then
         local subscription_ready=true
         ensure_subscription_service_if_enabled || { subscription_ready=false; result=1; warn "订阅服务重启失败"; }
@@ -221,6 +237,7 @@ write_xray_reality_sni() {
 
 # ─── 重新优选 Reality 伪装域名 ───────────────────────────────
 do_reoptimize_reality_sni() {
+    engine_config_guard || return 1
     menu_header "协议设置 / Reality / 优选伪装域名"
     if ! load_params; then
         warn "未安装，无法重新优选 Reality 伪装域名"
@@ -323,6 +340,7 @@ do_reoptimize_reality_sni() {
     refresh_argo_domain_if_needed
     generate_and_show_links
     show_subscription_url
+    engine_refresh_after_change || return 1
     return 0
 }
 
@@ -331,6 +349,7 @@ do_reoptimize_reality_sni() {
 # 重写服务端配置并重启，再按新格式重新生成链接。适用于升级脚本后
 # 让服务端配置与当前稳定链接格式同步生效。
 do_apply_latest() {
+    engine_config_guard || return 1
     menu_header "系统维护 / 配置同步"
     if ! load_params; then
         warn "未安装，无法应用配置更新"
@@ -374,6 +393,7 @@ do_apply_latest() {
     generate_and_show_links
     show_subscription_url
     info "请在客户端重新导入上方订阅 / 链接以获得最新格式。"
+    engine_refresh_after_change || return 1
     return 0
 }
 
@@ -401,13 +421,14 @@ do_status() {
 
 # ─── 查看日志 ────────────────────────────────────────────────
 do_logs() {
+    local choice
     menu_header "服务管理 / 日志"
     menu_section "选择服务"
     menu_item 1 "sing-box 日志"
     menu_item 2 "argo-tunnel 日志"
     menu_item 3 "订阅服务日志"
     menu_back
-    prompt_read choice "  请选择: " || return
+    prompt_menu_choice choice "  请选择: " "0 1 2 3" || return
     [[ "$choice" == 0 ]] && return
     case "$choice" in
         1) service_logs sing-box 50 || warn "未找到 sing-box 日志" ;;
@@ -419,41 +440,51 @@ do_logs() {
 
 # ─── 开机自启设置 ──────────────────────────────────────────────
 do_boot_manage() {
+    local choice svc state expected result=0 action
+    local -a services=(sing-box)
     menu_header "服务管理 / 开机自启"
     menu_section "服务设置"
     menu_item 1 "开启" "sing-box 及已配置附加服务"
     menu_item 2 "关闭" "全部服务"
     menu_back
-    prompt_read choice "  请选择: " || return
+    prompt_menu_choice choice "  请选择: " "0 1 2" || return
     [[ "$choice" == 0 ]] && return
-    case "$choice" in
-        1)
-            service_enable sing-box 2>/dev/null || true
-            load_params 2>/dev/null && argo_enabled && service_enable argo-tunnel 2>/dev/null || true
-            load_params 2>/dev/null && argo_enabled && service_enable sbm-subscription 2>/dev/null || true
-            success "已开启开机自启"
-            ;;
-        2)
-            service_disable sing-box 2>/dev/null || true
-            service_disable argo-tunnel 2>/dev/null || true
-            service_disable sbm-subscription 2>/dev/null || true
-            success "已关闭开机自启"
-            ;;
-    esac
+    if [[ "${SBM_TEST_MODE:-}" != 1 ]]; then
+        sbm_lock_acquire || return 1
+        sbm_mutation_guard || { sbm_lock_release; return 1; }
+    fi
+    if [[ "$choice" == 1 ]]; then
+        action=service_enable; expected=enabled
+        if load_params 2>/dev/null && argo_enabled; then services+=(argo-tunnel sbm-subscription); fi
+    else
+        action=service_disable; expected=disabled
+        for svc in argo-tunnel sbm-subscription; do
+            if service_exists "$svc"; then services+=("$svc"); fi
+        done
+    fi
+    for svc in "${services[@]}"; do
+        if ! "$action" "$svc" 2>/dev/null; then
+            warn "${svc} 开机自启设置失败"
+            result=1
+            continue
+        fi
+        state=$(service_boot_state "$svc") || state=unknown
+        if [[ "$state" != "$expected" ]]; then
+            warn "${svc} 开机自启状态未确认"
+            result=1
+        fi
+    done
+    if [[ "$result" == 0 ]]; then
+        [[ "$choice" == 1 ]] && success "已开启开机自启" || success "已关闭开机自启"
+    fi
+    sbm_lock_release
     press_enter
+    return "$result"
 }
 
 # ─── 更新组件 ────────────────────────────────────────────────
 do_upgrade_singbox() {
-    menu_header "系统维护 / 更新 sing-box"
-    install_or_upgrade_singbox_package true || error "sing-box 更新失败。请检查网络、磁盘空间或 GitHub 访问"
-    if ! write_singbox_service || ! service_restart sing-box; then
-        warn "sing-box 已更新，但服务未成功重启"
-        press_enter
-        return
-    fi
-    success "sing-box 已更新并重启"
-    press_enter
+    singbox_version_menu
 }
 
 do_upgrade_cloudflared() {
@@ -492,10 +523,9 @@ do_upgrade_script() {
     echo ""
     info "当前配置和服务未受影响，不会重写配置或重启服务。"
     info "如需让服务端配置使用当前稳定模板，升级后执行: sbm apply"
-    # 仅刷新链接显示 (不重写配置、不重启)
-    show_links || true
     echo ""
     prompt_read _ "按 Enter 重启面板并进入新版本..." || true
+    sbm_lock_release
     exec bash "$MANAGER_COMMAND"
 }
 
@@ -523,6 +553,9 @@ do_uninstall() {
     service_disable argo-tunnel 2>/dev/null || true
     service_stop sbm-subscription 2>/dev/null || true
     service_disable sbm-subscription 2>/dev/null || true
+    if [[ -e "$SBM_STATE_DIR/engine.json" ]]; then
+        engine_python remove-managed || { warn "受管版本清理未完成，停止卸载"; return 1; }
+    fi
     disable_cfopt_auto 2>/dev/null || true
     rm -f "$ARGO_SERVICE"
     rm -f "$ARGO_OPENRC_SERVICE"

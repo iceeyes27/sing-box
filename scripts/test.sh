@@ -18,5 +18,6 @@ case "${SBM_SKIP_REGRESSION:-0}" in
     *)
         bash tests/regression.sh
         bash tests/openrc.sh
+        python3 -B -m unittest discover -s tests -p 'test_engine.py'
         ;;
 esac

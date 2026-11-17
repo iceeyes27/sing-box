@@ -1,11 +1,11 @@
 # ─── 生成参数 ────────────────────────────────────────────────
 generate_params() {
     info "生成安全参数..."
-    UUID=$(sing-box generate uuid)
+    UUID=$(run_singbox generate uuid)
     SHORT_ID=$(random_hex 4)
 
     local keypair
-    keypair=$(sing-box generate reality-keypair)
+    keypair=$(run_singbox generate reality-keypair)
     PRIVATE_KEY=$(echo "$keypair" | grep -i "PrivateKey" | awk '{print $NF}')
     PUBLIC_KEY=$(echo "$keypair" | grep -i "PublicKey"  | awk '{print $NF}')
 
@@ -59,7 +59,8 @@ generate_params() {
 
 # 仅供新安装使用；旧配置加载不应用这些默认值。
 prompt_install_protocols() {
-    local network_mode="$1" choice default_argo
+    local network_mode="$1" choice default_argo protocol selected_argo selected_socks selected_hy2 valid
+    local -a protocols=()
     case "$network_mode" in
         ipv4-only|dual-stack) default_argo="false" ;;
         ipv6-only) default_argo="true" ;;
@@ -70,21 +71,45 @@ prompt_install_protocols() {
         menu_section "基础协议"
         echo "  网络类型: ${network_mode}"
         echo "  [✓] Reality (基础功能)"
-        menu_section "可多选 · 输入 1,2"
+        menu_section "可选协议 · 可多选，如 1,3"
         menu_item 1 "Argo 隧道"
         menu_item 2 "SOCKS5 代理"
+        menu_item 3 "Hysteria2" "UDP 直连"
+        menu_item 4 "仅 Reality" "不启用可选协议"
         [[ "$network_mode" == "ipv6-only" ]] && echo "  本地只有 IPv4 时需启用 Argo，并使用 Argo 节点。"
-        echo "  输入 1、2 或 1,2 一次选择；Enter 使用默认 ($( [[ "$default_argo" == true ]] && printf 'Reality + Argo' || printf '仅 Reality' ))。"
+        echo "  Enter 使用推荐组合 ($( [[ "$default_argo" == true ]] && printf 'Reality + Argo' || printf '仅 Reality' ))。"
+        menu_back "取消安装"
         prompt_read choice "  请选择协议: " || return 1
         choice="${choice//[[:space:]]/}"
         choice="${choice//，/,}"
+        selected_argo=false; selected_socks=false; selected_hy2=false
         case "$choice" in
-            "") ARGO_ENABLED="$default_argo"; SOCKS_ENABLED="false" ;;
-            1) ARGO_ENABLED="true"; SOCKS_ENABLED="false" ;;
-            2) ARGO_ENABLED="false"; SOCKS_ENABLED="true" ;;
-            1,2|2,1) ARGO_ENABLED="true"; SOCKS_ENABLED="true" ;;
-            *) warn "请输入 1、2、1,2 或直接按 Enter"; continue ;;
+            "") selected_argo="$default_argo" ;;
+            0) return 1 ;;
+            4) ;;
+            *)
+                if [[ ! "$choice" =~ ^[123](,[123]){0,2}$ ]]; then
+                    warn "请选择 1、2、3 的组合，或输入 4 仅使用 Reality"
+                    continue
+                fi
+                IFS=, read -r -a protocols <<< "$choice"
+                valid=true
+                for protocol in "${protocols[@]}"; do
+                    case "$protocol" in
+                        1) [[ "$selected_argo" == true ]] && valid=false; selected_argo=true ;;
+                        2) [[ "$selected_socks" == true ]] && valid=false; selected_socks=true ;;
+                        3) [[ "$selected_hy2" == true ]] && valid=false; selected_hy2=true ;;
+                    esac
+                done
+                if [[ "$valid" != true ]]; then
+                    warn "同一协议只需选择一次"
+                    continue
+                fi
+                ;;
         esac
+        ARGO_ENABLED="$selected_argo"
+        SOCKS_ENABLED="$selected_socks"
+        HY2_ENABLED="$selected_hy2"
         return 0
     done
 }
@@ -104,8 +129,10 @@ detect_install_network() {
         menu_item 2 "IPv4-only"
         menu_item 3 "IPv6-only"
         menu_item 4 "双栈"
-        prompt_read choice "  请选择 [1-4]: " || return 1
+        menu_back "取消安装"
+        prompt_menu_choice choice "  请选择: " "0 1 2 3 4" || return 1
         case "$choice" in
+            0) return 1 ;;
             1) continue ;;
             2) INSTALL_NETWORK_MODE="ipv4-only"; return 0 ;;
             3) INSTALL_NETWORK_MODE="ipv6-only"; return 0 ;;
@@ -504,6 +531,11 @@ prompt_port_value() {
     done
 }
 
+prompt_hy2_port() {
+    prompt_port_value "$1" "Hysteria2" "$HY2_PORT" \
+        "  本机 UDP 端口 [${HY2_PORT}]，输入 0 返回: " true
+}
+
 show_port_confirmation() {
     menu_header "${PORT_CONFIRM_TITLE:-安装节点 / 3. 端口确认}"
     menu_section "本机监听"
@@ -581,9 +613,14 @@ confirm_port_selection() {
     local input
 
     show_port_confirmation
-    prompt_read input "  按 Enter 继续，输入 r 重新选择: " || return 1
-    [[ "$input" =~ ^[Rr]$ ]] && return 1
-    return 0
+    while true; do
+        prompt_read input "  按 Enter 确认，输入 0 返回修改: " || return 1
+        case "$input" in
+            "") return 0 ;;
+            0|r|R) return 1 ;;
+            *) warn "请按 Enter 确认，或输入 0 返回修改" ;;
+        esac
+    done
 }
 
 public_ipv4_override_label() {
@@ -620,8 +657,7 @@ prompt_public_ipv4_override() {
     menu_item 1 "设置或修改覆盖 IPv4"
     menu_item 2 "清除覆盖并恢复自动检测"
     menu_back "取消"
-    prompt_read choice "  请选择 [0]: " || return 1
-    choice=${choice:-0}
+    prompt_menu_choice choice "  请选择 [0]: " "0 1 2" 0 || return 1
 
     case "$choice" in
         1)
@@ -650,17 +686,18 @@ prompt_public_ipv4_override() {
     esac
 }
 
+# 返回 1 表示取消或 EOF，返回 2 表示当前没有可用的多 IPv4 选择。
 prompt_ipv4_link_selection_if_multiple() {
-    local count input index ip selected all_option
+    local count input index ip selected all_option default_option=1 choices="0"
 
     if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
         warn "当前已设置直连公网 IPv4 覆盖，多 IPv4 链接策略暂不生效。请先清除覆盖值。"
-        return 1
+        return 2
     fi
-    refresh_public_ip_stack || return 1
+    refresh_public_ip_stack || return 2
     count=$(public_ipv4_candidate_count)
     if (( count <= 1 )); then
-        return 1
+        return 2
     fi
 
     menu_header "多 IPv4 链接策略"
@@ -669,26 +706,32 @@ prompt_ipv4_link_selection_if_multiple() {
     index=1
     while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
-        if (( index == 1 )); then
+        if [[ "$ip" == "${LINK_IPV4_SELECTION:-all}" ]]; then
+            default_option=$index
+        fi
+        if [[ "$ip" == "${LINK_IPV4_SELECTION:-all}" ]]; then
+            menu_item "$index" "仅启用 ${ip}" "当前"
+        elif (( index == 1 )); then
             menu_item "$index" "仅启用 ${ip}" "推荐"
         else
             menu_item "$index" "仅启用 ${ip}"
         fi
+        choices+=" $index"
         index=$((index + 1))
     done <<< "$PUBLIC_IPV4_LIST"
     all_option=$index
-    menu_item "$all_option" "全部启用"
+    menu_item "$all_option" "全部启用" "$( [[ "${LINK_IPV4_SELECTION:-all}" == all ]] && printf '当前' || true )"
+    choices+=" $all_option"
+    [[ "${LINK_IPV4_SELECTION:-all}" == all ]] && default_option=$all_option
+    menu_back
+    prompt_menu_choice input "  请选择 [${default_option}]: " "$choices" "$default_option" || return 1
+    [[ "$input" == 0 ]] && return 1
 
-    prompt_read input "  请选择 [1]: " || input=1
-    input=${input:-1}
-
-    if [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input < all_option )); then
+    if (( input < all_option )); then
         selected=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | sed -n "${input}p")
         LINK_IPV4_SELECTION="$selected"
     elif [[ "$input" == "$all_option" ]]; then
         LINK_IPV4_SELECTION="all"
-    else
-        LINK_IPV4_SELECTION=$(printf '%s\n' "$PUBLIC_IPV4_LIST" | sed -n '1p')
     fi
 
     info "已选择 IPv4 链接策略: $(link_ipv4_selection_label)"
@@ -985,7 +1028,7 @@ SINGBOX_EOF
     chown root:root "$CONFIG_FILE"
 
     local check_output
-    if check_output=$(sing-box check -c "$CONFIG_FILE" 2>&1); then
+    if check_output=$(run_singbox check -c "$CONFIG_FILE" 2>&1); then
         success "配置校验通过"
     else
         warn "配置校验失败，详细信息:"

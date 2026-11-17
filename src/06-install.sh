@@ -2,9 +2,49 @@
 #  菜单功能
 # ════════════════════════════════════════════════════════════
 
+# 仅在用户完成选择后更新参数；返回 1 表示取消或 EOF。
+prompt_install_argo_config() {
+    local argo_choice new_subscription_port new_argo_token new_argo_domain
+    while true; do
+        menu_header "安装节点 / 5. Argo 隧道"
+        menu_section "域名模式"
+        menu_item 1 "临时域名" "trycloudflare.com · 推荐"
+        menu_item 2 "固定域名" "需要 Cloudflare Tunnel Token"
+        menu_back "取消安装"
+        prompt_menu_choice argo_choice "  请选择 [1]: " "0 1 2" 1 || return 1
+        case "$argo_choice" in
+            0) return 1 ;;
+            1) ARGO_TOKEN=""; ARGO_DOMAIN=""; return 0 ;;
+        esac
+        prompt_port_value new_subscription_port "订阅服务" "$SUBSCRIPTION_PORT" \
+            "  订阅服务端口 [${SUBSCRIPTION_PORT}]，输入 0 返回: " true || continue
+        echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
+        echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${new_subscription_port}${NC}"
+        echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
+        echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
+        prompt_read new_argo_token "  请输入 Tunnel Token，输入 0 返回: " || return 1
+        [[ "$new_argo_token" == 0 ]] && continue
+        prompt_read new_argo_domain "  隧道绑定域名 (如 v2.example.com)，输入 0 返回: " || return 1
+        [[ "$new_argo_domain" == 0 ]] && continue
+        new_argo_domain="${new_argo_domain#http://}"
+        new_argo_domain="${new_argo_domain#https://}"
+        new_argo_domain="${new_argo_domain%/}"
+        if [[ -z "$new_argo_token" ]] || ! is_valid_hostname "$new_argo_domain"; then
+            warn "Token 或域名无效，请重新选择隧道模式"
+            continue
+        fi
+        SUBSCRIPTION_PORT="$new_subscription_port"
+        ARGO_TOKEN="$new_argo_token"
+        ARGO_DOMAIN="$new_argo_domain"
+        return 0
+    done
+}
+
 # ─── 完整安装 ────────────────────────────────────────────────
 do_primary_install() {
+    [[ "${SBM_TEST_MODE:-}" == 1 ]] || install_manager_command
     local INSTALL_NETWORK_MODE="" argo_ready=true subscription_ready=true
+    local input port_mode auto_reality_port
     menu_header "安装节点 / 1. 准备环境"
     if [[ "${REALITY_BACKEND:-singbox}" != "singbox" ]]; then
         error "新安装仅支持 sing-box 承载 Reality；已有 Xray 配置仍可继续管理"
@@ -14,37 +54,55 @@ do_primary_install() {
 
     install_deps
     ensure_time_sync || true
-    install_singbox
+    install_singbox || return 1
     generate_params
-    detect_install_network || error "网络类型确认失败"
-    prompt_install_protocols "$INSTALL_NETWORK_MODE" || error "协议选择未完成"
+    if ! detect_install_network || ! prompt_install_protocols "$INSTALL_NETWORK_MODE"; then
+        info "已取消安装"
+        return 0
+    fi
+    auto_reality_port="$REALITY_PORT"
     if is_socks_enabled; then
         info "SOCKS5 已生成随机用户名和密码，安装后随节点链接显示。"
     fi
     ensure_reality_probe_dependencies || error "Reality 域名检查依赖不可用，安装已停止"
     select_reality_sni || error "未找到通过运行时检查的 Reality 伪装域名，安装已停止"
 
+    # 在端口放行前确认所选 Hysteria2 的证书可用。
+    if is_hy2_enabled; then
+        generate_tls_cert
+        if ! is_hy2_enabled; then
+            warn "所选协议组合尚未完成部署：Hysteria2 证书不可用"
+            return 1
+        fi
+    fi
+
     while true; do
         # Reality 默认使用随机高位 TCP 端口，降低标准 443 端口的无效扫描压力。
         menu_header "安装节点 / 3. 端口与公网映射"
         menu_section "Reality 本机监听"
-        menu_item 1 "自动高位端口" "${REALITY_PORT}/TCP · 推荐"
+        menu_item 1 "自动高位端口" "${auto_reality_port}/TCP · 推荐"
         menu_item 2 "使用 443/TCP"
         menu_item 3 "自定义 TCP 端口"
-        prompt_read port_mode "  请选择 [1]: "
-        port_mode=${port_mode:-1}
+        menu_back "取消安装"
+        prompt_menu_choice port_mode "  请选择 [1]: " "0 1 2 3" 1 || { info "已取消安装"; return 0; }
 
-        if [[ "$port_mode" == "1" ]]; then
-            info "已选择自动高位端口: ${REALITY_PORT}/TCP"
-        elif [[ "$port_mode" == "2" ]]; then
-            REALITY_PORT=443
-            info "已选择标准端口: 443/TCP"
-        else
-            prompt_port_value REALITY_PORT "Reality" "$REALITY_PORT" "  Reality 端口 [${REALITY_PORT}]: " || error "端口读取失败"
-        fi
+        case "$port_mode" in
+            0) info "已取消安装"; return 0 ;;
+            1) REALITY_PORT="$auto_reality_port"; info "已选择自动高位端口: ${REALITY_PORT}/TCP" ;;
+            2) REALITY_PORT=443; info "已选择标准端口: 443/TCP" ;;
+            3)
+                prompt_port_value REALITY_PORT "Reality" "$REALITY_PORT" \
+                    "  Reality TCP 端口 [${REALITY_PORT}]，输入 0 返回: " true || continue
+                ;;
+        esac
         REALITY_PUBLIC_PORT="$REALITY_PORT"
+        if is_hy2_enabled; then
+            menu_section "Hysteria2 本机监听"
+            prompt_hy2_port HY2_PORT || continue
+        fi
         if is_socks_enabled; then
-            prompt_port_value SOCKS_PORT "SOCKS5" "$SOCKS_PORT" "  SOCKS5 端口 [${SOCKS_PORT}]: " || error "SOCKS5 端口读取失败"
+            prompt_port_value SOCKS_PORT "SOCKS5" "$SOCKS_PORT" \
+                "  SOCKS5 TCP 端口 [${SOCKS_PORT}]，输入 0 返回: " true || continue
             SOCKS_PUBLIC_PORT="$SOCKS_PORT"
         fi
 
@@ -86,40 +144,10 @@ do_primary_install() {
     fi
     prompt_ipv4_link_selection_if_multiple || true
 
-    # 生成 TLS 自签证书 (Hysteria2 需要)
-    generate_tls_cert
-
     # 仅为已勾选 Argo 的安装配置隧道模式。
-    if argo_enabled; then
-        menu_header "安装节点 / 5. Argo 隧道"
-        menu_section "域名模式"
-        menu_item 1 "临时域名" "trycloudflare.com · 推荐"
-        menu_item 2 "固定域名" "需要 Cloudflare Tunnel Token"
-        prompt_read argo_choice "  请选择 [1]: "
-        argo_choice=${argo_choice:-1}
-        if [[ "$argo_choice" == "2" ]]; then
-            ARGO_ENABLED="true"
-            prompt_port_value SUBSCRIPTION_PORT "订阅服务" "$SUBSCRIPTION_PORT" "  订阅服务端口 [${SUBSCRIPTION_PORT}]: " || error "端口读取失败"
-            echo -e "\n  ${YELLOW}提示: 请前往 Cloudflare Zero Trust -> Networks -> Tunnels 创建隧道${NC}"
-            echo -e "  并将 Public Hostname 转发至 ${GREEN}http://127.0.0.1:${SUBSCRIPTION_PORT}${NC}"
-            echo -e "  并获取其对应的 Token ${YELLOW}(以 eyJ 开头的一长串字符)。${NC}"
-            echo -e "  ${RED}注意: 千万不要把 Tunnel ID (连接器 ID) 错当成 Token！${NC}"
-            prompt_read ARGO_TOKEN "  请输入 Tunnel Token: "
-            prompt_read ARGO_DOMAIN "  请输入该隧道绑定的域名 (如 v2.example.com): "
-            # 清除用户可能误输入的 http://, https:// 以及结尾的 /
-            ARGO_DOMAIN="${ARGO_DOMAIN#http://}"
-            ARGO_DOMAIN="${ARGO_DOMAIN#https://}"
-            ARGO_DOMAIN="${ARGO_DOMAIN%/}"
-            if ! argo_fixed_enabled; then
-                warn "Token 或域名无效，改用临时 Argo"
-                ARGO_TOKEN=""
-                ARGO_DOMAIN=""
-            fi
-        else
-            ARGO_ENABLED="true"
-            ARGO_TOKEN=""
-            ARGO_DOMAIN=""
-        fi
+    if argo_enabled && ! prompt_install_argo_config; then
+        info "已取消安装"
+        return 0
     fi
     if argo_enabled; then
         if argo_quick_enabled && quick_tunnel_config_conflict; then
