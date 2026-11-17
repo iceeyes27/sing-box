@@ -42,7 +42,7 @@ show_menu() {
     elif is_installed; then
         menu_action 1 do_show_links "查看节点链接" "分享链接 / 订阅地址"
         menu_action 2 protocol_menu "协议设置" "Reality / Hysteria2 / SOCKS5 / Argo"
-        menu_action 3 "do_modify_config network" "网络设置" "NAT / 公网 IPv4 / 出站 IP 优先级"
+        menu_action 3 "do_modify_config network" "网络设置" "公网 IPv4 / 链接策略 / 出站 IP 优先级"
         menu_action 4 service_menu "服务管理" "启停 / 日志 / 自检 / 连通性排查"
         menu_action 5 maintenance_menu "系统维护" "更新 / 配置同步 / 重装 / 卸载"
     elif has_stale_config; then

@@ -51,7 +51,7 @@ fi
 set -euo pipefail
 
 # ─── 常量 ─────────────────────────────────────────────────────
-SCRIPT_VERSION="3.4.0"
+SCRIPT_VERSION="3.4.1"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 PARAMS_FILE="${CONFIG_DIR}/.params"
@@ -2484,7 +2484,7 @@ class Doctor:
                         self.host.run(["openssl", "x509", "-checkend", "0", "-noout", "-in", filename])
                         return "未过期"
                     self.item("本机证书", cert_check)
-        print("[信息] 完整配置语义、协议认证、公网 IPv4/IPv6/NAT/CF 可达性：未检查")
+        print("[信息] 完整配置语义、协议认证和公网连接：未检查")
         print("操作入口：服务管理 → 协议自检 / 公网连通性排查；系统维护 → sing-box 版本管理")
         return 1 if self.failed else 2 if self.incomplete else 0
 
@@ -2495,11 +2495,6 @@ class Doctor:
                                           ("ARGO_ENABLED", "Argo")) if values.get(key) == "true"]
         # Display only controlled labels; values such as node names may contain terminal escapes.
         label = "Reality" + (" / " + " / ".join(enabled) if enabled else "")
-        if values.get("NAT_MODE") == "true":
-            public = values.get("REALITY_PUBLIC_PORT", "")
-            local = values.get("REALITY_PORT", "")
-            if public.isdigit() and local.isdigit():
-                label += "；保存的 NAT TCP " + public + " → " + local + "（公网未验证）"
         if shutil.which("ip"):
             output = self.host.run(["ip", "-6", "-o", "addr", "show", "scope", "global"], check=False).stdout
             count = 0
@@ -4108,7 +4103,6 @@ open_firewall() {
 
     if [[ "$backend" == "none" ]]; then
         warn "未检测到启用中的 UFW / firewalld / iptables 规则，跳过本机自动放行端口 ${port}"
-        warn "如果你使用 NAT 小鸡、云安全组或厂商面板防火墙，请到外部面板手动放行对应端口"
         return 0
     fi
 
@@ -4177,12 +4171,6 @@ validate_service_ports() {
     if is_socks_enabled; then
         validate_port "${SOCKS_PORT:-}" "SOCKS5" || return 1
     fi
-    if nat_mode_enabled; then
-        validate_port "${REALITY_PUBLIC_PORT:-}" "NAT Reality 公网映射" || return 1
-        if is_socks_enabled; then
-            validate_port "${SOCKS_PUBLIC_PORT:-}" "NAT SOCKS5 公网映射" || return 1
-        fi
-    fi
     if argo_enabled; then
         validate_port "${SUBSCRIPTION_PORT:-}" "订阅服务" || return 1
     fi
@@ -4202,10 +4190,6 @@ validate_service_ports() {
         fi
         if argo_enabled && [[ "${SOCKS_PORT}" == "${WS_PORT}" || "${SOCKS_PORT}" == "${SUBSCRIPTION_PORT}" ]]; then
             warn "SOCKS5 端口 ${SOCKS_PORT}/TCP 与现有 TCP 服务端口冲突"
-            return 1
-        fi
-        if nat_mode_enabled && [[ "${SOCKS_PUBLIC_PORT}" == "${REALITY_PUBLIC_PORT}" ]]; then
-            warn "NAT SOCKS5 公网端口 ${SOCKS_PUBLIC_PORT}/TCP 与 Reality 公网端口冲突"
             return 1
         fi
     fi
@@ -4290,61 +4274,13 @@ show_port_confirmation() {
     else
         echo -e "  SOCKS5:       ${DIM}未启用${NC}"
     fi
-    if nat_mode_enabled; then
-        menu_section "公网映射 · 需在服务商面板配置"
-        echo -e "  NAT Reality:  ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC} ${DIM}(面板映射需确认)${NC}"
-        if is_socks_enabled; then
-            echo -e "  NAT SOCKS5:   ${BOLD}${SOCKS_PUBLIC_PORT}/TCP -> ${SOCKS_PORT}/TCP${NC}"
-        fi
-    fi
     if argo_enabled; then
         menu_section "订阅"
         echo -e "  订阅服务:     ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC} ${DIM}(仅本机/Argo 使用)${NC}"
     fi
-    menu_section "放行范围"
-    if nat_mode_enabled; then
-        echo -e "  本机防火墙:   ${BOLD}${REALITY_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
-        echo -e "  服务商面板:   ${BOLD}${REALITY_PUBLIC_PORT}/TCP${NC}$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PUBLIC_PORT")"
-    elif is_hy2_enabled; then
-        echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}, ${BOLD}${HY2_PORT}/UDP${NC}$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
-    elif is_socks_enabled; then
-        echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}, ${BOLD}${SOCKS_PORT}/TCP${NC}"
-    else
-        echo -e "  需要外部放行: ${BOLD}${REALITY_PORT}/TCP${NC}"
-    fi
-    argo_enabled && echo -e "  不需要外部放行: ${BOLD}${SUBSCRIPTION_PORT}/TCP${NC}"
+    menu_section "本机防火墙"
+    echo -e "  监听端口: ${BOLD}${REALITY_PORT}/TCP${NC}$(is_hy2_enabled && printf ', %s/UDP' "$HY2_PORT")$(is_socks_enabled && printf ', %s/TCP' "$SOCKS_PORT")"
     echo ""
-}
-
-prompt_nat_mapping_config() {
-    local detected_mode
-
-    detected_mode=$(detect_external_access_mode)
-    if [[ "$detected_mode" != "nat" ]]; then
-        NAT_MODE="false"
-        REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
-        return 0
-    fi
-
-    if ! nat_mode_enabled; then
-        REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
-    fi
-    NAT_MODE="true"
-    PUBLIC_IPV4_OVERRIDE="${PUBLIC_IPV4:-${PUBLIC_IP:-}}"
-    REALITY_PUBLIC_PORT="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-    SOCKS_PUBLIC_PORT="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
-    menu_header "安装节点 / 3. NAT 公网映射"
-    menu_section "公网 → 本机"
-    echo -e "  检测到公网 IPv4 不在本机网卡，按 NAT VPS 配置。"
-    echo -e "  公网 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
-    prompt_port_value REALITY_PUBLIC_PORT "NAT Reality 公网映射" "$REALITY_PUBLIC_PORT" \
-        "  面板分配的 Reality 公网 TCP 端口 [${REALITY_PUBLIC_PORT}]: " || return 1
-    if is_socks_enabled; then
-        prompt_port_value SOCKS_PUBLIC_PORT "NAT SOCKS5 公网映射" "$SOCKS_PUBLIC_PORT" \
-            "  面板分配的 SOCKS5 公网 TCP 端口 [${SOCKS_PUBLIC_PORT}]: " || return 1
-    fi
 }
 
 confirm_port_selection() {
@@ -4477,55 +4413,12 @@ prompt_ipv4_link_selection_if_multiple() {
 }
 
 show_external_access_requirements() {
-    local access_mode
-    access_mode=$(detect_external_access_mode)
-
-    menu_section "外部放行提示"
-    case "$access_mode" in
-        ipv6-only)
-            echo -e "  检测到 IPv6-only VPS；Reality/Hysteria2 通过 Argo 提供外部入口。"
-            if argo_enabled; then
-                echo -e "  Argo 的 ${WS_PORT}/TCP 仅供本机回环/隧道使用，一般不需要在外部面板放行。"
-                echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
-            fi
-            if is_socks_enabled; then
-                echo -e "  SOCKS5: ${BOLD}${SOCKS_PORT}/TCP${NC}，需允许 IPv6 入站访问。"
-            fi
-            echo ""
-            return
-            ;;
-        dual-stack)
-            echo -e "  检测到 IPv4 + IPv6 双栈 VPS，Reality/Hysteria2 直连节点使用 IPv4。"
-            echo -e "  订阅地址通过 Argo HTTPS 域名访问，本机订阅端口不需要外部放行。"
-            ;;
-        direct)
-            echo -e "  本机检测到公网 IP 直接挂载在网卡上。若仍有安全组/云防火墙，请同步放行以下端口。"
-            ;;
-        nat)
-            echo -e "  检测到当前环境疑似 NAT / 转发型 VPS。仅修改本机防火墙通常不够，必须在面板额外放行或映射端口。"
-            [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]] && echo -e "  当前直连链接使用手动覆盖 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
-            ;;
-        panel)
-            echo -e "  当前环境未检测到公网 IP 直接挂载在本机网卡，可能经过宿主机、防火墙面板或云安全组。请在外部面板同步放行。"
-            [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]] && echo -e "  当前直连链接使用手动覆盖 IPv4: ${BOLD}${PUBLIC_IPV4_OVERRIDE}${NC}"
-            ;;
-        unknown)
-            echo -e "  未能检测公网地址，请按实际网络环境放行端口。"
-            echo -e "  如需直连 Reality/Hysteria2，请在修改配置中设置直连公网 IPv4 覆盖。"
-            ;;
-    esac
-    if [[ -n "${PUBLIC_IPV4_OVERRIDE:-}" ]]; then
-        echo -e "  IPv4 链接策略: ${BOLD}$(link_ipv4_selection_label)${NC} (${BOLD}$(public_ipv4_display)${NC})"
-    elif (( $(public_ipv4_candidate_count) > 1 )); then
-        echo -e "  IPv4 链接策略: ${BOLD}$(link_ipv4_selection_label)${NC} (${BOLD}$(public_ipv4_display)${NC})"
-    fi
+    menu_section "本机监听"
     echo -e "  Reality:      ${BOLD}${REALITY_PORT}/TCP${NC}"
-    if ! is_hy2_enabled; then
-        echo -e "  Hysteria2:    ${DIM}未启用${NC}"
-    elif [[ "${HY2_PORT}" == "${REALITY_PORT}" ]]; then
-        echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC} ${DIM}(与 Reality 共用端口号，但协议不同)${NC}"
-    else
+    if is_hy2_enabled; then
         echo -e "  Hysteria2:    ${BOLD}${HY2_PORT}/UDP${NC}"
+    else
+        echo -e "  Hysteria2:    ${DIM}未启用${NC}"
     fi
     if is_socks_enabled; then
         echo -e "  SOCKS5:       ${BOLD}${SOCKS_PORT}/TCP${NC}"
@@ -4533,14 +4426,7 @@ show_external_access_requirements() {
         echo -e "  SOCKS5:       ${DIM}未启用${NC}"
     fi
     if argo_enabled; then
-        echo -e "  Subscription: ${BOLD}HTTPS Argo 域名${NC} ${DIM}(本机 ${SUBSCRIPTION_PORT}/TCP 不需要外部放行)${NC}"
-        echo -e "  ${DIM}Argo 和订阅网关均仅供本机回环/隧道使用，一般不需要在外部面板放行。${NC}"
-    fi
-    if nat_mode_enabled; then
-        echo -e "  NAT Reality: ${BOLD}${REALITY_PUBLIC_PORT}/TCP -> ${REALITY_PORT}/TCP${NC} ${DIM}(面板映射需确认)${NC}"
-        if is_socks_enabled; then
-            echo -e "  NAT SOCKS5: ${BOLD}${SOCKS_PUBLIC_PORT}/TCP -> ${SOCKS_PORT}/TCP${NC}"
-        fi
+        echo -e "  订阅服务:     ${BOLD}127.0.0.1:${SUBSCRIPTION_PORT}/TCP${NC}"
     fi
     echo ""
 }
@@ -6031,7 +5917,7 @@ json_string() {
     printf '"%s"\n' "$value"
 }
 # 每个协议使用独立的短时客户端和本机随机响应，验证认证及数据转发，
-# 不把本机测试等同于服务商面板映射或外部客户端实测。
+# 不把本机测试等同于外部客户端实测。
 verify_protocol_loopback() (
     local protocol="$1" address="${2:-127.0.0.1}" tmp http_port client_port nonce response
     local client_pid="" origin_pid="" outbound="" tls_json binary deadline ready=false
@@ -6116,7 +6002,7 @@ verify_enabled_protocols() {
         warn "服务配置校验失败，协议自检未执行"
         return 1
     fi
-    info "配置通过；开始逐项认证与流量测试（每项限时，公网映射需外部验证）"
+    info "配置通过；开始逐项认证与流量测试（每项限时，公网连接尚未验证）"
     info "Reality：验证中..."
     if { [[ "${REALITY_BACKEND:-singbox}" == "xray" ]] && ! service_is_active xray; } || \
         { [[ "${REALITY_BACKEND:-singbox}" != "xray" ]] && ! service_is_active sing-box; } || \
@@ -6292,7 +6178,7 @@ do_primary_install() {
 
     while true; do
         # Reality 默认使用随机高位 TCP 端口，降低标准 443 端口的无效扫描压力。
-        menu_header "安装节点 / 3. 端口与公网映射"
+        menu_header "安装节点 / 3. 本机监听端口"
         menu_section "Reality 本机监听"
         menu_item 1 "自动高位端口" "${auto_reality_port}/TCP · 推荐"
         menu_item 2 "使用 443/TCP"
@@ -6322,8 +6208,6 @@ do_primary_install() {
 
         reset_public_ip_cache
         refresh_public_ip_stack || true
-        prompt_nat_mapping_config || error "NAT 公网映射端口读取失败"
-
         if ! validate_service_ports "" "" "" false; then
             warn "端口检查失败，请调整端口后重试"
             continue
@@ -6457,11 +6341,7 @@ modify_category_title() {
 
 render_modify_reality() {
     menu_section "当前连接"
-    if nat_mode_enabled; then
-        echo "  公网 ${REALITY_PUBLIC_PORT}/TCP → 本机 ${REALITY_PORT}/TCP"
-    else
-        echo "  本机 ${REALITY_PORT}/TCP"
-    fi
+    echo "  本机 ${REALITY_PORT}/TCP"
     echo "  伪装域名 ${REALITY_SNI}"
     menu_section "连接设置"
     menu_action 1 modify_reality_port "修改端口" "疑似端口被封时更换"
@@ -6541,17 +6421,14 @@ render_modify_argo() {
 }
 
 render_modify_network() {
-    local nat_label
-    nat_label=$(nat_mode_enabled && printf '已启用' || printf '未启用')
     menu_section "当前状态"
-    echo "  NAT ${nat_label} · $(public_ipv4_override_label)"
+    echo "  直连公网 IPv4: $(public_ipv4_override_label)"
     echo "  出站 IP 优先级: $(outbound_ip_strategy_label)"
     menu_section "入站 · 客户端如何连到本机"
-    menu_action 1 modify_nat_mapping "NAT 公网映射" "$nat_label"
-    menu_action 2 modify_public_ipv4_override "直连公网 IPv4" "$(public_ipv4_override_label)"
-    menu_action 3 modify_link_ipv4_selection "多 IPv4 链接策略"
+    menu_action 1 modify_public_ipv4_override "直连公网 IPv4" "$(public_ipv4_override_label)"
+    menu_action 2 modify_link_ipv4_selection "多 IPv4 链接策略"
     menu_section "出站 · 本机如何访问目标网站"
-    menu_action 4 modify_outbound_ip_strategy "出站 IP 优先级" "$(outbound_ip_strategy_label)"
+    menu_action 3 modify_outbound_ip_strategy "出站 IP 优先级" "$(outbound_ip_strategy_label)"
 }
 
 prompt_modify_action() {
@@ -6578,19 +6455,8 @@ prompt_modify_action() {
 # 返回非 0 表示取消，调用方会恢复修改前的全部运行参数。
 modify_reality_port() {
     local new_reality_port="$REALITY_PORT"
-    local new_reality_public_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-    if nat_mode_enabled; then
-        prompt_port_value new_reality_public_port "Reality 公网" "$new_reality_public_port" \
-            "  公网 TCP 端口 [${new_reality_public_port}]: " || return 1
-    fi
     prompt_port_value new_reality_port "Reality 本机监听" "$REALITY_PORT" \
-        "  本机监听 TCP 端口 [${REALITY_PORT}]: " || return 1
-    if nat_mode_enabled && [[ "$new_reality_public_port" != "$REALITY_PUBLIC_PORT" ]]; then
-        REALITY_PUBLIC_PORT="$new_reality_public_port"
-        changed=true
-        ports_changed=true
-        links_only_changed=true
-    fi
+        "  本机监听 TCP 端口 [${REALITY_PORT}]，输入 0 返回: " true || return 1
     if [[ "$new_reality_port" != "$REALITY_PORT" ]]; then
         REALITY_PORT="$new_reality_port"
         if ! nat_mode_enabled; then
@@ -6775,63 +6641,6 @@ modify_public_ipv4_override() {
     fi
 }
 
-modify_nat_mapping() {
-    local input="" sub_choice=1
-    menu_header "网络设置 / NAT 公网映射"
-    # 未启用时只有“启用”一种操作，直接进入填写。
-    if nat_mode_enabled; then
-        menu_item 1 "修改 NAT 公网映射"
-        menu_item 2 "关闭 NAT 公网映射"
-        menu_back "取消"
-        prompt_menu_choice sub_choice "  请选择 [1]: " "0 1 2" 1 || return 1
-        [[ "$sub_choice" == "0" ]] && return 1
-    else
-        echo "  公网 IPv4 不在本机网卡上时（NAT VPS），填写服务商面板分配的公网 IP 与映射端口。"
-    fi
-    if [[ "$sub_choice" == "2" ]]; then
-        NAT_MODE="false"
-        REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
-    else
-        local nat_public_ip nat_reality_port nat_socks_port
-        nat_public_ip="${PUBLIC_IPV4_OVERRIDE:-${PUBLIC_IPV4:-}}"
-        nat_reality_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-        nat_socks_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
-        if ! nat_mode_enabled; then
-            nat_reality_port="${REALITY_PORT}"
-            nat_socks_port="${SOCKS_PORT}"
-        fi
-        prompt_read input "  NAT 公网 IPv4 [${nat_public_ip}]: " || return 1
-        [[ -n "$input" ]] && nat_public_ip="$input"
-        if ! is_valid_public_ipv4_for_link "$nat_public_ip"; then
-            warn "NAT 公网 IPv4 无效"
-            press_enter
-            return 1
-        fi
-        prompt_port_value nat_reality_port "NAT Reality 公网映射" \
-            "$nat_reality_port" \
-            "  Reality 公网 TCP 端口 [${nat_reality_port}]: " || return 1
-        if is_socks_enabled; then
-            prompt_port_value nat_socks_port "NAT SOCKS5 公网映射" \
-                "$nat_socks_port" \
-                "  SOCKS5 公网 TCP 端口 [${nat_socks_port}]: " || return 1
-            if [[ "$nat_socks_port" == "$nat_reality_port" ]]; then
-                warn "NAT SOCKS5 公网 TCP 端口不能与 Reality 公网 TCP 端口相同"
-                press_enter
-                return 1
-            fi
-        fi
-        NAT_MODE="true"
-        PUBLIC_IPV4_OVERRIDE="$nat_public_ip"
-        REALITY_PUBLIC_PORT="$nat_reality_port"
-        SOCKS_PUBLIC_PORT="$nat_socks_port"
-        LINK_IPV4_SELECTION="all"
-        reset_public_ip_cache
-    fi
-    changed=true
-    links_only_changed=true
-}
-
 modify_hy2_enabled() {
     if is_hy2_enabled; then
         HY2_ENABLED="false"
@@ -6850,12 +6659,8 @@ modify_hy2_enabled() {
 
 modify_socks_enable() {
     prompt_port_value SOCKS_PORT "SOCKS5" "$SOCKS_PORT" \
-        "  SOCKS5 TCP 端口 [${SOCKS_PORT}]: " || return 1
-    SOCKS_PUBLIC_PORT="$SOCKS_PORT"
-    if nat_mode_enabled; then
-        prompt_port_value SOCKS_PUBLIC_PORT "NAT SOCKS5 公网映射" "$SOCKS_PUBLIC_PORT" \
-            "  SOCKS5 公网 TCP 端口 [${SOCKS_PUBLIC_PORT}]: " || return 1
-    fi
+        "  SOCKS5 TCP 端口 [${SOCKS_PORT}]，输入 0 返回: " true || return 1
+    if ! nat_mode_enabled; then SOCKS_PUBLIC_PORT="$SOCKS_PORT"; fi
     SOCKS_ENABLED="true"
     info "SOCKS5 将启用在 ${SOCKS_PORT}/TCP"
     changed=true
@@ -6864,18 +6669,12 @@ modify_socks_enable() {
 }
 
 modify_socks_port() {
-    local new_socks_port new_socks_public_port
+    local new_socks_port
     prompt_port_value new_socks_port "SOCKS5" "$SOCKS_PORT" \
-        "  新 SOCKS5 TCP 端口 [${SOCKS_PORT}]: " || return 1
+        "  新 SOCKS5 TCP 端口 [${SOCKS_PORT}]，输入 0 返回: " true || return 1
+    [[ "$new_socks_port" != "$SOCKS_PORT" ]] || return 0
     SOCKS_PORT="$new_socks_port"
-    if nat_mode_enabled; then
-        new_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
-        prompt_port_value new_socks_public_port "NAT SOCKS5 公网映射" "$new_socks_public_port" \
-            "  SOCKS5 公网 TCP 端口 [${new_socks_public_port}]: " || return 1
-        SOCKS_PUBLIC_PORT="$new_socks_public_port"
-    else
-        SOCKS_PUBLIC_PORT="$SOCKS_PORT"
-    fi
+    if ! nat_mode_enabled; then SOCKS_PUBLIC_PORT="$SOCKS_PORT"; fi
     changed=true
     ports_changed=true
     restart_singbox=true
@@ -6987,9 +6786,6 @@ apply_modified_config() {
         press_enter
         return 0
     fi
-    if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" || "$REALITY_PUBLIC_PORT" != "$old_reality_public_port" ]]; then
-        warn "请确认服务商面板已将公网 ${REALITY_PUBLIC_PORT}/TCP 转发到本机 ${REALITY_PORT}/TCP；脚本无法修改面板映射"
-    fi
     if [[ "$restart_singbox" == "true" ]]; then
         local hy2_requested="${HY2_ENABLED:-false}"
         generate_tls_cert
@@ -7052,9 +6848,6 @@ apply_modified_config() {
         fi
         if [[ "$services_ready" == "true" ]]; then
             success "配置已更新并重启"
-            if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" ]]; then
-                warn "仅已验证本机 ${REALITY_PORT}/TCP 监听；公网 ${REALITY_PUBLIC_PORT}/TCP 映射及外部连接尚未验证"
-            fi
         else
             restore_runtime_params "${old_runtime_params[@]}"
             write_singbox_config
@@ -7070,9 +6863,6 @@ apply_modified_config() {
     else
         save_params
         success "配置已更新"
-        if nat_mode_enabled && [[ "$REALITY_PUBLIC_PORT" != "$old_reality_public_port" ]]; then
-            warn "仅已更新链接使用的公网 ${REALITY_PUBLIC_PORT}/TCP；服务商面板映射及外部连接尚未验证"
-        fi
     fi
 
     if [[ "$restart_argo" == "true" ]]; then
@@ -7257,7 +7047,7 @@ show_connectivity_guide() {
 
     menu_section "结果判断"
     echo -e "  ${GREEN}全部绿色${NC}      端口未被封锁；仍不可用时检查客户端参数，或在「协议设置 → Reality」重新优选伪装域名"
-    echo -e "  ${RED}全部红色${NC}      外部均无法连接：先执行「协议自检」，再检查安全组 / 防火墙 / NAT 面板映射"
+    echo -e "  ${RED}全部红色${NC}      外部均无法连接：先执行「协议自检」，再检查本机防火墙"
     echo -e "  ${YELLOW}仅中国红色${NC}    端口疑似被封：在「协议设置 → Reality → 修改端口」更换端口后重新导入节点"
     echo ""
     echo -e "  ${DIM}Hysteria2 使用 UDP，不适用此 TCP 检测；Argo 经 Cloudflare 转发，无需检测端口。${NC}"
@@ -7829,7 +7619,7 @@ show_menu() {
     elif is_installed; then
         menu_action 1 do_show_links "查看节点链接" "分享链接 / 订阅地址"
         menu_action 2 protocol_menu "协议设置" "Reality / Hysteria2 / SOCKS5 / Argo"
-        menu_action 3 "do_modify_config network" "网络设置" "NAT / 公网 IPv4 / 出站 IP 优先级"
+        menu_action 3 "do_modify_config network" "网络设置" "公网 IPv4 / 链接策略 / 出站 IP 优先级"
         menu_action 4 service_menu "服务管理" "启停 / 日志 / 自检 / 连通性排查"
         menu_action 5 maintenance_menu "系统维护" "更新 / 配置同步 / 重装 / 卸载"
     elif has_stale_config; then

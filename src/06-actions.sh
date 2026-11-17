@@ -60,7 +60,7 @@ show_connectivity_guide() {
 
     menu_section "结果判断"
     echo -e "  ${GREEN}全部绿色${NC}      端口未被封锁；仍不可用时检查客户端参数，或在「协议设置 → Reality」重新优选伪装域名"
-    echo -e "  ${RED}全部红色${NC}      外部均无法连接：先执行「协议自检」，再检查安全组 / 防火墙 / NAT 面板映射"
+    echo -e "  ${RED}全部红色${NC}      外部均无法连接：先执行「协议自检」，再检查本机防火墙"
     echo -e "  ${YELLOW}仅中国红色${NC}    端口疑似被封：在「协议设置 → Reality → 修改端口」更换端口后重新导入节点"
     echo ""
     echo -e "  ${DIM}Hysteria2 使用 UDP，不适用此 TCP 检测；Argo 经 Cloudflare 转发，无需检测端口。${NC}"

@@ -15,11 +15,7 @@ modify_category_title() {
 
 render_modify_reality() {
     menu_section "当前连接"
-    if nat_mode_enabled; then
-        echo "  公网 ${REALITY_PUBLIC_PORT}/TCP → 本机 ${REALITY_PORT}/TCP"
-    else
-        echo "  本机 ${REALITY_PORT}/TCP"
-    fi
+    echo "  本机 ${REALITY_PORT}/TCP"
     echo "  伪装域名 ${REALITY_SNI}"
     menu_section "连接设置"
     menu_action 1 modify_reality_port "修改端口" "疑似端口被封时更换"
@@ -99,17 +95,14 @@ render_modify_argo() {
 }
 
 render_modify_network() {
-    local nat_label
-    nat_label=$(nat_mode_enabled && printf '已启用' || printf '未启用')
     menu_section "当前状态"
-    echo "  NAT ${nat_label} · $(public_ipv4_override_label)"
+    echo "  直连公网 IPv4: $(public_ipv4_override_label)"
     echo "  出站 IP 优先级: $(outbound_ip_strategy_label)"
     menu_section "入站 · 客户端如何连到本机"
-    menu_action 1 modify_nat_mapping "NAT 公网映射" "$nat_label"
-    menu_action 2 modify_public_ipv4_override "直连公网 IPv4" "$(public_ipv4_override_label)"
-    menu_action 3 modify_link_ipv4_selection "多 IPv4 链接策略"
+    menu_action 1 modify_public_ipv4_override "直连公网 IPv4" "$(public_ipv4_override_label)"
+    menu_action 2 modify_link_ipv4_selection "多 IPv4 链接策略"
     menu_section "出站 · 本机如何访问目标网站"
-    menu_action 4 modify_outbound_ip_strategy "出站 IP 优先级" "$(outbound_ip_strategy_label)"
+    menu_action 3 modify_outbound_ip_strategy "出站 IP 优先级" "$(outbound_ip_strategy_label)"
 }
 
 prompt_modify_action() {
@@ -136,19 +129,8 @@ prompt_modify_action() {
 # 返回非 0 表示取消，调用方会恢复修改前的全部运行参数。
 modify_reality_port() {
     local new_reality_port="$REALITY_PORT"
-    local new_reality_public_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-    if nat_mode_enabled; then
-        prompt_port_value new_reality_public_port "Reality 公网" "$new_reality_public_port" \
-            "  公网 TCP 端口 [${new_reality_public_port}]: " || return 1
-    fi
     prompt_port_value new_reality_port "Reality 本机监听" "$REALITY_PORT" \
-        "  本机监听 TCP 端口 [${REALITY_PORT}]: " || return 1
-    if nat_mode_enabled && [[ "$new_reality_public_port" != "$REALITY_PUBLIC_PORT" ]]; then
-        REALITY_PUBLIC_PORT="$new_reality_public_port"
-        changed=true
-        ports_changed=true
-        links_only_changed=true
-    fi
+        "  本机监听 TCP 端口 [${REALITY_PORT}]，输入 0 返回: " true || return 1
     if [[ "$new_reality_port" != "$REALITY_PORT" ]]; then
         REALITY_PORT="$new_reality_port"
         if ! nat_mode_enabled; then
@@ -333,63 +315,6 @@ modify_public_ipv4_override() {
     fi
 }
 
-modify_nat_mapping() {
-    local input="" sub_choice=1
-    menu_header "网络设置 / NAT 公网映射"
-    # 未启用时只有“启用”一种操作，直接进入填写。
-    if nat_mode_enabled; then
-        menu_item 1 "修改 NAT 公网映射"
-        menu_item 2 "关闭 NAT 公网映射"
-        menu_back "取消"
-        prompt_menu_choice sub_choice "  请选择 [1]: " "0 1 2" 1 || return 1
-        [[ "$sub_choice" == "0" ]] && return 1
-    else
-        echo "  公网 IPv4 不在本机网卡上时（NAT VPS），填写服务商面板分配的公网 IP 与映射端口。"
-    fi
-    if [[ "$sub_choice" == "2" ]]; then
-        NAT_MODE="false"
-        REALITY_PUBLIC_PORT="${REALITY_PORT}"
-        SOCKS_PUBLIC_PORT="${SOCKS_PORT}"
-    else
-        local nat_public_ip nat_reality_port nat_socks_port
-        nat_public_ip="${PUBLIC_IPV4_OVERRIDE:-${PUBLIC_IPV4:-}}"
-        nat_reality_port="${REALITY_PUBLIC_PORT:-${REALITY_PORT}}"
-        nat_socks_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
-        if ! nat_mode_enabled; then
-            nat_reality_port="${REALITY_PORT}"
-            nat_socks_port="${SOCKS_PORT}"
-        fi
-        prompt_read input "  NAT 公网 IPv4 [${nat_public_ip}]: " || return 1
-        [[ -n "$input" ]] && nat_public_ip="$input"
-        if ! is_valid_public_ipv4_for_link "$nat_public_ip"; then
-            warn "NAT 公网 IPv4 无效"
-            press_enter
-            return 1
-        fi
-        prompt_port_value nat_reality_port "NAT Reality 公网映射" \
-            "$nat_reality_port" \
-            "  Reality 公网 TCP 端口 [${nat_reality_port}]: " || return 1
-        if is_socks_enabled; then
-            prompt_port_value nat_socks_port "NAT SOCKS5 公网映射" \
-                "$nat_socks_port" \
-                "  SOCKS5 公网 TCP 端口 [${nat_socks_port}]: " || return 1
-            if [[ "$nat_socks_port" == "$nat_reality_port" ]]; then
-                warn "NAT SOCKS5 公网 TCP 端口不能与 Reality 公网 TCP 端口相同"
-                press_enter
-                return 1
-            fi
-        fi
-        NAT_MODE="true"
-        PUBLIC_IPV4_OVERRIDE="$nat_public_ip"
-        REALITY_PUBLIC_PORT="$nat_reality_port"
-        SOCKS_PUBLIC_PORT="$nat_socks_port"
-        LINK_IPV4_SELECTION="all"
-        reset_public_ip_cache
-    fi
-    changed=true
-    links_only_changed=true
-}
-
 modify_hy2_enabled() {
     if is_hy2_enabled; then
         HY2_ENABLED="false"
@@ -408,12 +333,8 @@ modify_hy2_enabled() {
 
 modify_socks_enable() {
     prompt_port_value SOCKS_PORT "SOCKS5" "$SOCKS_PORT" \
-        "  SOCKS5 TCP 端口 [${SOCKS_PORT}]: " || return 1
-    SOCKS_PUBLIC_PORT="$SOCKS_PORT"
-    if nat_mode_enabled; then
-        prompt_port_value SOCKS_PUBLIC_PORT "NAT SOCKS5 公网映射" "$SOCKS_PUBLIC_PORT" \
-            "  SOCKS5 公网 TCP 端口 [${SOCKS_PUBLIC_PORT}]: " || return 1
-    fi
+        "  SOCKS5 TCP 端口 [${SOCKS_PORT}]，输入 0 返回: " true || return 1
+    if ! nat_mode_enabled; then SOCKS_PUBLIC_PORT="$SOCKS_PORT"; fi
     SOCKS_ENABLED="true"
     info "SOCKS5 将启用在 ${SOCKS_PORT}/TCP"
     changed=true
@@ -422,18 +343,12 @@ modify_socks_enable() {
 }
 
 modify_socks_port() {
-    local new_socks_port new_socks_public_port
+    local new_socks_port
     prompt_port_value new_socks_port "SOCKS5" "$SOCKS_PORT" \
-        "  新 SOCKS5 TCP 端口 [${SOCKS_PORT}]: " || return 1
+        "  新 SOCKS5 TCP 端口 [${SOCKS_PORT}]，输入 0 返回: " true || return 1
+    [[ "$new_socks_port" != "$SOCKS_PORT" ]] || return 0
     SOCKS_PORT="$new_socks_port"
-    if nat_mode_enabled; then
-        new_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
-        prompt_port_value new_socks_public_port "NAT SOCKS5 公网映射" "$new_socks_public_port" \
-            "  SOCKS5 公网 TCP 端口 [${new_socks_public_port}]: " || return 1
-        SOCKS_PUBLIC_PORT="$new_socks_public_port"
-    else
-        SOCKS_PUBLIC_PORT="$SOCKS_PORT"
-    fi
+    if ! nat_mode_enabled; then SOCKS_PUBLIC_PORT="$SOCKS_PORT"; fi
     changed=true
     ports_changed=true
     restart_singbox=true
@@ -545,9 +460,6 @@ apply_modified_config() {
         press_enter
         return 0
     fi
-    if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" || "$REALITY_PUBLIC_PORT" != "$old_reality_public_port" ]]; then
-        warn "请确认服务商面板已将公网 ${REALITY_PUBLIC_PORT}/TCP 转发到本机 ${REALITY_PORT}/TCP；脚本无法修改面板映射"
-    fi
     if [[ "$restart_singbox" == "true" ]]; then
         local hy2_requested="${HY2_ENABLED:-false}"
         generate_tls_cert
@@ -610,9 +522,6 @@ apply_modified_config() {
         fi
         if [[ "$services_ready" == "true" ]]; then
             success "配置已更新并重启"
-            if nat_mode_enabled && [[ "$REALITY_PORT" != "$old_reality_port" ]]; then
-                warn "仅已验证本机 ${REALITY_PORT}/TCP 监听；公网 ${REALITY_PUBLIC_PORT}/TCP 映射及外部连接尚未验证"
-            fi
         else
             restore_runtime_params "${old_runtime_params[@]}"
             write_singbox_config
@@ -628,9 +537,6 @@ apply_modified_config() {
     else
         save_params
         success "配置已更新"
-        if nat_mode_enabled && [[ "$REALITY_PUBLIC_PORT" != "$old_reality_public_port" ]]; then
-            warn "仅已更新链接使用的公网 ${REALITY_PUBLIC_PORT}/TCP；服务商面板映射及外部连接尚未验证"
-        fi
     fi
 
     if [[ "$restart_argo" == "true" ]]; then

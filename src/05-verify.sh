@@ -1,5 +1,5 @@
 # 每个协议使用独立的短时客户端和本机随机响应，验证认证及数据转发，
-# 不把本机测试等同于服务商面板映射或外部客户端实测。
+# 不把本机测试等同于外部客户端实测。
 verify_protocol_loopback() (
     local protocol="$1" address="${2:-127.0.0.1}" tmp http_port client_port nonce response
     local client_pid="" origin_pid="" outbound="" tls_json binary deadline ready=false
@@ -84,7 +84,7 @@ verify_enabled_protocols() {
         warn "服务配置校验失败，协议自检未执行"
         return 1
     fi
-    info "配置通过；开始逐项认证与流量测试（每项限时，公网映射需外部验证）"
+    info "配置通过；开始逐项认证与流量测试（每项限时，公网连接尚未验证）"
     info "Reality：验证中..."
     if { [[ "${REALITY_BACKEND:-singbox}" == "xray" ]] && ! service_is_active xray; } || \
         { [[ "${REALITY_BACKEND:-singbox}" != "xray" ]] && ! service_is_active sing-box; } || \

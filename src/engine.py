@@ -1185,7 +1185,7 @@ class Doctor:
                         self.host.run(["openssl", "x509", "-checkend", "0", "-noout", "-in", filename])
                         return "未过期"
                     self.item("本机证书", cert_check)
-        print("[信息] 完整配置语义、协议认证、公网 IPv4/IPv6/NAT/CF 可达性：未检查")
+        print("[信息] 完整配置语义、协议认证和公网连接：未检查")
         print("操作入口：服务管理 → 协议自检 / 公网连通性排查；系统维护 → sing-box 版本管理")
         return 1 if self.failed else 2 if self.incomplete else 0
 
@@ -1196,11 +1196,6 @@ class Doctor:
                                           ("ARGO_ENABLED", "Argo")) if values.get(key) == "true"]
         # Display only controlled labels; values such as node names may contain terminal escapes.
         label = "Reality" + (" / " + " / ".join(enabled) if enabled else "")
-        if values.get("NAT_MODE") == "true":
-            public = values.get("REALITY_PUBLIC_PORT", "")
-            local = values.get("REALITY_PORT", "")
-            if public.isdigit() and local.isdigit():
-                label += "；保存的 NAT TCP " + public + " → " + local + "（公网未验证）"
         if shutil.which("ip"):
             output = self.host.run(["ip", "-6", "-o", "addr", "show", "scope", "global"], check=False).stdout
             count = 0

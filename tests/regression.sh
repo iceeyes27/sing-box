@@ -1953,9 +1953,8 @@ test_socks5_port_conflicts_are_rejected() {
     NAT_MODE="true"
     SOCKS_PUBLIC_PORT="30443"
     REALITY_PUBLIC_PORT="30443"
-    if validate_service_ports "443" "" "24630" false "10808" >/dev/null 2>&1; then
-        fail "SOCKS5 accepted a NAT public TCP port shared with Reality"
-    fi
+    validate_service_ports "443" "" "24630" false "10808" >/dev/null || \
+        fail "local listeners were rejected due to saved external ports"
 
     SOCKS_PUBLIC_PORT="31080"
     validate_service_ports "443" "" "24630" false "10808" >/dev/null || \
@@ -2173,21 +2172,20 @@ exit 0'
     PATH="$tmp:$PATH" service_restart_bounded sing-box 1 || fail "healthy bounded service restart rejected"
 )
 
-test_modify_nat_reality_port_with_xray() (
-    local tmp output
+test_modify_legacy_reality_port_with_xray() (
+    local tmp output listener_ready=true
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
     UUID=old-uuid; SHORT_ID=old-short; PRIVATE_KEY=old-private; PUBLIC_KEY=old-public
-    REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001; REALITY_SNI=example.com; REALITY_BACKEND=xray
+    REALITY_PORT=20001; REALITY_PUBLIC_PORT=30443; REALITY_SNI=example.com; REALITY_BACKEND=xray
     WS_PORT=8080; WS_PATH=/old-short; NODE_NAME="test"
     HY2_PORT=8443; HY2_PASSWORD=hy2-pass; HY2_SNI=example.com; HY2_ENABLED=false
     SUBSCRIPTION_PORT=24630; ARGO_ENABLED=false; ARGO_DOMAIN=""; ARGO_TOKEN=""
     LINK_IPV4_SELECTION=all; PUBLIC_IPV4_OVERRIDE=198.51.100.1; NAT_MODE=true
-    SOCKS_PORT=20023; SOCKS_USERNAME=user; SOCKS_PASSWORD=pass; SOCKS_ENABLED=true; SOCKS_PUBLIC_PORT=20023
-
+    SOCKS_PORT=20023; SOCKS_USERNAME=user; SOCKS_PASSWORD=pass; SOCKS_ENABLED=true; SOCKS_PUBLIC_PORT=31080
     clear() { :; }; press_enter() { :; }; sleep() { :; }
-    load_params() { :; }; prompt_read() { read -r "$1"; }
-    validate_service_ports() { [[ "$REALITY_PUBLIC_PORT" != "$SOCKS_PUBLIC_PORT" ]]; }
+    load_params() { :; }; prompt_read() { printf '%s\n' "${2:-}" >> "$tmp/prompts"; read -r "$1"; }
+    validate_service_ports() { [[ "$REALITY_PORT" != "$SOCKS_PORT" ]]; }
     open_service_ports() { :; }
     generate_tls_cert() { :; }; write_singbox_config() { :; }; write_singbox_service() { :; }
     xray_managed_reality() { :; }
@@ -2195,56 +2193,34 @@ test_modify_nat_reality_port_with_xray() (
     save_params() { printf '%s\n' "$REALITY_PORT" >> "$tmp/saved"; }
     service_restart_bounded() { printf '%s\n' "$1" >> "$tmp/restarts"; }
     service_is_active() { :; }
-    verify_reality_local_listener() { [[ "${listener_ready:-true}" == true ]]; }
+    verify_reality_local_listener() { [[ "$listener_ready" == true ]]; }
     generate_and_show_links() { :; }; ensure_subscription_service_if_enabled() { :; }; show_subscription_url() { :; }
 
-    do_modify_config <<< $'1\n\n20012\n\n0\n' > "$tmp/output"
+    do_modify_config <<< $'1\n20012\n\n0\n' > "$tmp/output"
     output=$(<"$tmp/output")
-    assert_contains "$output" '公网 20001/TCP → 本机 20001/TCP' "NAT menu labels both Reality ports"
-    assert_contains "$output" '面板映射需确认' "NAT port confirmation does not claim provider mapping"
-    assert_eq 20012 "$REALITY_PORT" "Reality local port persisted after verification"
-    assert_eq 20001 "$REALITY_PUBLIC_PORT" "NAT public port not silently changed"
-    assert_contains "$output" "公网 20001/TCP 映射及外部连接尚未验证" "NAT mapping verification boundary"
-    assert_contains "$(<"$tmp/xray-config")" '20012 old-uuid' "Xray receives new Reality port"
-    assert_contains "$(<"$tmp/restarts")" xray "Xray restarted after port change"
+    assert_contains "$output" '本机 20001/TCP' "Reality menu shows local port"
+    assert_not_contains "$output" '面板' "Reality port update does not mention provider panel"
+    assert_not_contains "$(<"$tmp/prompts")" '公网 TCP 端口' "Reality port update asks only for local port"
+    assert_eq 20012 "$REALITY_PORT" "local port persisted after verification"
+    assert_eq 30443 "$REALITY_PUBLIC_PORT" "saved link port preserved"
+    assert_eq 30443 "$(reality_share_port)" "legacy link continues to use saved port"
+    assert_contains "$(<"$tmp/xray-config")" '20012 old-uuid' "Xray receives new local port"
+    assert_contains "$(<"$tmp/restarts")" xray "Xray restarted after local change"
 
-    REALITY_PORT=20001
     listener_ready=false
-    do_modify_config <<< $'1\n\n20012\n\n0\n' > "$tmp/output"
-    output=$(<"$tmp/output")
-    assert_eq 20001 "$REALITY_PORT" "Reality port restored when listener missing"
-    assert_eq 20001 "$REALITY_PUBLIC_PORT" "NAT mapping restored when listener missing"
-    assert_not_contains "$output" "配置已更新并重启" "missing listener must not be reported as success"
-    assert_contains "$output" "正在恢复旧配置" "missing listener rollback notice"
-    assert_contains "$(<"$tmp/xray-config")" '20001 old-uuid' "Xray config restored after listener failure"
-    assert_eq 20001 "$(tail -n1 "$tmp/saved")" "old params saved after listener failure"
-
-    : > "$tmp/restarts"
-    : > "$tmp/xray-config"
-    do_modify_config <<< $'1\n20015\n\n\n0\n' > "$tmp/output"
-    output=$(<"$tmp/output")
-    assert_eq 20015 "$REALITY_PUBLIC_PORT" "public-only NAT change saved"
-    assert_eq 20001 "$REALITY_PORT" "public-only NAT change preserves local port"
-    assert_eq 20015 "$(reality_share_port)" "public-only NAT link port updated"
-    assert_eq '' "$(<"$tmp/restarts")" "public-only NAT change does not restart services"
-    assert_eq '' "$(<"$tmp/xray-config")" "public-only NAT change does not rewrite Xray"
-    assert_contains "$output" '服务商面板映射及外部连接尚未验证' "public-only NAT change avoids external success claim"
-
-    do_modify_config <<< $'1\n20023\n\n0\n' > "$tmp/output"
-    output=$(<"$tmp/output")
-    assert_eq 20015 "$REALITY_PUBLIC_PORT" "conflicting NAT public port rejected"
-    assert_contains "$output" '端口检查未通过' "NAT public port conflict validation"
+    do_modify_config <<< $'1\n20018\n\n0\n' > "$tmp/output"
+    assert_eq 20012 "$REALITY_PORT" "failed listener check restores local port"
+    assert_eq 30443 "$REALITY_PUBLIC_PORT" "failed listener check preserves saved link port"
+    assert_contains "$(<"$tmp/output")" '正在恢复旧配置' "listener failure is reported"
+    assert_contains "$(<"$tmp/xray-config")" '20012 old-uuid' "Xray config restored after failure"
 
     listener_ready=true
-    do_modify_config <<< $'1\n20016\n20012\n\n0\n' > "$tmp/output"
-    assert_eq 20016 "$REALITY_PUBLIC_PORT" "both-port NAT change saves public port"
-    assert_eq 20012 "$REALITY_PORT" "both-port NAT change saves local listener"
-    assert_eq 20016 "$(reality_share_port)" "both-port NAT change updates client link"
-    assert_contains "$(<"$tmp/xray-config")" '20012 old-uuid' "both-port NAT change updates Xray listener"
-
-    do_modify_config <<< $'1\n20017\n20018\nr\n0\n' > "$tmp/output"
-    assert_eq 20016 "$REALITY_PUBLIC_PORT" "canceled NAT public port restored"
-    assert_eq 20012 "$REALITY_PORT" "canceled NAT local port restored"
+    do_modify_config <<< $'1\n20023\n0\n' > "$tmp/output"
+    assert_eq 20012 "$REALITY_PORT" "conflicting local port rejected"
+    assert_contains "$(<"$tmp/output")" '端口检查未通过' "local conflict validation"
+    do_modify_config <<< $'1\n20018\nr\n0\n' > "$tmp/output"
+    assert_eq 20012 "$REALITY_PORT" "canceled local port edit restored"
+    assert_eq 30443 "$REALITY_PUBLIC_PORT" "canceled edit preserves saved link port"
 )
 
 test_menu_choice_validation_and_cancel() (
@@ -2468,28 +2444,25 @@ test_hy2_local_port_lifecycle() (
     assert_contains "$GENERATED_HY2_LINKS" '@198.51.100.1:50117?' "reenabled link uses new local port"
 )
 
-test_nat_mapping_does_not_manage_hy2_port() (
-    local tmp changed=false links_only_changed=false
+test_local_port_settings_preserve_saved_links() (
+    local tmp changed=false ports_changed=false restart_singbox=false links_only_changed=false
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
-    NAT_MODE=true; PUBLIC_IPV4_OVERRIDE=198.51.100.1; PUBLIC_IPV4=198.51.100.1
-    REALITY_PORT=20001; REALITY_PUBLIC_PORT=20001
+    NAT_MODE=true; REALITY_PORT=20001; REALITY_PUBLIC_PORT=30443
     HY2_PORT=50112; HY2_ENABLED=true
-    SOCKS_PORT=20023; SOCKS_PUBLIC_PORT=20023; SOCKS_ENABLED=true
+    SOCKS_PORT=20023; SOCKS_PUBLIC_PORT=31080; SOCKS_ENABLED=false
     prompt_read() { printf '%s\n' "$2" >> "$tmp/prompts"; read -r "$1"; }
-    modify_nat_mapping <<< $'1\n\n30443\n31080\n' > /dev/null
-    assert_eq 50112 "$HY2_PORT" "NAT settings preserve local HY2 port"
-    assert_eq true "$HY2_ENABLED" "NAT settings preserve HY2 enabled state"
-    assert_eq 30443 "$REALITY_PUBLIC_PORT" "NAT settings retain Reality mapping"
-    assert_eq 31080 "$SOCKS_PUBLIC_PORT" "NAT settings retain SOCKS5 mapping"
-
-    detect_external_access_mode() { echo nat; }
-    prompt_nat_mapping_config <<< $'30444\n31081\n' > /dev/null
-    assert_eq 50112 "$HY2_PORT" "NAT install preserves local HY2 port"
-    assert_eq true "$HY2_ENABLED" "NAT install does not disable HY2"
-    assert_eq 30444 "$REALITY_PUBLIC_PORT" "NAT install retains Reality mapping"
-    assert_eq 31081 "$SOCKS_PUBLIC_PORT" "NAT install retains SOCKS5 mapping"
-    assert_not_contains "$(<"$tmp/prompts")" Hysteria2 "NAT install and settings do not prompt for HY2 public port"
+    modify_socks_enable <<< '20030' >/dev/null
+    assert_eq true "$SOCKS_ENABLED" "SOCKS enable uses local port"
+    assert_eq 20030 "$SOCKS_PORT" "SOCKS local port set"
+    assert_eq 31080 "$SOCKS_PUBLIC_PORT" "legacy SOCKS link port preserved"
+    assert_eq 31080 "$(socks_share_port)" "legacy SOCKS link stays compatible"
+    modify_socks_port <<< '20031' >/dev/null
+    assert_eq 20031 "$SOCKS_PORT" "SOCKS local port modified"
+    assert_eq 31080 "$SOCKS_PUBLIC_PORT" "local edit preserves legacy link port"
+    assert_eq 50112 "$HY2_PORT" "SOCKS edits preserve Hysteria2 local port"
+    assert_not_contains "$(<"$tmp/prompts")" '公网' "SOCKS settings do not ask for external ports"
+    assert_not_contains "$(<"$tmp/prompts")" '面板' "SOCKS settings do not mention panels"
 )
 
 test_modify_socks_cancel_restores_params() (
@@ -2504,8 +2477,8 @@ test_modify_socks_cancel_restores_params() (
     load_params() { :; }; prompt_read() { read -r "$1"; }
     validate_port() { :; }
 
-    # 启用 SOCKS5 时在 NAT 公网端口处中断：已输入的本机端口不得残留在内存参数中。
-    do_modify_config socks < <(printf '1\n20030\n') >/dev/null || true
+    # 输入 0 取消启用，不修改保存的监听端口。
+    do_modify_config socks < <(printf '1\n0\n0\n') >/dev/null || true
     assert_eq 20023 "$SOCKS_PORT" "canceled SOCKS5 enable restores local port"
     assert_eq 20023 "$SOCKS_PUBLIC_PORT" "canceled SOCKS5 enable restores public port"
     assert_eq false "$SOCKS_ENABLED" "canceled SOCKS5 enable keeps SOCKS5 disabled"
@@ -2536,7 +2509,7 @@ test_modify_outbound_ip_strategy() (
     fetch_public_ipv4() { printf '198.51.100.1'; }
     generate_and_show_links() { :; }; show_subscription_url() { :; }; verify_enabled_protocols() { :; }
 
-    do_modify_config network <<< $'4\n3\n0\n' > "$tmp/output"
+    do_modify_config network <<< $'3\n3\n0\n' > "$tmp/output"
     output=$(<"$tmp/output")
     assert_contains "$output" '出站 IP 优先级: 默认' "network menu shows current outbound strategy"
     assert_eq prefer_ipv6 "$OUTBOUND_IP_STRATEGY" "outbound strategy switched to prefer IPv6"
@@ -2546,19 +2519,19 @@ test_modify_outbound_ip_strategy() (
     assert_contains "$output" '配置已更新并重启' "outbound strategy change reports restart"
 
     : > "$tmp/restarts"
-    do_modify_config network <<< $'4\n3\n0\n' > "$tmp/output"
+    do_modify_config network <<< $'3\n3\n0\n' > "$tmp/output"
     assert_contains "$(<"$tmp/output")" '出站 IP 优先级未变化' "unchanged outbound strategy is a no-op"
     assert_eq '' "$(<"$tmp/restarts")" "unchanged outbound strategy does not restart"
 
     has_ipv6=false
-    do_modify_config network <<< $'4\n5\n0\n' > "$tmp/output"
+    do_modify_config network <<< $'3\n5\n0\n' > "$tmp/output"
     assert_contains "$(<"$tmp/output")" '未检测到 IPv6 出站，不能设为仅 IPv6' "IPv6-only requires IPv6 egress"
     assert_eq prefer_ipv6 "$OUTBOUND_IP_STRATEGY" "IPv6-only rejected without IPv6 egress"
     assert_eq '' "$(<"$tmp/restarts")" "rejected IPv6-only does not restart"
 
     has_ipv6=true
     singbox_ready=false
-    do_modify_config network <<< $'4\n4\n0\n' > "$tmp/output"
+    do_modify_config network <<< $'3\n4\n0\n' > "$tmp/output"
     output=$(<"$tmp/output")
     assert_contains "$output" '正在恢复旧配置' "failed restart rolls back outbound strategy"
     assert_eq prefer_ipv6 "$OUTBOUND_IP_STRATEGY" "outbound strategy restored after failed restart"
@@ -2630,10 +2603,7 @@ test_install_selected_services_and_failure() (
         esac
     }
     refresh_public_ip_stack() { IP_STACK_MODE=ipv4-only; PUBLIC_IP=198.51.100.1; }
-    prompt_nat_mapping_config() {
-        [[ "$ARGO_ENABLED" == true && "$SOCKS_ENABLED" == true ]] || fail "selection reached NAT too late"
-        echo nat >> "$tmp/events"
-    }
+    prompt_nat_mapping_config() { fail "installation must not request panel mapping"; }
     validate_service_ports() { :; }; confirm_port_selection() { return 0; }
     open_service_ports() {
         [[ "$SOCKS_ENABLED" == true ]] || fail "SOCKS missing at firewall"
@@ -2808,7 +2778,8 @@ test_modify_menu_categories() (
             fail "$category EOF accepted"
         fi
     done
-    assert_contains "$(<"$tmp/reality")" '公网 20001/TCP → 本机 20012/TCP' "NAT port pair in menu"
+    assert_contains "$(<"$tmp/reality")" '本机 20012/TCP' "Reality menu shows local port"
+    assert_not_contains "$(<"$tmp/network")" 'NAT' "network menu does not request mappings"
     assert_contains "$(<"$tmp/argo")" 'Argo 通过 Cloudflare 隧道连接，其他协议保持直连。' "Argo dependency explained"
     assert_contains "$(<"$tmp/argo")" '协议设置 / Argo 隧道' "Argo breadcrumb"
     assert_eq false "$ARGO_ENABLED" "viewing Argo settings does not enable the tunnel"
@@ -2835,8 +2806,8 @@ test_modify_menu_categories() (
         socks:1:modify_socks_enable socks:2:invalid \
         identity:1:modify_node_name identity:2:modify_uuid \
         argo:1:modify_argo_quick argo:2:modify_argo_fixed argo:3:invalid \
-        network:1:modify_nat_mapping network:2:modify_public_ipv4_override \
-        network:3:modify_link_ipv4_selection network:4:modify_outbound_ip_strategy
+        network:1:modify_public_ipv4_override network:2:modify_link_ipv4_selection \
+        network:3:modify_outbound_ip_strategy network:4:invalid
 
     HY2_ENABLED=true; SOCKS_ENABLED=true; SOCKS_USERNAME=user; ARGO_ENABLED=true; ARGO_TOKEN=""
     check_mappings \
@@ -3181,10 +3152,10 @@ test_enabled_protocols_verify_only_active_features
 test_subscription_payload_requires_matching_data
 test_reality_listener_validation
 test_bounded_service_restart
-test_modify_nat_reality_port_with_xray
+test_modify_legacy_reality_port_with_xray
 test_port_input_validation_and_cancel
 test_hy2_local_port_lifecycle
-test_nat_mapping_does_not_manage_hy2_port
+test_local_port_settings_preserve_saved_links
 test_modify_outbound_ip_strategy
 test_modify_socks_cancel_restores_params
 test_install_network_failure_selection

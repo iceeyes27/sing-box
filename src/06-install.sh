@@ -78,7 +78,7 @@ do_primary_install() {
 
     while true; do
         # Reality 默认使用随机高位 TCP 端口，降低标准 443 端口的无效扫描压力。
-        menu_header "安装节点 / 3. 端口与公网映射"
+        menu_header "安装节点 / 3. 本机监听端口"
         menu_section "Reality 本机监听"
         menu_item 1 "自动高位端口" "${auto_reality_port}/TCP · 推荐"
         menu_item 2 "使用 443/TCP"
@@ -108,8 +108,6 @@ do_primary_install() {
 
         reset_public_ip_cache
         refresh_public_ip_stack || true
-        prompt_nat_mapping_config || error "NAT 公网映射端口读取失败"
-
         if ! validate_service_ports "" "" "" false; then
             warn "端口检查失败，请调整端口后重试"
             continue
