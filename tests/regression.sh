@@ -1473,6 +1473,107 @@ test_quick_argo_domain_is_read_from_service_logs() {
     eval "$clear_cache_def"
 }
 
+test_quick_argo_domain_does_not_require_origin_root_response() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    ARGO_ENABLED=true; ARGO_TOKEN=""; ARGO_DOMAIN=old.trycloudflare.com
+    ARGO_BEST_CF_DOMAIN=old.example.com
+    curl() { printf '000'; return 28; }
+    if argo_quick_domain_alive ciao-fossil-remove-landscape.trycloudflare.com; then
+        fail "unreachable origin root unexpectedly passed the old probe"
+    fi
+    argo_quick_domain_alive() { fail "domain discovery tried to visit the origin root"; }
+    service_logs() {
+        assert_eq 'argo-tunnel 1000 current' "$*" "domain discovery requests current service logs"
+        cat <<'EOF'
+2026-11-18T13:34:06Z INF Requesting new quick Tunnel on trycloudflare.com...
+2026-11-18T13:34:10Z INF | Your quick Tunnel has been created! Visit it at (it may take some time to be reachable): |
+2026-11-18T13:34:10Z INF | https://ciao-fossil-remove-landscape.trycloudflare.com |
+2026-11-18T13:34:11Z INF Registered tunnel connection connIndex=0 protocol=http2
+EOF
+    }
+    fetch_argo_domain
+    assert_eq ciao-fossil-remove-landscape.trycloudflare.com "$ARGO_DOMAIN" "created domain survives root HTTP timeout"
+    assert_eq '' "$ARGO_BEST_CF_DOMAIN" "new domain clears old optimized address cache"
+)
+
+test_quick_argo_domain_waits_for_slow_creation() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    ARGO_ENABLED=true; ARGO_TOKEN=""; ARGO_DOMAIN=""
+    printf '0\n' > "$tmp/polls"
+    service_logs() {
+        local polls
+        polls=$(<"$tmp/polls")
+        polls=$((polls + 1))
+        printf '%s\n' "$polls" > "$tmp/polls"
+        if (( polls >= 20 )); then
+            echo 'INF | https://delayed.trycloudflare.com |'
+        else
+            echo 'INF Requesting new quick Tunnel on trycloudflare.com...'
+        fi
+    }
+    sleep() { :; }
+    fetch_argo_domain
+    assert_eq delayed.trycloudflare.com "$ARGO_DOMAIN" "creation can take longer than thirty seconds"
+    assert_eq 20 "$(<"$tmp/polls")" "polling stops once a domain is available"
+)
+
+test_quick_argo_domain_rejects_previous_startup_and_explains_failure() (
+    local tmp
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    ARGO_ENABLED=true; ARGO_TOKEN=""; ARGO_DOMAIN=old.trycloudflare.com
+    ARGO_BEST_CF_DOMAIN=keep.example.com
+    service_logs() {
+        cat <<'EOF'
+INF | https://old.trycloudflare.com |
+INF Requesting new quick Tunnel on trycloudflare.com...
+ERR failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp: lookup api.trycloudflare.com on 127.0.0.1:53: connection refused
+EOF
+    }
+    service_manager() { echo systemd; }
+    sleep() { :; }
+    if fetch_argo_domain > "$tmp/output"; then
+        fail "previous process's domain was accepted after a failed new request"
+    fi
+    assert_eq old.trycloudflare.com "$ARGO_DOMAIN" "discovery failure preserves saved domain"
+    assert_eq keep.example.com "$ARGO_BEST_CF_DOMAIN" "discovery failure preserves cached addresses"
+    assert_contains "$(<"$tmp/output")" 'DNS 解析错误' "DNS failure has an actionable explanation"
+    assert_contains "$(<"$tmp/output")" 'journalctl -u argo-tunnel' "failure includes the log command"
+    service_logs() { return 1; }
+    if fetch_argo_domain > "$tmp/output"; then fail "empty logs produced a domain"; fi
+    assert_contains "$(<"$tmp/output")" '日志为空或不可读' "empty logs are distinguished from connection failure"
+    service_logs() { echo 'ERR failed to request quick Tunnel: context deadline exceeded'; }
+    if fetch_argo_domain > "$tmp/output"; then fail "API failure produced a domain"; fi
+    assert_contains "$(<"$tmp/output")" 'api.trycloudflare.com:443' "API failure identifies the provisioning endpoint"
+)
+
+test_service_logs_can_filter_current_systemd_invocation() (
+    local tmp output
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    service_manager() { echo systemd; }
+    systemctl() {
+        assert_eq 'show argo-tunnel --property=InvocationID --value' "$*" "current invocation lookup"
+        echo 0123456789abcdef0123456789abcdef
+    }
+    journalctl() {
+        printf '%s\n' "$*" > "$tmp/args"
+        echo current-startup
+    }
+    output=$(service_logs argo-tunnel 1000 current)
+    assert_eq current-startup "$output" "current journal output is returned"
+    assert_contains "$(<"$tmp/args")" '_SYSTEMD_INVOCATION_ID=0123456789abcdef0123456789abcdef' "journal is scoped to the current process"
+    service_logs argo-tunnel 50 >/dev/null
+    assert_not_contains "$(<"$tmp/args")" '_SYSTEMD_INVOCATION_ID' "ordinary log viewing keeps history"
+    systemctl() { return 1; }
+    service_logs argo-tunnel 1000 current >/dev/null
+    assert_not_contains "$(<"$tmp/args")" '_SYSTEMD_INVOCATION_ID' "older systemd falls back to startup-marker filtering"
+)
+
 test_argo_probe_requires_websocket_101_and_requested_family() (
     local tmp result calls
     tmp=$(mktemp -d)
@@ -3203,6 +3304,10 @@ test_reality_sni_selection_works_without_asn_queries
 test_reality_sni_probe_requires_strict_tls_h2_and_remote_ip
 test_reality_sni_rejects_cloudflare_targets
 test_quick_argo_domain_is_read_from_service_logs
+test_quick_argo_domain_does_not_require_origin_root_response
+test_quick_argo_domain_waits_for_slow_creation
+test_quick_argo_domain_rejects_previous_startup_and_explains_failure
+test_service_logs_can_filter_current_systemd_invocation
 test_argo_probe_requires_websocket_101_and_requested_family
 test_argo_family_selection_never_crosses_family
 test_manager_command_rejects_empty_source

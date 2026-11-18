@@ -292,8 +292,20 @@ service_status() {
 service_logs() {
     local svc=$1
     local lines=${2:-50}
+    local invocation_id=""
     case "$(service_manager)" in
-        systemd) journalctl -u "$svc" --output cat --no-pager -n "$lines" 2>/dev/null ;;
+        systemd)
+            # 临时隧道重启后域名会变化；只读取当前进程的日志，避免沿用旧域名。
+            if [[ "${3:-}" == current ]]; then
+                invocation_id=$(systemctl show "$svc" --property=InvocationID --value 2>/dev/null) || true
+            fi
+            if [[ "$invocation_id" =~ ^[[:xdigit:]]{32}$ ]]; then
+                journalctl -u "$svc" "_SYSTEMD_INVOCATION_ID=${invocation_id}" \
+                    --output cat --no-pager -n "$lines" 2>/dev/null
+            else
+                journalctl -u "$svc" --output cat --no-pager -n "$lines" 2>/dev/null
+            fi
+            ;;
         openrc)
             if [[ -f "/var/log/${svc}.log" ]]; then
                 tail -n "$lines" "/var/log/${svc}.log"

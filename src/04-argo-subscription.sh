@@ -330,25 +330,56 @@ argo_quick_domain_alive() {
     esac
 }
 
+argo_quick_startup_hint() {
+    local logs="$1"
+    if [[ -z "$logs" ]]; then
+        warn "Argo 隧道日志为空或不可读，请检查服务是否启动及日志权限"
+    elif printf '%s\n' "$logs" | grep -Ei 'no such host|server misbehaving|DNS query failed|error looking up|lookup .*(:53|timeout|refused)' >/dev/null; then
+        warn "cloudflared 出现 DNS 解析错误，请检查系统 DNS 能否解析 api.trycloudflare.com 和 argotunnel.com 的 SRV 记录"
+    elif printf '%s\n' "$logs" | grep -Ei 'x509:|TLS handshake|tls: failed' >/dev/null; then
+        warn "cloudflared 出现 TLS 错误，请检查系统时间、CA 证书及 api.trycloudflare.com:443 的连通性"
+    elif printf '%s\n' "$logs" | grep -Ei '429|too many requests' >/dev/null; then
+        warn "Cloudflare 临时隧道申请被限流，请稍后重试，避免频繁重启隧道"
+    elif printf '%s\n' "$logs" | grep -Ei 'flag provided but not defined|unknown flag|Incorrect Usage' >/dev/null; then
+        warn "cloudflared 启动参数不受当前版本支持，请更新 cloudflared 后重试"
+    elif printf '%s\n' "$logs" | grep -Ei 'failed to request quick Tunnel|quick tunnel provisioning failed|failed to (unmarshal|read|parse) quick Tunnel' >/dev/null; then
+        warn "Cloudflare 临时隧道申请失败，请检查 api.trycloudflare.com:443 的出站连接及 Cloudflare 服务状态"
+    else
+        warn "cloudflared 尚未输出临时域名，请检查隧道启动日志"
+    fi
+    case "$(service_manager)" in
+        systemd) warn "查看日志: journalctl -u argo-tunnel -n 80 --no-pager" ;;
+        openrc) warn "查看日志: tail -n 80 /var/log/argo-tunnel.log" ;;
+    esac
+}
+
 fetch_argo_domain() {
-    local max=15 i=0 candidate="" previous_domain="${ARGO_DOMAIN:-}"
+    local max=30 i=0 candidate="" logs="" previous_domain="${ARGO_DOMAIN:-}"
 
     argo_quick_enabled || return 0
     ARGO_DOMAIN=""
     while (( i < max )); do
-        candidate=$(service_logs argo-tunnel 1000 2>/dev/null | \
+        # OpenRC 日志会跨重启追加；从最后一次申请开始读取，排除历史域名。
+        logs=$(service_logs argo-tunnel 1000 current 2>/dev/null | \
+            awk '/Requesting new quick Tunnel/ { logs = "" } { logs = logs $0 "\n" } END { printf "%s", logs }') || true
+        candidate=$(printf '%s\n' "$logs" | \
             grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' | \
-            tail -1 | sed 's|https://||')
-        if [[ -n "$candidate" ]] && argo_quick_domain_alive "$candidate"; then
+            grep -Ev '^https://(api|www)\.trycloudflare\.com$' | \
+            tail -1 | sed 's|https://||') || true
+        # 域名分配与公网可达是两个阶段。DNS/边缘尚未就绪或 VPS 无法回访
+        # 域名时仍可提取结果；后续 WebSocket 握手负责验证节点可用性。
+        if [[ -n "$candidate" ]] && is_valid_hostname "$candidate"; then
             ARGO_DOMAIN="$candidate"
             [[ "$ARGO_DOMAIN" == "$previous_domain" ]] || clear_argo_best_cf_cache
             return 0
         fi
         i=$((i + 1))
-        sleep 2
+        if (( i < max )); then sleep 2; fi
     done
 
     ARGO_DOMAIN="$previous_domain"
+    warn "等待 Argo 临时域名超时（约 60 秒）"
+    argo_quick_startup_hint "$logs"
     return 1
 }
 
@@ -399,10 +430,7 @@ refresh_argo_runtime() {
 
     if argo_quick_enabled; then
         sleep 3
-        if ! fetch_argo_domain; then
-            warn "未能从 cloudflared 日志取得 Argo 临时域名"
-            return 1
-        fi
+        fetch_argo_domain || return 1
     fi
 
     save_params

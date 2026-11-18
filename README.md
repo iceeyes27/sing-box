@@ -48,7 +48,7 @@ sbm
 
 **面板概览：**
 ```text
-  sing-box 管理面板  v3.4.1
+  sing-box 管理面板  v3.4.2
   ────────────────────────────────────────
   sing-box: ● 运行中    argo-tunnel: ● 运行中
 
@@ -155,6 +155,8 @@ sbm install
 脚本先检测网络类型并显示协议选择页：`1` 为 Argo，`2` 为 SOCKS5，`3` 为 Hysteria2；可输入 `1,3` 等组合多选，输入 `4` 仅安装 Reality，输入 `0` 取消安装。按 Enter 使用推荐组合（IPv4-only / 双栈为仅 Reality，IPv6-only 为 Reality + Argo）。随后配置所选协议的本机端口、Reality 伪装域名、节点名称，以及已选的 Argo 模式，并自动生成 UUID、Reality 密钥与订阅凭据。
 
 新安装仅由 sing-box 承载 Reality；旧配置中已部署的 Xray Reality 继续保留原有管理路径。临时 Argo 隧道遇到已有 `.cloudflared/config.yaml` 时会停止配置并提示冲突，不会改动该文件。
+
+临时 Argo 域名会在每次隧道重启后变化。脚本等待约 60 秒，从当前启动日志提取域名，再通过 WebSocket 握手验证节点；域名首页的 HTTPS 请求失败不会被误报为“日志中没有域名”。若申请超时，脚本会提示 DNS、TLS、API 或日志读取问题，并给出查看日志的命令。systemd 使用 `journalctl -u argo-tunnel -n 80 --no-pager`，OpenRC 使用 `tail -n 80 /var/log/argo-tunnel.log`。
 
 ### 步骤 3：查看链接
 
