@@ -14,6 +14,7 @@ generate_params() {
     REALITY_BACKEND="${REALITY_BACKEND:-singbox}"
     # 新安装先保持为空，由安装流程按连续握手结果选择；探测失败不回退默认 SNI。
     REALITY_SNI="${REALITY_SNI:-}"
+    REALITY_SNI_CUSTOM=""
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}

@@ -79,6 +79,12 @@ REALITY_SNI_LIST=(
     "www.oracle.com"
 )
 
+# 同网段邻居域名扫描是可选来源，仅在用户主动执行时访问以下第三方接口。
+REALITY_NEIGHBOR_PREFIX_API="https://stat.ripe.net/data/network-info/data.json?resource="
+REALITY_NEIGHBOR_CERTS_API="https://bgp.he.net/certs/api/ip-search?ip="
+REALITY_NEIGHBOR_MAX_CANDIDATES=40
+REALITY_NEIGHBOR_SERIAL_CANDIDATES=16
+
 # ─── 颜色 ─────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'

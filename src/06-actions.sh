@@ -236,9 +236,23 @@ write_xray_reality_sni() {
 }
 
 # ─── 重新优选 Reality 伪装域名 ───────────────────────────────
+# 无参数时从内置列表优选；参数 neighbor 改为扫描本机同网段的邻居域名。
 do_reoptimize_reality_sni() {
+    local selector="select_reality_sni" action="重新优选" title="优选伪装域名"
+    case "${1:-}" in
+        "") ;;
+        neighbor|--neighbor)
+            selector="select_reality_neighbor_sni"
+            action="扫描同网段邻居域名"
+            title="扫描同网段邻居域名"
+            ;;
+        *)
+            warn "未知参数: ${1}（可用: neighbor）"
+            return 1
+            ;;
+    esac
     engine_config_guard || return 1
-    menu_header "协议设置 / Reality / 优选伪装域名"
+    menu_header "协议设置 / Reality / ${title}"
     if ! load_params; then
         warn "未安装，无法重新优选 Reality 伪装域名"
         return 1
@@ -246,9 +260,10 @@ do_reoptimize_reality_sni() {
 
     local old_sni="${REALITY_SNI:-}"
     local prev_sni="${REALITY_SNI_PREV:-}"
+    local old_custom="${REALITY_SNI_CUSTOM:-}"
     local reality_service="sing-box"
     xray_managed_reality && reality_service="xray"
-    info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选（自动避开当前与上一次域名）..."
+    info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始${action}（自动避开当前与上一次域名）..."
 
     if ! ensure_reality_probe_dependencies; then
         warn "Reality 域名安全检查依赖不可用，已保留原配置"
@@ -262,8 +277,9 @@ do_reoptimize_reality_sni() {
     if [[ "$reality_service" == "xray" ]]; then
         REALITY_SNI_EXCLUDE+=" www.microsoft.com www.apple.com gateway.icloud.com itunes.apple.com"
     fi
-    if ! select_reality_sni; then
+    if ! "$selector"; then
         REALITY_SNI="$old_sni"
+        REALITY_SNI_CUSTOM="$old_custom"
         REALITY_SNI_EXCLUDE=""
         warn "未能优选到可用域名，已保留原伪装域名: ${old_sni:-未设置}"
         return 1
@@ -272,6 +288,7 @@ do_reoptimize_reality_sni() {
 
     if [[ -z "${REALITY_SNI:-}" ]]; then
         REALITY_SNI="$old_sni"
+        REALITY_SNI_CUSTOM="$old_custom"
         warn "未能优选到可用域名，已保留原伪装域名: ${old_sni:-未设置}"
         return 1
     fi
@@ -291,6 +308,7 @@ do_reoptimize_reality_sni() {
             warn "Xray Reality 配置更新失败，已保留原伪装域名: ${old_sni}"
             REALITY_SNI="$old_sni"
             REALITY_SNI_PREV="$prev_sni"
+            REALITY_SNI_CUSTOM="$old_custom"
             return 1
         fi
     else
@@ -299,6 +317,7 @@ do_reoptimize_reality_sni() {
         if ! write_singbox_service; then
             REALITY_SNI="$old_sni"
             REALITY_SNI_PREV="$prev_sni"
+            REALITY_SNI_CUSTOM="$old_custom"
             write_singbox_config
             warn "sing-box 服务文件更新失败，已恢复原伪装域名"
             return 1
@@ -310,6 +329,7 @@ do_reoptimize_reality_sni() {
         warn "${reality_service} 重启失败，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
         REALITY_SNI_PREV="$prev_sni"
+        REALITY_SNI_CUSTOM="$old_custom"
         if [[ "$reality_service" == "xray" ]]; then
             write_xray_reality_sni "$old_sni" 2>/dev/null || true
         else
@@ -325,6 +345,7 @@ do_reoptimize_reality_sni() {
         warn "${reality_service} 未成功启动，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
         REALITY_SNI_PREV="$prev_sni"
+        REALITY_SNI_CUSTOM="$old_custom"
         if [[ "$reality_service" == "xray" ]]; then
             write_xray_reality_sni "$old_sni" 2>/dev/null || true
         else
@@ -336,12 +357,19 @@ do_reoptimize_reality_sni() {
     fi
 
     success "Reality 伪装域名已更新为: ${REALITY_SNI}"
+    if [[ "$selector" == "select_reality_neighbor_sni" ]]; then
+        info "邻居站点不受本项目审核，可能随时下线或改版；失效时执行 sbm resni 可回到内置列表。"
+    fi
     ensure_subscription_service_if_enabled || warn "订阅服务启动失败"
     refresh_argo_domain_if_needed
     generate_and_show_links
     show_subscription_url
     engine_refresh_after_change || return 1
     return 0
+}
+
+do_scan_reality_neighbor_sni() {
+    do_reoptimize_reality_sni neighbor
 }
 
 # ─── 应用当前版本配置 (一键同步) ─────────────────────────────

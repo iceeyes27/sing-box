@@ -183,7 +183,7 @@ main() {
         start)       sbm_with_lock do_start ;;
         stop)        sbm_with_lock do_stop ;;
         restart)     sbm_with_lock do_restart ;;
-        resni|reality-sni) sbm_with_lock do_reoptimize_reality_sni ;;
+        resni|reality-sni) sbm_with_lock do_reoptimize_reality_sni "${2:-}" ;;
         apply|sync)  sbm_with_lock do_apply_latest ;;
         cfopt|refresh-cf|cfopt-auto) warn "CF 优选现已在 links/sub 命令中自动执行" ;;
         status)      do_status ;;
@@ -215,6 +215,7 @@ show_usage() {
             echo "  stop            停止服务"
             echo "  restart         重启服务"
             echo "  resni           重新优选 Reality 伪装域名(SNI)并重启生效"
+            echo "  resni neighbor  扫描同网段邻居域名作为 Reality 伪装域名（访问第三方接口）"
             echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
             echo "  status          查看状态"
             echo "  verify          对启用协议执行限时认证与流量测试"

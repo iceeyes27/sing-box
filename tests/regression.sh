@@ -1335,6 +1335,37 @@ test_reality_sni_probe_failure_is_fail_closed() (
     REALITY_SNI_LIST=("${old_sni_list[@]}")
 )
 
+test_reality_sni_probe_stops_when_two_successes_are_impossible() (
+    local tmp result calls outcomes
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    result="${tmp}/result"
+    calls="${tmp}/calls"
+    curl() {
+        local count
+        printf 'call\n' >> "$calls"
+        count=$(wc -l < "$calls" | tr -d '[:space:]')
+        [[ "${outcomes:count-1:1}" == "s" ]] || return 7
+        printf '2 0.050 95.169.9.215'
+    }
+    run_probe() {
+        outcomes="$1"
+        : > "$calls"
+        : > "$result"
+        probe_reality_sni_candidate 0 "portal.citygrainla.com" "$result" 1
+        wc -l < "$calls" | tr -d '[:space:]'
+    }
+
+    assert_eq "2" "$(run_probe fff)" "probe stops after two failed handshakes"
+    [[ ! -s "$result" ]] || fail "Reality SNI accepted after two failed handshakes"
+    assert_eq "3" "$(run_probe sff)" "probe keeps sampling while two successes are possible"
+    [[ ! -s "$result" ]] || fail "Reality SNI accepted with one successful handshake"
+    assert_eq "3" "$(run_probe fss)" "probe samples three times after one failure"
+    assert_contains "$(<"$result")" "0 2 50 50 portal.citygrainla.com" "one early failure still allows two of three"
+    assert_eq "3" "$(run_probe sss)" "healthy target is sampled three times"
+    assert_contains "$(<"$result")" "0 3 50 50 portal.citygrainla.com" "healthy target keeps all three samples"
+)
+
 test_reality_probe_dependencies_need_only_http2_curl() (
     local supports_h2=true
     command() {
@@ -1450,6 +1481,250 @@ test_reality_sni_rejects_cloudflare_targets() (
         probe_reality_sni_candidate 0 "www.nazhumi.com" "${tmp}/result" 1
         [[ ! -s "${tmp}/result" ]] || fail "Cloudflare remote IP passed Reality probe"
     done
+)
+
+test_ipv4_cidr_helpers() (
+    ipv4_in_cidr "203.0.113.9" "203.0.113.0/24" || fail "address inside /24 rejected"
+    ipv4_in_cidr "203.0.113.9" "203.0.112.0/20" || fail "address inside /20 rejected"
+    ipv4_in_cidr "203.0.113.9" "203.0.113.9/32" || fail "address inside /32 rejected"
+    if ipv4_in_cidr "203.0.128.1" "203.0.112.0/20"; then
+        fail "address outside /20 accepted"
+    fi
+    if ipv4_in_cidr "2606:4700::1" "203.0.112.0/20"; then
+        fail "IPv6 address accepted by IPv4 CIDR check"
+    fi
+    if ipv4_in_cidr "203.0.113.9" "203.0.113.0"; then
+        fail "CIDR without prefix length accepted"
+    fi
+    if ipv4_in_cidr "203.0.113.9" "203.0.113.0/33"; then
+        fail "CIDR with invalid prefix length accepted"
+    fi
+    assert_eq "203.0.113.0/24" "$(ipv4_network 203.0.113.9 24)" "/24 network of an address"
+    assert_eq "203.0.112.0/20" "$(ipv4_network 203.0.113.9 20)" "/20 network of an address"
+)
+
+test_reality_strict_probe_requires_http_200_and_network() (
+    local tmp result calls code
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    result="${tmp}/result"
+    calls="${tmp}/calls"
+    curl() {
+        printf '%s\n' "$*" >> "$calls"
+        printf '2 0.050 203.0.113.80 %s' "$code"
+    }
+
+    code=301
+    probe_reality_sni_candidate 0 "www.intel.com" "$result" 1
+    assert_contains "$(<"$result")" "0 3 50 50 www.intel.com 203.0.113.80" "listed Reality SNI may redirect"
+    : > "$result"
+    probe_reality_sni_candidate 0 "neighbor.example.com" "$result" 1 1
+    [[ ! -s "$result" ]] || fail "strict Reality probe accepted a redirect"
+
+    code=200
+    probe_reality_sni_candidate 0 "neighbor.example.com" "$result" 1 1
+    assert_contains "$(<"$result")" "0 3 50 50 neighbor.example.com 203.0.113.80" "strict Reality probe accepts HTTP 200"
+    assert_not_contains "$(<"$calls")" " -4 " "probe without networks keeps both address families"
+
+    : > "$result"
+    probe_reality_sni_candidate 0 "neighbor.example.com" "$result" 1 1 "198.51.100.0/24" ""
+    [[ ! -s "$result" ]] || fail "neighbor probe accepted an address outside the networks"
+    probe_reality_sni_candidate 0 "neighbor.example.com" "$result" 1 1 "198.51.100.0/24 203.0.113.0/24" "203.0.113.9 203.0.113.80"
+    [[ ! -s "$result" ]] || fail "neighbor probe accepted this server's own address"
+    : > "$calls"
+    probe_reality_sni_candidate 0 "neighbor.example.com" "$result" 1 1 "198.51.100.0/24 203.0.113.0/24" "203.0.113.9"
+    assert_contains "$(<"$result")" "0 3 50 50 neighbor.example.com 203.0.113.80" "neighbor probe accepts an in-network address"
+    assert_contains "$(<"$calls")" " -4 " "neighbor probe is IPv4-only"
+
+    : > "$calls"
+    curl() {
+        printf '%s\n' "$*" >> "$calls"
+        return 7
+    }
+    probe_reality_sni_candidate 0 "dead.example.com" "$result" 1 1
+    assert_eq "2" "$(wc -l < "$calls" | tr -d '[:space:]')" "probe stops once two successes are impossible"
+)
+
+test_reality_custom_sni_requires_strict_check() (
+    local code=301
+    REALITY_SNI="www.microsoft.com"
+    REALITY_SNI_CUSTOM=""
+    get_reality_probe_parallelism() { echo 1; }
+    curl() {
+        case "$*" in
+            --version) printf 'Features: HTTP2 SSL\n' ;;
+            *) printf '2 0.050 203.0.113.80 %s' "$code" ;;
+        esac
+    }
+
+    if adopt_reality_sni "neighbor.example.com"; then
+        fail "off-list Reality SNI accepted without HTTP 200"
+    fi
+    assert_eq "www.microsoft.com" "$REALITY_SNI" "rejected off-list SNI keeps the current SNI"
+    assert_eq "" "$REALITY_SNI_CUSTOM" "rejected off-list SNI is not recorded"
+    if reality_sni_is_approved "neighbor.example.com"; then
+        fail "rejected off-list SNI became approved"
+    fi
+    adopt_reality_sni "www.intel.com" || fail "listed Reality SNI rejected for a redirect"
+    assert_eq "www.intel.com" "$REALITY_SNI" "listed SNI adopted"
+    assert_eq "" "$REALITY_SNI_CUSTOM" "listed SNI does not occupy the custom slot"
+
+    code=200
+    adopt_reality_sni "neighbor.example.com" || fail "off-list Reality SNI with HTTP 200 rejected"
+    assert_eq "neighbor.example.com" "$REALITY_SNI" "off-list SNI adopted"
+    assert_eq "neighbor.example.com" "$REALITY_SNI_CUSTOM" "off-list SNI recorded"
+    reality_sni_is_approved "neighbor.example.com" || fail "recorded off-list SNI is not approved"
+    reality_sni_is_approved "www.microsoft.com" || fail "listed SNI lost approval"
+    if reality_sni_is_approved "other.example.com"; then
+        fail "a different off-list SNI is approved"
+    fi
+    reality_sni_runtime_usable "neighbor.example.com" || fail "recorded off-list SNI failed the runtime check"
+    code=302
+    if reality_sni_runtime_usable "neighbor.example.com"; then
+        fail "recorded off-list SNI passed the runtime check while redirecting"
+    fi
+
+    code=200
+    REALITY_SNI_CUSTOM=""
+    REALITY_SNI="preset.example.com"
+    select_reality_sni >/dev/null || fail "preset off-list SNI with HTTP 200 rejected"
+    assert_eq "preset.example.com" "$REALITY_SNI" "preset off-list SNI kept"
+    assert_eq "preset.example.com" "$REALITY_SNI_CUSTOM" "preset off-list SNI recorded"
+    code=503
+    REALITY_SNI_CUSTOM=""
+    REALITY_SNI="preset.example.com"
+    if select_reality_sni >/dev/null; then
+        fail "preset off-list SNI accepted without HTTP 200"
+    fi
+    assert_eq "" "$REALITY_SNI" "failed preset SNI is cleared"
+    assert_eq "" "$REALITY_SNI_CUSTOM" "failed preset SNI is not recorded"
+)
+
+test_runtime_param_restore_covers_custom_reality_sni() (
+    local -a params=()
+    local i
+    for i in $(seq 1 31); do
+        params+=("value-${i}")
+    done
+    REALITY_SNI_CUSTOM="new.example.com"
+    restore_runtime_params "${params[@]}" "old.example.com"
+    assert_eq "old.example.com" "$REALITY_SNI_CUSTOM" "restore custom Reality SNI"
+    restore_runtime_params "${params[@]}"
+    assert_eq "" "$REALITY_SNI_CUSTOM" "restore empty custom Reality SNI"
+    assert_contains " ${PARAM_KEYS[*]} " " REALITY_SNI_CUSTOM " "custom Reality SNI is persisted"
+)
+
+test_reality_neighbor_networks_follow_bgp_prefix() (
+    local prefix_reply='{"data":{"asns":["64500"],"prefix":"203.0.112.0/22"}}'
+    reality_neighbor_fetch() { printf '%s' "$prefix_reply"; }
+    assert_eq $'203.0.113.0/24\n203.0.112.0/22' "$(reality_neighbor_networks 203.0.113.9)" "BGP prefix between /20 and /24 is used as is"
+    prefix_reply='{"data": {"asns": ["64500"], "prefix": "203.0.0.0/16"}}'
+    assert_eq $'203.0.113.0/24\n203.0.112.0/20' "$(reality_neighbor_networks 203.0.113.9)" "large BGP prefix is narrowed to the local /20"
+    prefix_reply='{"data":{"prefix":"203.0.113.0/24"}}'
+    assert_eq "203.0.113.0/24" "$(reality_neighbor_networks 203.0.113.9)" "/24 BGP prefix is not repeated"
+    prefix_reply='{"data":{"prefix":"198.51.100.0/22"}}'
+    assert_eq "203.0.113.0/24" "$(reality_neighbor_networks 203.0.113.9)" "prefix that excludes this server is ignored"
+    reality_neighbor_fetch() { return 22; }
+    assert_eq "203.0.113.0/24" "$(reality_neighbor_networks 203.0.113.9)" "prefix lookup failure falls back to the local /24"
+)
+
+test_reality_neighbor_scan_selects_in_network_site() (
+    local tmp calls out
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    calls="${tmp}/calls"
+    out="${tmp}/out"
+    REALITY_SNI="www.microsoft.com"
+    REALITY_SNI_CUSTOM=""
+    REALITY_SNI_EXCLUDE="excluded.example.com"
+    PUBLIC_IPV4="203.0.113.9"
+    PUBLIC_IPV4_LIST="203.0.113.9"
+    refresh_public_ip_stack() { :; }
+    get_reality_probe_parallelism() { echo 1; }
+    curl() {
+        printf '%s\n' "$*" >> "$calls"
+        case "$*" in
+            --version) printf 'Features: HTTP2 SSL\n' ;;
+            *stat.ripe.net*) printf '{"data":{"asns":["64500"],"prefix":"203.0.112.0/20"}}' ;;
+            *bgp.he.net*203.0.113.0/24)
+                printf '{"entries":[{"hostnames":["*.fast.example.com","mail.example.com"],"ip":"203.0.113.20"},'
+                printf '{"hostnames":["203-0-113-30.nip.io","self.example.com","redirect.example.com"],"ip":"203.0.113.30"}]}'
+                ;;
+            *bgp.he.net*203.0.112.0/20)
+                printf '{"entries":[{"hostnames":["slow.example.net","cdn.example.com","moved.example.com",'
+                printf '"excluded.example.com","bad_name.example.com","fast.example.com"],"ip":"203.0.114.7"}]}'
+                ;;
+            *https://fast.example.com) printf '2 0.020 203.0.113.20 200' ;;
+            *https://slow.example.net) printf '2 0.040 203.0.114.7 200' ;;
+            *https://self.example.com) printf '2 0.001 203.0.113.9 200' ;;
+            *https://redirect.example.com) printf '2 0.005 203.0.113.30 301' ;;
+            *https://cdn.example.com) printf '2 0.005 104.16.10.20 200' ;;
+            *https://moved.example.com) printf '2 0.005 198.51.100.7 200' ;;
+            *) return 1 ;;
+        esac
+    }
+
+    select_reality_neighbor_sni > "$out" || fail "neighbor scan found no usable site"
+    assert_eq "fast.example.com" "$REALITY_SNI" "fastest in-network HTTP 200 neighbor"
+    assert_eq "fast.example.com" "$REALITY_SNI_CUSTOM" "neighbor SNI recorded as custom"
+    reality_sni_is_approved "fast.example.com" || fail "selected neighbor SNI is not approved"
+    assert_contains "$(<"$out")" "slow.example.net" "second usable neighbor is listed"
+    assert_not_contains "$(<"$out")" "self.example.com" "this server's own site is rejected"
+    assert_not_contains "$(<"$out")" "redirect.example.com" "redirecting neighbor is rejected"
+    assert_not_contains "$(<"$out")" "cdn.example.com" "Cloudflare-hosted neighbor is rejected"
+    assert_not_contains "$(<"$out")" "moved.example.com" "neighbor that moved out of the networks is rejected"
+    assert_not_contains "$(<"$calls")" "https://mail.example.com" "mail hostnames are not probed"
+    assert_not_contains "$(<"$calls")" "nip.io" "generated hostnames are not probed"
+    assert_not_contains "$(<"$calls")" "bad_name" "invalid hostnames are not probed"
+    assert_not_contains "$(<"$calls")" "https://excluded.example.com" "excluded SNI is not probed"
+    assert_eq "3" "$(grep -c 'https://fast.example.com$' "$calls")" "duplicate hostnames are probed once"
+
+    REALITY_SNI_CUSTOM="keep.example.com"
+    curl() {
+        case "$*" in
+            --version) printf 'Features: HTTP2 SSL\n' ;;
+            *) return 7 ;;
+        esac
+    }
+    if select_reality_neighbor_sni >/dev/null; then
+        fail "neighbor scan succeeded while third-party lookups were down"
+    fi
+    assert_eq "" "$REALITY_SNI" "failed neighbor scan selects nothing"
+    assert_eq "keep.example.com" "$REALITY_SNI_CUSTOM" "failed neighbor scan keeps the recorded custom SNI"
+
+    PUBLIC_IPV4=""
+    PUBLIC_IPV4_LIST=""
+    if select_reality_neighbor_sni >/dev/null; then
+        fail "neighbor scan ran without a public IPv4"
+    fi
+)
+
+test_resni_neighbor_failure_keeps_current_domain() (
+    engine_config_guard() { :; }
+    load_params() { :; }
+    xray_managed_reality() { return 1; }
+    ensure_reality_probe_dependencies() { :; }
+    select_reality_sni() { fail "neighbor mode used the built-in list"; }
+    select_reality_neighbor_sni() {
+        REALITY_SNI=""
+        REALITY_SNI_CUSTOM="half.example.com"
+        return 1
+    }
+    save_params() { fail "failed neighbor scan saved params"; }
+    service_restart() { fail "failed neighbor scan restarted a service"; }
+    REALITY_SNI="current.example.com"
+    REALITY_SNI_CUSTOM="current.example.com"
+    REALITY_SNI_PREV=""
+
+    if do_reoptimize_reality_sni neighbor >/dev/null; then
+        fail "failed neighbor scan reported success"
+    fi
+    assert_eq "current.example.com" "$REALITY_SNI" "failed neighbor scan keeps the current SNI"
+    assert_eq "current.example.com" "$REALITY_SNI_CUSTOM" "failed neighbor scan restores the custom SNI"
+    if do_reoptimize_reality_sni bogus >/dev/null; then
+        fail "unknown resni argument accepted"
+    fi
+    assert_eq "current.example.com" "$REALITY_SNI" "unknown resni argument changes nothing"
 )
 
 test_quick_argo_domain_is_read_from_service_logs() {
@@ -2901,8 +3176,8 @@ test_modify_menu_categories() (
         done
     }
     check_mappings \
-        reality:1:modify_reality_port reality:2:do_reoptimize_reality_sni reality:3:modify_reality_sni \
-        reality:4:modify_single_port_mode reality:5:modify_reality_keypair \
+        reality:1:modify_reality_port reality:2:do_reoptimize_reality_sni reality:3:do_scan_reality_neighbor_sni \
+        reality:4:modify_reality_sni reality:5:modify_single_port_mode reality:6:modify_reality_keypair \
         hy2:1:modify_hy2_enabled hy2:2:modify_hy2_port hy2:3:invalid \
         socks:1:modify_socks_enable socks:2:invalid \
         identity:1:modify_node_name identity:2:modify_uuid \
@@ -3299,10 +3574,18 @@ test_low_cpu_uses_low_priority_runner
 test_alpine_cloudflared_prefers_apk
 test_alpine_cloudflared_falls_back_to_binary
 test_reality_sni_probe_failure_is_fail_closed
+test_reality_sni_probe_stops_when_two_successes_are_impossible
 test_reality_probe_dependencies_need_only_http2_curl
 test_reality_sni_selection_works_without_asn_queries
 test_reality_sni_probe_requires_strict_tls_h2_and_remote_ip
 test_reality_sni_rejects_cloudflare_targets
+test_ipv4_cidr_helpers
+test_reality_strict_probe_requires_http_200_and_network
+test_reality_custom_sni_requires_strict_check
+test_runtime_param_restore_covers_custom_reality_sni
+test_reality_neighbor_networks_follow_bgp_prefix
+test_reality_neighbor_scan_selects_in_network_site
+test_resni_neighbor_failure_keeps_current_domain
 test_quick_argo_domain_is_read_from_service_logs
 test_quick_argo_domain_does_not_require_origin_root_response
 test_quick_argo_domain_waits_for_slow_creation

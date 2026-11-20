@@ -20,10 +20,11 @@ render_modify_reality() {
     menu_section "连接设置"
     menu_action 1 modify_reality_port "修改端口" "疑似端口被封时更换"
     menu_action 2 do_reoptimize_reality_sni "重新优选伪装域名" "连接不稳定时优先尝试"
-    menu_action 3 modify_reality_sni "手动指定伪装域名"
-    menu_action 4 modify_single_port_mode "切换为单端口模式 (443)"
+    menu_action 3 do_scan_reality_neighbor_sni "扫描同网段邻居域名" "需访问 stat.ripe.net / bgp.he.net"
+    menu_action 4 modify_reality_sni "手动指定伪装域名" "列表外域名须直接返回 HTTP 200"
+    menu_action 5 modify_single_port_mode "切换为单端口模式 (443)"
     menu_section "凭据"
-    menu_action 5 modify_reality_keypair "重新生成密钥对" "客户端需重新导入"
+    menu_action 6 modify_reality_keypair "重新生成密钥对" "客户端需重新导入"
 }
 
 render_modify_hy2() {
@@ -152,13 +153,14 @@ modify_reality_sni() {
         warn "Reality 域名安全检查依赖不可用，未修改配置"
         return 1
     fi
-    if reality_sni_runtime_usable "$input"; then
-        REALITY_SNI="$input"
+    if adopt_reality_sni "$input"; then
         changed=true
         restart_singbox=true
         restart_reality_backend=true
-    else
+    elif reality_sni_is_listed "$input"; then
         warn "该域名未通过 Reality 运行时检查，未修改配置"
+    else
+        warn "列表外域名须支持 TLS 1.3 + HTTP/2、直接返回 HTTP 200 且不在 Cloudflare 地址上；该域名未通过检查，未修改配置"
     fi
 }
 
@@ -611,6 +613,7 @@ do_modify_config() {
         local old_socks_enabled="${SOCKS_ENABLED:-false}"
         local old_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
         local old_outbound_ip_strategy="${OUTBOUND_IP_STRATEGY:-default}"
+        local old_reality_sni_custom="${REALITY_SNI_CUSTOM:-}"
         local old_hy2_active_port="" old_socks_active_port=""
         [[ "$old_hy2_enabled" == "true" ]] && old_hy2_active_port="$old_hy2_port"
         [[ "$old_socks_enabled" == "true" ]] && old_socks_active_port="$old_socks_port"
@@ -623,13 +626,13 @@ do_modify_config() {
             "$old_link_ipv4_selection" "$old_public_ipv4_override" "$old_nat_mode"
             "$old_reality_public_port" "$old_argo_enabled" "$old_hy2_enabled"
             "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
-            "$old_outbound_ip_strategy"
+            "$old_outbound_ip_strategy" "$old_reality_sni_custom"
         )
         case "$selected_action" in
             0) return ;;
             # 以下两项自行写配置、重启并展示链接，不经过快照恢复与 apply_modified_config。
-            do_reoptimize_reality_sni)
-                do_reoptimize_reality_sni || true
+            do_reoptimize_reality_sni|do_scan_reality_neighbor_sni)
+                "$selected_action" || true
                 engine_refresh_after_change || warn "受管版本验证未完成"
                 sbm_lock_release
                 press_enter

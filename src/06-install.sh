@@ -125,10 +125,8 @@ do_primary_install() {
     prompt_read input "  Reality 伪装域名 [${REALITY_SNI}]: "
     if [[ -n "$input" ]]; then
         ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖不可用，安装已停止"
-        if reality_sni_runtime_usable "$input"; then
-            REALITY_SNI="$input"
-        else
-            warn "该域名未通过 Reality 运行时检查，保留自动优选域名: ${REALITY_SNI}"
+        if ! adopt_reality_sni "$input"; then
+            warn "该域名未通过 Reality 运行时检查（列表外域名还须直接返回 HTTP 200），保留自动优选域名: ${REALITY_SNI}"
         fi
     fi
 

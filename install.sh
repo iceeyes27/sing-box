@@ -131,6 +131,12 @@ REALITY_SNI_LIST=(
     "www.oracle.com"
 )
 
+# 同网段邻居域名扫描是可选来源，仅在用户主动执行时访问以下第三方接口。
+REALITY_NEIGHBOR_PREFIX_API="https://stat.ripe.net/data/network-info/data.json?resource="
+REALITY_NEIGHBOR_CERTS_API="https://bgp.he.net/certs/api/ip-search?ip="
+REALITY_NEIGHBOR_MAX_CANDIDATES=40
+REALITY_NEIGHBOR_SERIAL_CANDIDATES=16
+
 # ─── 颜色 ─────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -669,6 +675,31 @@ is_private_ipv4() {
     return 1
 }
 
+ipv4_to_int() {
+    local a b c d
+    IFS=. read -r a b c d <<< "$1"
+    echo $(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+}
+
+ipv4_in_cidr() {
+    local ip="${1:-}" cidr="${2:-}" bits mask
+    [[ "$cidr" == */* ]] || return 1
+    bits="${cidr#*/}"
+    is_valid_ipv4 "$ip" || return 1
+    is_valid_ipv4 "${cidr%/*}" || return 1
+    [[ "$bits" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$bits >= 1 && 10#$bits <= 32 )) || return 1
+    mask=$(( (0xFFFFFFFF << (32 - 10#$bits)) & 0xFFFFFFFF ))
+    (( ($(ipv4_to_int "$ip") & mask) == ($(ipv4_to_int "${cidr%/*}") & mask) ))
+}
+
+# 输出 $1 所在、前缀长度为 $2 的网段，例如 203.0.113.9 24 → 203.0.113.0/24。
+ipv4_network() {
+    local bits="$2" value
+    value=$(( $(ipv4_to_int "$1") & (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+    printf '%d.%d.%d.%d/%d\n' $(( value >> 24 )) $(( (value >> 16) & 255 )) $(( (value >> 8) & 255 )) $(( value & 255 )) "$bits"
+}
+
 is_valid_public_ipv4_for_link() {
     local ip="$1" first_octet
 
@@ -956,7 +987,7 @@ link_ipv4_selection_label() {
 }
 # ─── 参数持久化 ──────────────────────────────────────────────
 PARAM_KEYS=(
-    UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV REALITY_BACKEND WS_PORT WS_PATH NODE_NAME
+    UUID SHORT_ID PRIVATE_KEY PUBLIC_KEY REALITY_PORT REALITY_SNI REALITY_SNI_PREV REALITY_SNI_CUSTOM REALITY_BACKEND WS_PORT WS_PATH NODE_NAME
     SUB_TOKEN SUBSCRIPTION_PORT ARGO_ENABLED ARGO_DOMAIN ARGO_TOKEN ARGO_BEST_CF_DOMAIN
     ARGO_BEST_CF_DOMAIN_IPV4 ARGO_BEST_CF_DOMAIN_IPV6 ARGO_CF_CACHE_DOMAIN ARGO_CF_CACHE_VERSION
     LINK_IPV4_SELECTION PUBLIC_IPV4_OVERRIDE
@@ -1290,6 +1321,7 @@ restore_runtime_params() {
     SOCKS_ENABLED="${29:-false}"
     SOCKS_PUBLIC_PORT="${30:-${SOCKS_PORT}}"
     OUTBOUND_IP_STRATEGY="${31:-default}"
+    REALITY_SNI_CUSTOM="${32:-}"
     reset_public_ip_cache
 }
 # 活动内核只读解析；结构化服务/状态检查由内嵌 Python 标准库实现。
@@ -3759,6 +3791,7 @@ generate_params() {
     REALITY_BACKEND="${REALITY_BACKEND:-singbox}"
     # 新安装先保持为空，由安装流程按连续握手结果选择；探测失败不回退默认 SNI。
     REALITY_SNI="${REALITY_SNI:-}"
+    REALITY_SNI_CUSTOM=""
     WS_PORT=8080
     WS_PATH="/${SHORT_ID}"
     NODE_NAME=${NODE_NAME:-"sing-box-vps"}
@@ -5170,13 +5203,21 @@ reality_curl_supports_h2() {
     curl --version 2>/dev/null | grep -qiw HTTP2
 }
 
-reality_sni_is_approved() {
+reality_sni_is_listed() {
     local requested="${1:-}" candidate
     is_valid_hostname "$requested" || return 1
     for candidate in "${REALITY_SNI_LIST[@]}"; do
         [[ "$requested" == "$candidate" ]] && return 0
     done
     return 1
+}
+
+# 内置列表之外只认 REALITY_SNI_CUSTOM：用户手动指定或邻居扫描选出、且已通过严格检查的那一个域名。
+reality_sni_is_approved() {
+    local requested="${1:-}"
+    is_valid_hostname "$requested" || return 1
+    [[ -n "${REALITY_SNI_CUSTOM:-}" && "$requested" == "$REALITY_SNI_CUSTOM" ]] && return 0
+    reality_sni_is_listed "$requested"
 }
 
 is_cloudflare_address() {
@@ -5205,21 +5246,27 @@ is_cloudflare_address() {
     esac
 }
 
+# 参数 5 strict=1 时还要求直接返回 HTTP 200，用于内置列表之外的域名。
+# 参数 6 networks 非空时只走 IPv4，连接地址必须落在这些网段内且不在参数 7 own_ips 中，用于邻居扫描。
 probe_reality_sni_candidate() {
-    local idx="$1" sni="$2" result_file="$3" require_h2="${4:-1}"
-    local out http_ver appconnect remote_ip ms
+    local idx="$1" sni="$2" result_file="$3" require_h2="${4:-1}" strict="${5:-0}"
+    local networks="${6:-}" own_ips="${7:-}"
+    local out http_ver appconnect remote_ip http_code ms attempt network in_network last_ip=""
     local success_count=0 total_ms=0 max_ms=0 attempts=3
     # 用 HEAD(-I) 探测：仅取响应头即可拿到协议版本与握手耗时，不下载正文，
     # 对低带宽 / 低配 VPS 更省流量和时间(h2/ALPN 是连接级，与请求方法无关)。
     local curl_opts=(-I --tlsv1.3 --connect-timeout 2 --max-time 4)
     # 仅当本机 curl 支持 h2 时才协商 h2，否则该 flag 会让 curl 直接报错。
     (( require_h2 )) && curl_opts+=(--http2)
+    [[ -n "$networks" ]] && curl_opts+=(-4)
 
-    for _ in $(seq 1 "$attempts"); do
+    for attempt in $(seq 1 "$attempts"); do
+        # 剩余取样已凑不够两次成功时提前结束，不再等待无效目标超时。
+        (( success_count + attempts - attempt + 1 >= 2 )) || break
         # 连续取样，优先选择成功率高且平均/最大握手延迟低的目标。
-        out=$(curl --noproxy '*' -o /dev/null -s -w '%{http_version} %{time_appconnect} %{remote_ip}' \
+        out=$(curl --noproxy '*' -o /dev/null -s -w '%{http_version} %{time_appconnect} %{remote_ip} %{http_code}' \
             "${curl_opts[@]}" "https://${sni}" 2>/dev/null) || continue
-        read -r http_ver appconnect remote_ip <<< "$out"
+        read -r http_ver appconnect remote_ip http_code <<< "$out"
 
         if (( require_h2 )) && [[ "$http_ver" != "2" ]]; then
             continue
@@ -5227,36 +5274,93 @@ probe_reality_sni_candidate() {
         [[ "$appconnect" =~ ^[0-9]+([.][0-9]+)?$ ]] || continue
         [[ -n "$remote_ip" ]] || continue
         is_cloudflare_address "$remote_ip" && continue
+        if (( strict )) && [[ "$http_code" != "200" ]]; then
+            continue
+        fi
+        if [[ -n "$networks" ]]; then
+            [[ " $own_ips " == *" $remote_ip "* ]] && continue
+            in_network=0
+            for network in $networks; do
+                if ipv4_in_cidr "$remote_ip" "$network"; then
+                    in_network=1
+                    break
+                fi
+            done
+            (( in_network )) || continue
+        fi
         ms=$(awk -v t="$appconnect" 'BEGIN {printf "%d", t * 1000}' 2>/dev/null || echo 0)
         [[ "$ms" =~ ^[0-9]+$ && "$ms" -gt 0 && "$ms" -lt 9999 ]] || continue
         success_count=$((success_count + 1))
         total_ms=$((total_ms + ms))
+        last_ip="$remote_ip"
         if (( ms > max_ms )); then
             max_ms=$ms
         fi
     done
 
     (( success_count >= 2 )) || return 0
-    echo "$idx $success_count $((total_ms / success_count)) $max_ms $sni" >> "$result_file"
+    echo "$idx $success_count $((total_ms / success_count)) $max_ms $sni $last_ip" >> "$result_file"
     return 0
 }
 
+# 按本机并发上限探测一批域名；调用方负责在 set +e 区间内调用。
+# 参数依次为结果文件、strict、networks、own_ips，其后是域名列表。
+run_reality_sni_probes() {
+    local result_file="$1" strict="$2" networks="$3" own_ips="$4"
+    shift 4
+    local probe_parallelism idx=0 active_jobs=0 sni
+    probe_parallelism=$(get_reality_probe_parallelism)
+
+    # 并发数为 1 时直接前台串行探测，避免在受限机器上 fork 后台任务。
+    for sni in "$@"; do
+        if (( probe_parallelism <= 1 )); then
+            probe_reality_sni_candidate "$idx" "$sni" "$result_file" 1 "$strict" "$networks" "$own_ips"
+        else
+            probe_reality_sni_candidate "$idx" "$sni" "$result_file" 1 "$strict" "$networks" "$own_ips" &
+            active_jobs=$((active_jobs + 1))
+            if (( active_jobs >= probe_parallelism )); then
+                wait
+                active_jobs=0
+            fi
+        fi
+        idx=$((idx + 1))
+    done
+    wait 2>/dev/null
+}
+
 reality_sni_runtime_usable() {
-    local sni="$1" tmp
+    local sni="$1" tmp strict=0
     reality_sni_is_approved "$sni" || return 1
+    reality_sni_is_listed "$sni" || strict=1
     ensure_reality_probe_dependencies || return 1
     tmp=$(mktemp) || return 1
-    probe_reality_sni_candidate 0 "$sni" "$tmp" 1
+    probe_reality_sni_candidate 0 "$sni" "$tmp" 1 "$strict"
     local result=1
     [[ -s "$tmp" ]] && result=0
     rm -f "$tmp"
     return "$result"
 }
 
+# 采用用户指定的域名：内置列表内按常规检查；列表外须通过严格检查，通过后记入 REALITY_SNI_CUSTOM。
+adopt_reality_sni() {
+    local sni="${1:-}"
+    if reality_sni_is_listed "$sni"; then
+        reality_sni_runtime_usable "$sni" || return 1
+    else
+        REALITY_SNI_CUSTOM="$sni" reality_sni_runtime_usable "$sni" || return 1
+        REALITY_SNI_CUSTOM="$sni"
+    fi
+    REALITY_SNI="$sni"
+}
+
 select_reality_sni() {
     if [[ -n "${REALITY_SNI:-}" ]]; then
         if ! reality_sni_is_approved "$REALITY_SNI"; then
-            warn "Reality 伪装域名不在审核列表中: $REALITY_SNI"
+            if adopt_reality_sni "$REALITY_SNI"; then
+                info "当前已设定列表外域名并通过严格检查 (TLS1.3 + HTTP/2 + HTTP 200，非 Cloudflare 地址): $REALITY_SNI"
+                return 0
+            fi
+            warn "Reality 伪装域名不在审核列表中，且未通过列表外域名的严格检查: $REALITY_SNI"
             REALITY_SNI=""
             return 1
         fi
@@ -5292,22 +5396,7 @@ select_reality_sni() {
     set +e
 
     # 仅保留通过 TLS1.3 + h2 能力门槛的域名，再按握手延迟择优。
-    # 并发数为 1 时直接前台串行探测，避免在受限机器上 fork 后台任务。
-    local active_jobs=0
-    for idx in "${!REALITY_SNI_LIST[@]}"; do
-        local sni="${REALITY_SNI_LIST[$idx]}"
-        if (( probe_parallelism <= 1 )); then
-            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" 1
-        else
-            probe_reality_sni_candidate "$idx" "$sni" "${tmp_dir}/results.txt" 1 &
-            active_jobs=$((active_jobs + 1))
-            if (( active_jobs >= probe_parallelism )); then
-                wait
-                active_jobs=0
-            fi
-        fi
-    done
-    wait 2>/dev/null
+    run_reality_sni_probes "${tmp_dir}/results.txt" 0 "" "" "${REALITY_SNI_LIST[@]}"
 
     # 需要排除的域名（重新优选时排除当前/上一次，确保结果不同）；
     # 两端补空格便于按整词匹配。常规安装时该变量为空，不影响行为。
@@ -5385,6 +5474,119 @@ verify_or_reselect_reality_sni() {
     service_restart sing-box 2>/dev/null || true
     warn "新的 SNI 未通过完整验证，已恢复原 SNI: ${old_sni}"
     return 1
+}
+
+# ─── Reality 同网段邻居域名 ──────────────────────────────────
+# 可选来源：只有用户主动执行邻居扫描时才访问 stat.ripe.net 与 bgp.he.net，
+# 安装和常规重新优选不依赖这些接口。
+reality_neighbor_fetch() {
+    curl -fsS --connect-timeout 5 --max-time 15 "$1" 2>/dev/null
+}
+
+# 输出用于检索和归属校验的网段：本机 /24，以及本机所在 BGP 前缀（短于 /20 时收敛到本机 /20）。
+reality_neighbor_networks() {
+    local ip="$1" body prefix bits
+    ipv4_network "$ip" 24
+    body=$(reality_neighbor_fetch "${REALITY_NEIGHBOR_PREFIX_API}${ip}") || return 0
+    prefix=$(printf '%s' "$body" | tr -d ' \n\r\t' | grep -oE '"prefix":"[0-9.]+/[0-9]+"' | cut -d'"' -f4 | head -n 1) || return 0
+    ipv4_in_cidr "$ip" "$prefix" || return 0
+    bits="${prefix#*/}"
+    (( bits < 24 )) || return 0
+    (( bits >= 20 )) || bits=20
+    ipv4_network "$ip" "$bits"
+}
+
+# 输出各网段证书透明度记录中的主机名，每行一个；单个网段查询失败时跳过。
+reality_neighbor_hostnames() {
+    local network body
+    for network in "$@"; do
+        body=$(reality_neighbor_fetch "${REALITY_NEIGHBOR_CERTS_API}${network}") || continue
+        printf '%s' "$body" | tr -d ' \n\r\t' | grep -oE '"hostnames":\[[^]]*\]' \
+            | sed 's/^"hostnames"://' | tr -d '[]"' | tr ',' '\n' || true
+    done
+}
+
+# 从标准输入读取主机名，剔除自动生成、动态解析和邮件/面板类主机名，
+# 按不含数字、com/net/org 优先、层级少、长度短的顺序输出。
+reality_neighbor_rank() {
+    awk '
+        {
+            host = tolower($0)
+            sub(/^\*\./, "", host)
+            if (host !~ /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.[a-z][a-z]+$/) next
+            if (host ~ /[0-9]+[-.][0-9]+[-.][0-9]+/) next
+            if (host ~ /(^|\.)(mail|smtp|pop|pop3|imap|mx|mx[0-9]+|ns[0-9]+|webmail|cpanel|whm|autodiscover|autoconfig)\./) next
+            if (host ~ /(^|\.)(nip\.io|sslip\.io|xip\.io|duckdns\.org|dpdns\.org|ddns\.net|no-ip\.org|localhost|local|arpa)$/) next
+            if (seen[host]++) next
+            n = split(host, parts, ".")
+            rank = 3
+            if (parts[n] == "com") rank = 0
+            else if (parts[n] == "net") rank = 1
+            else if (parts[n] == "org") rank = 2
+            if (host ~ /[0-9]/) rank += 4
+            printf "%d %d %d %s\n", rank, n, length(host), host
+        }
+    ' | sort -k1,1n -k2,2n -k3,3n -k4,4 | awk '{ print $4 }'
+}
+
+# 扫描本机公网 IPv4 所在网段的证书域名，选出连接地址在同网段、直接返回 HTTP 200 的站点。
+# 成功时设置 REALITY_SNI 并记入 REALITY_SNI_CUSTOM；失败时清空 REALITY_SNI，不改动 REALITY_SNI_CUSTOM。
+select_reality_neighbor_sni() {
+    local ip own_ips sni network tmp_dir top max="$REALITY_NEIGHBOR_MAX_CANDIDATES"
+    local best_success best_time best_max best_sni
+    local -a networks=() candidates=()
+
+    REALITY_SNI=""
+    ensure_reality_probe_dependencies || return 1
+    refresh_public_ip_stack || true
+    ip="${PUBLIC_IPV4:-}"
+    if ! is_valid_public_ipv4_for_link "$ip"; then
+        warn "未检测到公网 IPv4，无法扫描同网段邻居域名"
+        return 1
+    fi
+    own_ips=$(printf '%s\n%s\n' "$ip" "${PUBLIC_IPV4_LIST:-}" | tr '\n' ' ')
+
+    info "正在查询 ${ip} 所在网段，并从证书透明度记录检索同网段域名 (stat.ripe.net / bgp.he.net)..."
+    mapfile -t networks < <(reality_neighbor_networks "$ip")
+    (( $(get_reality_probe_parallelism) > 1 )) || max="$REALITY_NEIGHBOR_SERIAL_CANDIDATES"
+    # 先取本机 /24 的域名，不足时再用更大的网段补齐。
+    for network in "${networks[@]}"; do
+        while IFS= read -r sni; do
+            (( ${#candidates[@]} < max )) || break
+            if is_valid_hostname "$sni" && [[ " ${REALITY_SNI_EXCLUDE:-} ${candidates[*]} " != *" $sni "* ]]; then
+                candidates+=("$sni")
+            fi
+        done < <(reality_neighbor_hostnames "$network" | reality_neighbor_rank)
+    done
+    if (( ${#candidates[@]} == 0 )); then
+        warn "未检索到同网段候选域名：第三方接口不可用，或该网段没有合适的站点"
+        return 1
+    fi
+    info "正在实测 ${#candidates[@]} 个同网段候选域名 (要求 TLS1.3 + HTTP/2 + HTTP 200，连接地址位于 ${networks[*]} 且不是本机)"
+
+    if ! tmp_dir=$(mktemp -d); then
+        warn "创建临时目录失败，未选择 Reality 域名"
+        return 1
+    fi
+    local errexit_was_set=0
+    [[ $- == *e* ]] && errexit_was_set=1
+    set +e
+    run_reality_sni_probes "${tmp_dir}/results.txt" 1 "${networks[*]}" "$own_ips" "${candidates[@]}"
+    top=""
+    # 成功次数优先，其次平均延迟、最大延迟和候选顺序。
+    [[ -f "${tmp_dir}/results.txt" ]] && top=$(sort -k2,2nr -k3,3n -k4,4n -k1,1n "${tmp_dir}/results.txt" | awk 'NR <= 5')
+    (( errexit_was_set )) && set -e
+    rm -rf "$tmp_dir"
+
+    if [[ -z "$top" ]]; then
+        warn "同网段候选域名均未通过检查，未选择邻居域名"
+        return 1
+    fi
+    echo "$top" | awk '{ printf "  %d) %s  %s  %s/3  平均 %sms\n", NR, $5, $6, $2, $3 }'
+    read -r _ best_success best_time best_max best_sni _ <<< "$top"
+    REALITY_SNI="$best_sni"
+    reality_sni_is_listed "$best_sni" || REALITY_SNI_CUSTOM="$best_sni"
+    success "已选择同网段邻居域名: ${REALITY_SNI} (${best_success}/3，平均 ${best_time}ms，最大 ${best_max}ms)"
 }
 
 # ─── URL 编码 ────────────────────────────────────────────────
@@ -6265,10 +6467,8 @@ do_primary_install() {
     prompt_read input "  Reality 伪装域名 [${REALITY_SNI}]: "
     if [[ -n "$input" ]]; then
         ensure_reality_probe_dependencies || error "Reality 域名安全检查依赖不可用，安装已停止"
-        if reality_sni_runtime_usable "$input"; then
-            REALITY_SNI="$input"
-        else
-            warn "该域名未通过 Reality 运行时检查，保留自动优选域名: ${REALITY_SNI}"
+        if ! adopt_reality_sni "$input"; then
+            warn "该域名未通过 Reality 运行时检查（列表外域名还须直接返回 HTTP 200），保留自动优选域名: ${REALITY_SNI}"
         fi
     fi
 
@@ -6386,10 +6586,11 @@ render_modify_reality() {
     menu_section "连接设置"
     menu_action 1 modify_reality_port "修改端口" "疑似端口被封时更换"
     menu_action 2 do_reoptimize_reality_sni "重新优选伪装域名" "连接不稳定时优先尝试"
-    menu_action 3 modify_reality_sni "手动指定伪装域名"
-    menu_action 4 modify_single_port_mode "切换为单端口模式 (443)"
+    menu_action 3 do_scan_reality_neighbor_sni "扫描同网段邻居域名" "需访问 stat.ripe.net / bgp.he.net"
+    menu_action 4 modify_reality_sni "手动指定伪装域名" "列表外域名须直接返回 HTTP 200"
+    menu_action 5 modify_single_port_mode "切换为单端口模式 (443)"
     menu_section "凭据"
-    menu_action 5 modify_reality_keypair "重新生成密钥对" "客户端需重新导入"
+    menu_action 6 modify_reality_keypair "重新生成密钥对" "客户端需重新导入"
 }
 
 render_modify_hy2() {
@@ -6518,13 +6719,14 @@ modify_reality_sni() {
         warn "Reality 域名安全检查依赖不可用，未修改配置"
         return 1
     fi
-    if reality_sni_runtime_usable "$input"; then
-        REALITY_SNI="$input"
+    if adopt_reality_sni "$input"; then
         changed=true
         restart_singbox=true
         restart_reality_backend=true
-    else
+    elif reality_sni_is_listed "$input"; then
         warn "该域名未通过 Reality 运行时检查，未修改配置"
+    else
+        warn "列表外域名须支持 TLS 1.3 + HTTP/2、直接返回 HTTP 200 且不在 Cloudflare 地址上；该域名未通过检查，未修改配置"
     fi
 }
 
@@ -6977,6 +7179,7 @@ do_modify_config() {
         local old_socks_enabled="${SOCKS_ENABLED:-false}"
         local old_socks_public_port="${SOCKS_PUBLIC_PORT:-${SOCKS_PORT}}"
         local old_outbound_ip_strategy="${OUTBOUND_IP_STRATEGY:-default}"
+        local old_reality_sni_custom="${REALITY_SNI_CUSTOM:-}"
         local old_hy2_active_port="" old_socks_active_port=""
         [[ "$old_hy2_enabled" == "true" ]] && old_hy2_active_port="$old_hy2_port"
         [[ "$old_socks_enabled" == "true" ]] && old_socks_active_port="$old_socks_port"
@@ -6989,13 +7192,13 @@ do_modify_config() {
             "$old_link_ipv4_selection" "$old_public_ipv4_override" "$old_nat_mode"
             "$old_reality_public_port" "$old_argo_enabled" "$old_hy2_enabled"
             "$old_socks_port" "$old_socks_username" "$old_socks_password" "$old_socks_enabled" "$old_socks_public_port"
-            "$old_outbound_ip_strategy"
+            "$old_outbound_ip_strategy" "$old_reality_sni_custom"
         )
         case "$selected_action" in
             0) return ;;
             # 以下两项自行写配置、重启并展示链接，不经过快照恢复与 apply_modified_config。
-            do_reoptimize_reality_sni)
-                do_reoptimize_reality_sni || true
+            do_reoptimize_reality_sni|do_scan_reality_neighbor_sni)
+                "$selected_action" || true
                 engine_refresh_after_change || warn "受管版本验证未完成"
                 sbm_lock_release
                 press_enter
@@ -7263,9 +7466,23 @@ write_xray_reality_sni() {
 }
 
 # ─── 重新优选 Reality 伪装域名 ───────────────────────────────
+# 无参数时从内置列表优选；参数 neighbor 改为扫描本机同网段的邻居域名。
 do_reoptimize_reality_sni() {
+    local selector="select_reality_sni" action="重新优选" title="优选伪装域名"
+    case "${1:-}" in
+        "") ;;
+        neighbor|--neighbor)
+            selector="select_reality_neighbor_sni"
+            action="扫描同网段邻居域名"
+            title="扫描同网段邻居域名"
+            ;;
+        *)
+            warn "未知参数: ${1}（可用: neighbor）"
+            return 1
+            ;;
+    esac
     engine_config_guard || return 1
-    menu_header "协议设置 / Reality / 优选伪装域名"
+    menu_header "协议设置 / Reality / ${title}"
     if ! load_params; then
         warn "未安装，无法重新优选 Reality 伪装域名"
         return 1
@@ -7273,9 +7490,10 @@ do_reoptimize_reality_sni() {
 
     local old_sni="${REALITY_SNI:-}"
     local prev_sni="${REALITY_SNI_PREV:-}"
+    local old_custom="${REALITY_SNI_CUSTOM:-}"
     local reality_service="sing-box"
     xray_managed_reality && reality_service="xray"
-    info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始重新优选（自动避开当前与上一次域名）..."
+    info "当前 Reality 伪装域名: ${old_sni:-未设置}，开始${action}（自动避开当前与上一次域名）..."
 
     if ! ensure_reality_probe_dependencies; then
         warn "Reality 域名安全检查依赖不可用，已保留原配置"
@@ -7289,8 +7507,9 @@ do_reoptimize_reality_sni() {
     if [[ "$reality_service" == "xray" ]]; then
         REALITY_SNI_EXCLUDE+=" www.microsoft.com www.apple.com gateway.icloud.com itunes.apple.com"
     fi
-    if ! select_reality_sni; then
+    if ! "$selector"; then
         REALITY_SNI="$old_sni"
+        REALITY_SNI_CUSTOM="$old_custom"
         REALITY_SNI_EXCLUDE=""
         warn "未能优选到可用域名，已保留原伪装域名: ${old_sni:-未设置}"
         return 1
@@ -7299,6 +7518,7 @@ do_reoptimize_reality_sni() {
 
     if [[ -z "${REALITY_SNI:-}" ]]; then
         REALITY_SNI="$old_sni"
+        REALITY_SNI_CUSTOM="$old_custom"
         warn "未能优选到可用域名，已保留原伪装域名: ${old_sni:-未设置}"
         return 1
     fi
@@ -7318,6 +7538,7 @@ do_reoptimize_reality_sni() {
             warn "Xray Reality 配置更新失败，已保留原伪装域名: ${old_sni}"
             REALITY_SNI="$old_sni"
             REALITY_SNI_PREV="$prev_sni"
+            REALITY_SNI_CUSTOM="$old_custom"
             return 1
         fi
     else
@@ -7326,6 +7547,7 @@ do_reoptimize_reality_sni() {
         if ! write_singbox_service; then
             REALITY_SNI="$old_sni"
             REALITY_SNI_PREV="$prev_sni"
+            REALITY_SNI_CUSTOM="$old_custom"
             write_singbox_config
             warn "sing-box 服务文件更新失败，已恢复原伪装域名"
             return 1
@@ -7337,6 +7559,7 @@ do_reoptimize_reality_sni() {
         warn "${reality_service} 重启失败，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
         REALITY_SNI_PREV="$prev_sni"
+        REALITY_SNI_CUSTOM="$old_custom"
         if [[ "$reality_service" == "xray" ]]; then
             write_xray_reality_sni "$old_sni" 2>/dev/null || true
         else
@@ -7352,6 +7575,7 @@ do_reoptimize_reality_sni() {
         warn "${reality_service} 未成功启动，正在回滚到原伪装域名: ${old_sni}"
         REALITY_SNI="$old_sni"
         REALITY_SNI_PREV="$prev_sni"
+        REALITY_SNI_CUSTOM="$old_custom"
         if [[ "$reality_service" == "xray" ]]; then
             write_xray_reality_sni "$old_sni" 2>/dev/null || true
         else
@@ -7363,12 +7587,19 @@ do_reoptimize_reality_sni() {
     fi
 
     success "Reality 伪装域名已更新为: ${REALITY_SNI}"
+    if [[ "$selector" == "select_reality_neighbor_sni" ]]; then
+        info "邻居站点不受本项目审核，可能随时下线或改版；失效时执行 sbm resni 可回到内置列表。"
+    fi
     ensure_subscription_service_if_enabled || warn "订阅服务启动失败"
     refresh_argo_domain_if_needed
     generate_and_show_links
     show_subscription_url
     engine_refresh_after_change || return 1
     return 0
+}
+
+do_scan_reality_neighbor_sni() {
+    do_reoptimize_reality_sni neighbor
 }
 
 # ─── 应用当前版本配置 (一键同步) ─────────────────────────────
@@ -7800,7 +8031,7 @@ main() {
         start)       sbm_with_lock do_start ;;
         stop)        sbm_with_lock do_stop ;;
         restart)     sbm_with_lock do_restart ;;
-        resni|reality-sni) sbm_with_lock do_reoptimize_reality_sni ;;
+        resni|reality-sni) sbm_with_lock do_reoptimize_reality_sni "${2:-}" ;;
         apply|sync)  sbm_with_lock do_apply_latest ;;
         cfopt|refresh-cf|cfopt-auto) warn "CF 优选现已在 links/sub 命令中自动执行" ;;
         status)      do_status ;;
@@ -7832,6 +8063,7 @@ show_usage() {
             echo "  stop            停止服务"
             echo "  restart         重启服务"
             echo "  resni           重新优选 Reality 伪装域名(SNI)并重启生效"
+            echo "  resni neighbor  扫描同网段邻居域名作为 Reality 伪装域名（访问第三方接口）"
             echo "  apply           按当前版本模板重写配置并重启 (升级后一键同步)"
             echo "  status          查看状态"
             echo "  verify          对启用协议执行限时认证与流量测试"

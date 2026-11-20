@@ -23,6 +23,31 @@ is_private_ipv4() {
     return 1
 }
 
+ipv4_to_int() {
+    local a b c d
+    IFS=. read -r a b c d <<< "$1"
+    echo $(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+}
+
+ipv4_in_cidr() {
+    local ip="${1:-}" cidr="${2:-}" bits mask
+    [[ "$cidr" == */* ]] || return 1
+    bits="${cidr#*/}"
+    is_valid_ipv4 "$ip" || return 1
+    is_valid_ipv4 "${cidr%/*}" || return 1
+    [[ "$bits" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$bits >= 1 && 10#$bits <= 32 )) || return 1
+    mask=$(( (0xFFFFFFFF << (32 - 10#$bits)) & 0xFFFFFFFF ))
+    (( ($(ipv4_to_int "$ip") & mask) == ($(ipv4_to_int "${cidr%/*}") & mask) ))
+}
+
+# 输出 $1 所在、前缀长度为 $2 的网段，例如 203.0.113.9 24 → 203.0.113.0/24。
+ipv4_network() {
+    local bits="$2" value
+    value=$(( $(ipv4_to_int "$1") & (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+    printf '%d.%d.%d.%d/%d\n' $(( value >> 24 )) $(( (value >> 16) & 255 )) $(( (value >> 8) & 255 )) $(( value & 255 )) "$bits"
+}
+
 is_valid_public_ipv4_for_link() {
     local ip="$1" first_octet
 
